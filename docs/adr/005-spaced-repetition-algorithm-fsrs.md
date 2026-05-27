@@ -19,6 +19,7 @@ Because pergamon is local-first and solo-developed, the chosen algorithm must al
 pergamon will adopt FSRS (Free Spaced Repetition Scheduler) as its spaced repetition algorithm instead of SM-2.
 
 FSRS logic will live in `pergamon-core` as pure computation. Each highlight under review tracking will store FSRS-related state including:
+
 - `stability`
 - `difficulty`
 - `elapsed_days`
@@ -28,6 +29,7 @@ FSRS logic will live in `pergamon-core` as pure computation. Each highlight unde
 - `state` (`new`, `learning`, `review`, `relearning`)
 
 Review actions presented to the user will be:
+
 - Again
 - Hard
 - Good
@@ -38,6 +40,7 @@ Review actions presented to the user will be:
 ## Consequences
 
 ### Positive
+
 - Provides a more modern scheduling model than SM-2.
 - Can achieve better retention with fewer reviews over time.
 - Fits cleanly into a pure, testable core computation layer.
@@ -45,6 +48,7 @@ Review actions presented to the user will be:
 - Gives pergamon a serious learning workflow rather than a superficial reminder system.
 
 ### Negative
+
 - More complex to understand and implement than SM-2.
 - Requires more state per highlight than simpler schedulers.
 - Parameter tuning and migration strategy may add later complexity.

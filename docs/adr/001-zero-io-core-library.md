@@ -19,6 +19,7 @@ The main domain responsibilities that belong in pergamon-core are stable and com
 pergamon-core will be a zero-I/O library. It will contain only domain logic and pure computation. It will not depend on reqwest, rusqlite, filesystem APIs, platform SDKs, or any crate that introduces networking, storage, or platform-bound behavior.
 
 pergamon-core will own:
+
 - domain models
 - content state machine
 - spaced repetition engine
@@ -27,6 +28,7 @@ pergamon-core will own:
 - search and filtering logic
 
 All I/O will live outside the core:
+
 - HTTP fetching in pergamon-cli via reqwest
 - SQLite persistence in pergamon-storage via rusqlite
 - feed parsing in pergamon-feed
@@ -37,6 +39,7 @@ Core APIs will accept and return plain Rust data structures and errors suitable 
 ## Consequences
 
 ### Positive
+
 - Enables WASM compilation and future browser reuse.
 - Makes core behavior easy to unit test with pure functions and fixtures.
 - Preserves clean platform boundaries for CLI, iOS, and future web clients.
@@ -44,6 +47,7 @@ Core APIs will accept and return plain Rust data structures and errors suitable 
 - Keeps pergamon consistent with ldgr-core, tock-core, and toku-core patterns.
 
 ### Negative
+
 - Requires more translation code between integration crates and core models.
 - Some convenience is lost because network or storage helpers cannot be called directly from domain code.
 - More crate boundaries mean more API design work up front.

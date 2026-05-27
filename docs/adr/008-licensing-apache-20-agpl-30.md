@@ -15,6 +15,7 @@ The architecture also includes strict crate boundaries. Mixing server-only code 
 ## Decision
 
 pergamon will adopt a split licensing model:
+
 - Apache-2.0 for all client-side crates and applications, including `pergamon-core`, `pergamon-cli`, `pergamon-storage`, `pergamon-feed`, `pergamon-extract`, `pergamon-import`, `pergamon-export`, and the Obsidian plugin
 - AGPL-3.0 for `pergamon-server`, the Axum-based sync server
 
@@ -25,6 +26,7 @@ A structural rule accompanies the licensing decision: server code must not be mo
 ## Consequences
 
 ### Positive
+
 - Encourages broad reuse of client libraries and tools.
 - Provides a patent grant and consistency with related kafkade projects.
 - Protects the sync server from closed hosted-service appropriation.
@@ -32,6 +34,7 @@ A structural rule accompanies the licensing decision: server code must not be mo
 - Supports future community contributions without forcing all clients under copyleft.
 
 ### Negative
+
 - Dual licensing across a monorepo requires clear documentation and discipline.
 - Some potential adopters may avoid AGPL components entirely.
 - Contributors must understand which crate falls under which license.

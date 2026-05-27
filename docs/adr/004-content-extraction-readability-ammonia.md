@@ -17,12 +17,14 @@ pergamon needs a practical extraction stack that works now, stays within Rust, a
 ## Decision
 
 pergamon will implement content extraction in a dedicated `pergamon-extract` crate using:
+
 - a Rust readability implementation (`readability` or `readability-rs`) for main-article extraction
 - `ammonia` for HTML sanitization
 - `scraper` for metadata extraction from Open Graph tags, Twitter Cards, and JSON-LD
 - `lopdf` for PDF text-layer extraction
 
 The extraction flow will be:
+
 1. `pergamon-cli` fetches article bytes over HTTP.
 2. Raw bytes are passed to `pergamon-extract`.
 3. Readability extracts the primary article content.
@@ -34,6 +36,7 @@ The extraction flow will be:
 ## Consequences
 
 ### Positive
+
 - Produces a durable local representation suitable for search, TUI reading, and Obsidian export.
 - Reduces noise and unsafe markup while preserving readable structure.
 - Captures metadata from common web conventions without bespoke parsers per site.
@@ -41,6 +44,7 @@ The extraction flow will be:
 - Provides a pragmatic fallback when full extraction is not possible.
 
 ### Negative
+
 - Readability quality varies across sites and may require tuning or fallback heuristics.
 - Sanitization can occasionally remove formatting users expected to keep.
 - Metadata sources may disagree, requiring precedence rules.

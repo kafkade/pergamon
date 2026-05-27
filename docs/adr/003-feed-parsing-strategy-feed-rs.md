@@ -19,6 +19,7 @@ pergamon needs one parser API that can accept bytes from the CLI, normalize the 
 pergamon will standardize feed parsing on the `feed-rs` crate.
 
 `feed-rs` will live in the `pergamon-feed` crate, not `pergamon-core`. This keeps external format handling outside the pure domain layer, while still allowing pergamon-cli to remain the only crate that performs HTTP. The flow will be:
+
 1. `pergamon-cli` fetches raw bytes with reqwest.
 2. Raw bytes are passed to `pergamon-feed`.
 3. `pergamon-feed` uses `feed-rs` to parse and normalize the feed.
@@ -29,6 +30,7 @@ This approach supports RSS 2.0, Atom 1.0, and JSON Feed through a unified parsin
 ## Consequences
 
 ### Positive
+
 - Supports RSS, Atom, and JSON Feed through a single library and API.
 - Reduces glue code and model conversion complexity.
 - Improves resilience against real-world feed inconsistencies and encoding issues.
@@ -36,6 +38,7 @@ This approach supports RSS 2.0, Atom 1.0, and JSON Feed through a unified parsin
 - Makes future feed-related features easier to add in one integration crate.
 
 ### Negative
+
 - Adds a dependency whose parser behavior pergamon does not fully control.
 - Normalization performed by `feed-rs` may hide some source-specific details unless explicitly preserved.
 - If upstream maintenance quality changes, pergamon may need to adapt or fork.

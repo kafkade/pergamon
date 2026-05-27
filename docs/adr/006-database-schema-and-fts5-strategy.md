@@ -19,6 +19,7 @@ pergamon also needs predictable SQLite capabilities across platforms, especially
 pergamon will use SQLite via `rusqlite` with bundled SQLite enabled to guarantee FTS5 support across platforms.
 
 The database will:
+
 - store structured application data in relational tables
 - use an FTS5 virtual table indexing `title`, `author`, `content_text`, and `tags`
 - store full article and extracted text in SQLite `TEXT` columns rather than separate files
@@ -28,6 +29,7 @@ This choice prioritizes single-file portability, simpler backup, and first-class
 Binary assets such as images and favicons will use content-addressed filesystem storage, following the pattern used by toku for covers.
 
 Schema migrations will use `refinery` with embedded SQL and will auto-run on startup. Database locations will follow platform conventions:
+
 - Linux: XDG data directory
 - macOS: `~/Library/Application Support/pergamon/`
 - Windows: `%APPDATA%\pergamon\`
@@ -35,6 +37,7 @@ Schema migrations will use `refinery` with embedded SQL and will auto-run on sta
 ## Consequences
 
 ### Positive
+
 - Delivers strong local full-text search through FTS5.
 - Keeps text content, metadata, and indexes in one portable database file.
 - Simplifies backup, restore, export, and sync packaging.
@@ -42,6 +45,7 @@ Schema migrations will use `refinery` with embedded SQL and will auto-run on sta
 - Embedded migrations support reproducible schema evolution.
 
 ### Negative
+
 - Full-text storage increases database size materially.
 - Vacuuming and migration operations may take longer on large libraries.
 - Storing large text blobs in SQLite may make some inspection tasks less convenient than raw files.

@@ -19,6 +19,7 @@ The system also relies on SQLite FTS5. A unified search experience is easier to 
 pergamon will use a unified content model centered on a single `content_items` table with a `content_type` discriminator column.
 
 Supported initial content types are:
+
 - `feed_item`
 - `article`
 - `bookmark`
@@ -27,6 +28,7 @@ Supported initial content types are:
 - `podcast_episode`
 
 The shared table will include common fields such as:
+
 - `id`
 - `url`
 - `title`
@@ -37,6 +39,7 @@ The shared table will include common fields such as:
 - `tags`
 
 Type-specific attributes will live in extension tables such as:
+
 - `feed_item_meta`
 - `bookmark_meta`
 - `highlight_meta`
@@ -46,6 +49,7 @@ The unified table will be the primary anchor for tagging, collections, search, d
 ## Consequences
 
 ### Positive
+
 - Enables one cross-type search experience and a single FTS5 indexing strategy.
 - Simplifies tagging and collections because all content shares one primary identity.
 - Makes deduplication across feeds, bookmarks, and articles more reliable.
@@ -53,6 +57,7 @@ The unified table will be the primary anchor for tagging, collections, search, d
 - Makes future types easier to add without redesigning the whole model.
 
 ### Negative
+
 - Requires discipline around nullable fields and type-specific validation.
 - Some queries need joins to extension tables for specialized metadata.
 - Incorrect use of the discriminator could lead to inconsistent rows if constraints are weak.

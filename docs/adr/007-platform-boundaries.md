@@ -19,6 +19,7 @@ The architecture therefore needs named crates, clear responsibilities, and a rul
 pergamon will use the following crate and platform structure:
 
 Rust crates:
+
 - `pergamon-core` for pure domain logic
 - `pergamon-storage` for SQLite persistence
 - `pergamon-feed` for feed parsing
@@ -28,6 +29,7 @@ Rust crates:
 - `pergamon-cli` as the binary entry point and orchestration layer
 
 Other platforms:
+
 - TypeScript in `apps/obsidian-plugin/` for the Obsidian plugin
 - Swift via UniFFI for a future iOS app
 - Web via WASM or Axum-rendered UI is explicitly deferred to a later ADR
@@ -37,6 +39,7 @@ Architectural rule: `pergamon-cli` is the only crate that performs HTTP. Feed fe
 ## Consequences
 
 ### Positive
+
 - Creates explicit ownership for domain, storage, parsing, extraction, and UI orchestration.
 - Prevents duplicated networking logic across crates.
 - Keeps Rust core logic reusable by CLI, TUI, iOS, and future web surfaces.
@@ -44,6 +47,7 @@ Architectural rule: `pergamon-cli` is the only crate that performs HTTP. Feed fe
 - Supports clearer licensing boundaries, especially around future server code.
 
 ### Negative
+
 - Requires explicit orchestration code in `pergamon-cli` to connect all crates.
 - Some developers may find the “only CLI does HTTP” rule stricter than necessary.
 - Future non-CLI clients may need dedicated orchestration layers that mirror CLI behavior.
