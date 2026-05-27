@@ -1,0 +1,93 @@
+name: Bug Report
+description: Report a bug in pergamon
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug! Please fill out the form below to help us investigate.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which part of pergamon is affected?
+      options:
+        - CLI tool
+        - TUI reader
+        - Feed parsing
+        - Article extraction
+        - Bookmark management
+        - Search
+        - Import/Export
+        - Obsidian plugin
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: App version or commit hash (`pergamon --version` for CLI)
+      placeholder: "0.1.0 or abc1234"
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS
+        - Linux
+        - Windows
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: domain
+    attributes:
+      label: Which domain is affected?
+      description: Which content domain does this bug relate to?
+      options:
+        - Feed management (RSS/Atom)
+        - Article extraction / reader mode
+        - Bookmark management
+        - Highlights / annotations
+        - Spaced repetition / review
+        - Full-text search
+        - Import / export
+        - Obsidian integration
+        - Not sure
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the bug. What did you observe?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: How can we reproduce this behavior?
+      placeholder: |
+        1. Run `pergamon ...`
+        2. ...
+        3. See error
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen?
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: Paste any relevant logs or error messages
+      render: shell
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Any other information that might help
