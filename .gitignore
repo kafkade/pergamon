@@ -1,0 +1,48 @@
+# Build artifacts
+/target/
+**/*.rs.bk
+
+# Database files
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.classpath
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Node (Obsidian plugin)
+node_modules/
+dist/
+
+# Terraform / OpenTofu (if any local IaC experiments)
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfvars
+
+# Coverage / profiling
+*.profraw
+lcov.info
+tarpaulin-report.html
+
+# Package manager locks (committed intentionally when present)
+# Cargo.lock is committed for binaries, gitignored for libraries
