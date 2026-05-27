@@ -1,0 +1,63 @@
+name: Feature Request
+description: Suggest a new feature or improvement
+title: "[Feature]: "
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting a feature! Please describe your idea below.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Is this related to a problem?
+      description: A clear description of the problem this would solve
+      placeholder: "I'm frustrated when..."
+  - type: textarea
+    id: solution
+    attributes:
+      label: Describe the feature
+      description: A clear description of what you'd like to happen
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Describe any alternatives you've considered
+  - type: dropdown
+    id: domain
+    attributes:
+      label: Which domain does this relate to?
+      description: Which content domain(s) would this affect?
+      options:
+        - Feed management (RSS/Atom/OPML)
+        - Article extraction / reader mode
+        - Bookmark management / collections
+        - Highlights / annotations
+        - Spaced repetition / review
+        - Full-text search
+        - Import / export
+        - Obsidian integration
+        - CLI / TUI interface
+        - Configuration & settings
+        - Documentation
+        - Not sure
+  - type: dropdown
+    id: phase
+    attributes:
+      label: Which roadmap phase does this relate to?
+      description: See docs/roadmap.md for phase details
+      options:
+        - "Phase 0: First Feed (foundation)"
+        - "Phase 1: Minimum Usable Reader (MVP)"
+        - "Phase 2: Bookmark Manager"
+        - "Phase 3: Knowledge Retention"
+        - "Phase 4: Obsidian & Polish"
+        - "Phase 5+: Sync, iOS, Web"
+        - "Not sure"
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Any other information, mockups, or screenshots
