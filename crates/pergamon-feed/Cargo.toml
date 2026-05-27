@@ -1,0 +1,17 @@
+[package]
+name = "pergamon-feed"
+description = "RSS/Atom/JSON Feed parsing, OPML import/export, and feed discovery for pergamon."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+pergamon-core = { workspace = true }
+thiserror = { workspace = true }

@@ -1,0 +1,22 @@
+[package]
+name = "pergamon-cli"
+description = "Command-line interface for pergamon — unified personal information system."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "pergamon"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+pergamon-core = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
