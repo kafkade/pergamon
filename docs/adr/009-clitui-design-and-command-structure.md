@@ -15,6 +15,7 @@ Because the application replaces multiple tools, command naming matters. Command
 ## Decision
 
 pergamon will use:
+
 - `clap` v4 with derive macros for CLI parsing and help
 - `ratatui` + `crossterm` for interactive TUI screens
 
@@ -39,6 +40,7 @@ Interactive reading and review sessions will use TUI flows, while list/search/ex
 ## Consequences
 
 ### Positive
+
 - Matches pergamon’s CLI/TUI-first identity.
 - Gives both human-friendly and automation-friendly interfaces.
 - Uses mature Rust libraries with strong ecosystem support.
@@ -46,6 +48,7 @@ Interactive reading and review sessions will use TUI flows, while list/search/ex
 - Supports terminal conventions such as `NO_COLOR` and shell completions.
 
 ### Negative
+
 - Maintaining both command-style and TUI-style interactions adds UX complexity.
 - Command hierarchy breadth increases documentation burden.
 - Some advanced workflows may require careful coordination between flags and TUI states.

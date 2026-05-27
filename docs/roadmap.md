@@ -10,6 +10,7 @@
 **Author**: kafkade
 
 ---
+
 ## Section 0: Clarifying Questions
 
 The roadmap below assumes a **local-first, CLI/TUI-first knowledge ingestion system** whose job is to ingest, normalize, search, annotate, review, and resurface personal reading inputs. The table answers the 25 core product-definition questions with a single recommended path for each.
@@ -61,6 +62,7 @@ The personas below are deliberately opinionated. They are not marketing archetyp
 | **Phase 5** | Web + Obsidian polish | Browser access, vault integration, broader portability |
 
 ### 1. Nadiya — The Feed Maximalist  
+
 **Primary wedge persona**
 
 - **Archetype**: Former Inoreader power user who follows dozens to hundreds of feeds across tech, research, essays, and niche blogs.
@@ -82,6 +84,7 @@ The personas below are deliberately opinionated. They are not marketing archetyp
 - **Roadmap phase fit**: **Phase 1** is decisive; **Phase 2** makes the switch durable; **Phase 4** broadens daily use.
 
 ### 2. Marco — The Read-Later Triage Operator  
+
 **Reader replacement persona**
 
 - **Archetype**: Knowledge worker who captures aggressively and reads selectively. Saves far more than he finishes.
@@ -103,6 +106,7 @@ The personas below are deliberately opinionated. They are not marketing archetyp
 - **Roadmap phase fit**: **Phase 2** is his real unlock; **Phase 3** converts convenience into retention.
 
 ### 3. Priya — The Obsidian Knowledge Gardener  
+
 **Obsidian integration persona**
 
 - **Archetype**: Research-driven knowledge worker who reads to synthesize, not just consume.
@@ -124,6 +128,7 @@ The personas below are deliberately opinionated. They are not marketing archetyp
 - **Roadmap phase fit**: **Phase 3** starts to matter; **Phase 5** is her full unlock.
 
 ### 4. Elias — The Newsletter Archivist  
+
 **Email ingestion persona**
 
 - **Archetype**: Follows many high-signal newsletters and wants them treated as first-class reading material, not as disposable inbox clutter.
@@ -144,6 +149,7 @@ The personas below are deliberately opinionated. They are not marketing archetyp
 - **Roadmap phase fit**: **Phase 2** is essential; **Phase 4** makes it habitual.
 
 ### 5. Dr. Mina Hassan — The PDF-Heavy Researcher  
+
 **PDF and annotation persona**
 
 - **Archetype**: Researcher, analyst, consultant, or policy reader who consumes long PDFs, reports, papers, and whitepapers.
@@ -164,6 +170,7 @@ The personas below are deliberately opinionated. They are not marketing archetyp
 - **Roadmap phase fit**: **Phase 2** unlocks storage and reading value; **Phase 3** unlocks retention value.
 
 ### 6. Jonah — The Kindle Highlight Migrant  
+
 **Readwise replacement persona**
 
 - **Archetype**: Book reader who values highlight retention more than glossy reader UX.
@@ -184,6 +191,7 @@ The personas below are deliberately opinionated. They are not marketing archetyp
 - **Roadmap phase fit**: **Phase 3** is the key inflection point; **Phase 4** keeps it alive on mobile.
 
 ### 7. Samira — The Terminal-Native Local-First Builder  
+
 **Contributor and trust persona**
 
 - **Archetype**: Developer/operator who may be a secondary end user but a primary architectural validator.
@@ -1226,6 +1234,7 @@ The product should be built around a **single unified personal ingestion library
 **Decision**: the MVP should treat feed management as a **reliability problem**, not a “discovery platform” problem. The critical onboarding win is: paste a feed or OPML, refresh, and trust the results. Anything that smells like social discovery or public recommendation can wait.
 
 **Recommended implementation stance**:
+
 - Use **conditional GET** (`ETag`, `Last-Modified`) from day one.
 - Keep health monitoring first-class: every feed row should clearly show `healthy`, `degraded`, or `broken`.
 - Do **not** build an Inoreader-style public discovery layer for v1. A local-first product wins by ingesting existing subscriptions cleanly, not by trying to be a destination.
@@ -1243,6 +1252,7 @@ The product should be built around a **single unified personal ingestion library
 | Media handling | Links and basic images as optional metadata | Inline image previews where platform supports it | 🔴 | [Validation Required] |
 
 The MVP reader should optimize for **speed, clarity, and keyboard flow**:
+
 1. open item,
 2. read clean text,
 3. archive/star/tag,
@@ -1267,6 +1277,7 @@ That is enough to replace a surprising amount of Readwise Reader usage.
 **Decision**: pergamon should model bookmarks as **content items first**, not as a separate silo. A bookmark may start as a simple URL, then gain extracted text, highlights, tags, a collection, and an Obsidian note. That lifecycle is the whole point of the product.
 
 **Recommendation**:
+
 - Default all new bookmarks to an **inbox** state.
 - Use collections for curation, tags for description, and stars for urgency/importance.
 - Avoid Raindrop-style heavy visual theming as a v1 priority; terminal-first users need fast triage and dependable metadata far more than card layouts.
@@ -1294,6 +1305,7 @@ That is enough to replace a surprising amount of Readwise Reader usage.
 That keeps the review queue meaningful.
 
 **Recommended review model**:
+
 - `highlight` → optionally `review_card`
 - one daily queue generated from due cards
 - card actions stored as immutable review logs
@@ -1314,6 +1326,7 @@ That keeps the review queue meaningful.
 **Decision**: pergamon should treat search as a **core product surface**, not a utility feature. Replacing Readwise and Raindrop requires the user to trust that anything they saved can be found later.
 
 **Recommendation**:
+
 - Use **SQLite FTS5** for the canonical index.
 - Keep fuzzy matching outside the core index path if needed, so the system stays portable across desktop, iOS, and WASM builds.
 - Make the query language reusable for smart collections, export filters, and Obsidian sync selection.
@@ -1330,6 +1343,7 @@ That keeps the review queue meaningful.
 | Bulk organization | Batch tag/add/remove/archive via query | Rules engine, macros, ingestion-time filing | 🟡 | [Validated] |
 
 **Decision**: pergamon should have exactly four universal organization primitives:
+
 - **tags** for meaning,
 - **collections** for curation,
 - **star** for importance,
@@ -1353,6 +1367,7 @@ That restraint matters. A local-first tool becomes unmaintainable if it grows fi
 **Decision**: PDF support should be **knowledge-management-first**, not viewer-first. The MVP requirement is: import a PDF, extract text if possible, search it, tag it, annotate it, and export it. Building a full cross-platform PDF reading UI can wait.
 
 **Recommendation**:
+
 - Keep binary PDF files as content-addressed assets on disk.
 - Store extracted text and normalized metadata in SQLite.
 - Treat Kindle clippings as an **annotation import pipeline**, not as a separate content system.
@@ -1368,6 +1383,7 @@ The Obsidian integration should exist to make pergamon a better **capture and re
 **Recommendation**: use **direct read-only SQLite access from the Obsidian plugin** as the primary transport.
 
 This is the simplest architecture because it avoids:
+
 - a local HTTP server,
 - a background sync daemon,
 - custom IPC layers,
@@ -1375,6 +1391,7 @@ This is the simplest architecture because it avoids:
 - or plugin-side parsing of many intermediary JSON files.
 
 **Proposed architecture**:
+
 1. **pergamon owns the canonical SQLite database**.
 2. The **Obsidian desktop plugin opens that database in read-only mode**.
 3. The plugin queries a small, stable set of **read-optimized SQL views** (for example `obsidian_export_items`, `obsidian_export_annotations`, `obsidian_export_collections`).
@@ -1382,12 +1399,14 @@ This is the simplest architecture because it avoids:
 5. Any reverse flow happens only through a **manual pull-back command**, never live bidirectional mutation.
 
 **Why this is the right choice**:
+
 - It preserves **local-first simplicity**.
 - It lets Obsidian reflect live pergamon state without inventing another sync protocol.
 - It keeps the business logic in pergamon rather than re-implementing it in TypeScript.
 - It fits the solo-maintainer reality: fewer moving parts, fewer support failures.
 
 **Constraint note**:
+
 - **Desktop Obsidian**: this approach is strong and practical. [Validated]
 - **Mobile Obsidian plugin parity**: weaker and likely partial; mobile can rely on generated markdown notes rather than live DB access. [Validation Required]
 
@@ -1412,6 +1431,7 @@ This is the simplest architecture because it avoids:
 This is the key product decision: **Obsidian is for curated knowledge, not for unread triage**.
 
 A good default sync profile would be:
+
 - all items with at least one highlight or note,
 - all starred items,
 - all items in explicit “Obsidian/*” collections,
@@ -1466,6 +1486,7 @@ User-written notes live here.
 ```
 
 **Design rules**:
+
 - `folio_id` is mandatory and immutable.
 - Frontmatter should contain only **stable metadata**, not volatile UI state.
 - The body should separate:
@@ -1474,6 +1495,7 @@ User-written notes live here.
   - user-editable note space.
 
 **Template system**:
+
 - Support configurable folder template, filename template, and body template.
 - Use simple placeholders like `{{title}}`, `{{tags}}`, `{{highlights}}`.
 - Do not expose arbitrary SQL templating in v1.
@@ -1504,6 +1526,7 @@ That means:
   - hand-written notes inside designated user blocks.
 
 **Manual pull-back policy**:
+
 - Triggered by command, not background watched sync.
 - Pull only from known notes containing `folio_id`.
 - Import only allowed fields:
@@ -1513,6 +1536,7 @@ That means:
 - Never let Obsidian silently overwrite core pergamon metadata.
 
 This keeps the system understandable:
+
 - pergamon ingests and organizes.
 - Obsidian synthesizes.
 - Pull-back is possible, but never magical.
@@ -1522,6 +1546,7 @@ This keeps the system understandable:
 ## Section 6: Features the User May Have Missed
 
 The phases below assume a rough progression:
+
 - **Phase 1**: ingestion MVP
 - **Phase 2**: unified library + bookmarks
 - **Phase 3**: daily-driver reader + search
@@ -1557,12 +1582,14 @@ Moonshots should remain **strictly optional** and should never distort the core 
 ### 7.1 — AI Features (BYOK) 🔴
 
 **Recommendation**: support AI only as a **BYOK / BYOM** capability:
+
 - **Bring Your Own Key** for cloud APIs,
 - **Bring Your Own Model** for local runtimes like Ollama or LM Studio.
 
 pergamon should not operate a hosted inference service.
 
 **Good AI use cases for pergamon**:
+
 - article summarization,
 - suggested tags,
 - highlight extraction suggestions,
@@ -1572,12 +1599,14 @@ pergamon should not operate a hosted inference service.
 - turning highlights into draft flashcards.
 
 **Bad AI use cases for pergamon**:
+
 - opaque automatic rewriting of source material,
 - silent metadata mutation,
 - hosted recommendation feeds,
 - anything that makes export or reproducibility worse.
 
 **Architecture recommendation**:
+
 - Put AI behind a separate crate, e.g. `pergamon-ai`.
 - Keep it outside the zero-I/O core.
 - AI outputs must be stored as **derived artifacts with provenance**, including:
@@ -1589,12 +1618,14 @@ pergamon should not operate a hosted inference service.
 **Product rule**: AI suggestions are never authoritative until accepted by the user.
 
 That means:
+
 - suggested tags are suggestions,
 - suggested highlights are suggestions,
 - summaries are derived notes,
 - generated flashcards are drafts.
 
 **Complexity drivers**:
+
 - prompt/version management,
 - privacy guarantees across providers,
 - cost control,
@@ -1602,6 +1633,7 @@ That means:
 - semantic index portability across SQLite/WASM/iOS.
 
 **Validation status**:
+
 - BYOK plumbing itself: [Validated]
 - High-quality on-device semantic workflows across all platforms: [Validation Required]
 
@@ -1612,6 +1644,7 @@ That means:
 This is a high-value moonshot because newsletters are now a major reading source, but it is materially harder than RSS.
 
 **Recommendation**: phase it in this order:
+
 1. **`.eml` and Maildir import first** — local, explicit, scriptable. [Validated]
 2. **Read-only IMAP folder sync second** — practical, but needs provider-specific testing. [Validation Required]
 3. **No hosted forwarding address** — rejected.
@@ -1619,12 +1652,14 @@ This is a high-value moonshot because newsletters are now a major reading source
 That last point matters. A hosted ingestion mailbox would drag pergamon toward a cloud service business. It is the wrong fit.
 
 **Canonical model**:
+
 - each newsletter issue becomes a `content_item` of type `newsletter`,
 - raw MIME is optional asset storage,
 - cleaned body text is indexed like any other long-form content,
 - message identifiers (`Message-ID`, `List-ID`) power deduplication.
 
 **Key technical challenges**:
+
 - malformed MIME,
 - tracker/link rewriting,
 - multipart HTML/plaintext selection,
@@ -1633,6 +1668,7 @@ That last point matters. A hosted ingestion mailbox would drag pergamon toward a
 - login/app-password complexity for IMAP.
 
 **User experience rule**:
+
 - newsletters should behave like articles after ingestion,
 - but retain newsletter-specific metadata (`sender`, `issue date`, `list id`).
 
@@ -1645,17 +1681,20 @@ That preserves the value of the source without creating a parallel UX.
 **Recommendation**: build the self-hosted web UI as a **single-user companion to the Axum sync server**, not as a multi-tenant SaaS clone.
 
 This matches the project DNA:
+
 - local-first,
 - open source,
 - CLI/TUI-first,
 - self-hostable if desired.
 
 **Core shape**:
+
 - Axum provides authenticated API endpoints and static asset serving.
 - The web frontend is a WASM or server-rendered hybrid that consumes the same domain model as the native apps.
 - The deployment target is a small Docker image for personal hosting.
 
 **What the web UI should do**:
+
 - browse/search library,
 - read saved content,
 - manage tags/collections,
@@ -1663,15 +1702,18 @@ This matches the project DNA:
 - push/export to Obsidian.
 
 **What it should not do in v1**:
+
 - become the primary product surface,
 - support multi-user organizations,
 - chase social or shared libraries,
 - depend on cloud-managed auth.
 
 **Licensing note**:
+
 - this belongs naturally beside the **AGPL Axum server**, not inside the Apache-only core/app crates.
 
 **Why this is moonshot, not core**:
+
 - browser auth/session management,
 - server deployment burden,
 - sync and access-control edge cases,
@@ -1686,6 +1728,7 @@ If pergamon is already winning in CLI/TUI + local DB mode, the self-hosted web U
 **Recommendation**: integrate the Kafkade tools through **documented handoff contracts and deep links**, not shared databases.
 
 That means:
+
 - common stable IDs,
 - `kafkade://`-style deep links,
 - small JSON export/import payloads,
@@ -1702,7 +1745,9 @@ Direct DB coupling would make all four apps harder to evolve independently.
 **Detailed direction**:
 
 #### pergamon ↔ tock
+
 This is the clearest early integration.
+
 - `tock add --from pergamon:<id>` should create a task linked to saved content.
 - pergamon can expose “Create task” actions for any item.
 - Daily review items could optionally generate tasks rather than cards.
@@ -1710,19 +1755,24 @@ This is the clearest early integration.
 This fits both products without over-coupling them.
 
 #### pergamon ↔ toku
+
 Toku owns the **book domain**; pergamon owns **information capture**.
 The right split is:
+
 - Toku tracks editions, reading progress, shelves, and book metadata.
 - pergamon stores article excerpts, PDFs, clippings, quotes, and research highlights.
 
 A good integration would let a Toku book record link to:
+
 - imported Kindle clippings in pergamon,
 - PDF notes associated with the book,
 - Obsidian notes derived from those highlights.
 
 #### pergamon ↔ kora
+
 This is more speculative but potentially powerful.
 If kora eventually supports podcasts robustly, pergamon could ingest:
+
 - episode metadata,
 - transcripts,
 - bookmarked timestamps,
@@ -1741,6 +1791,7 @@ That would turn pergamon into the knowledge layer for spoken content without for
 **Recommendation**: use a single `content_items` table as the canonical entity store, with a `content_type` discriminator and **type-specific extension tables** for source-specific fields.
 
 This is the right model because it preserves a unified UX:
+
 - one inbox,
 - one search system,
 - one tag/collection model,
@@ -1750,6 +1801,7 @@ This is the right model because it preserves a unified UX:
 The extension tables prevent the base table from becoming a sparse mess.
 
 **Canonical content types**:
+
 - `article`
 - `bookmark`
 - `pdf`
@@ -2180,6 +2232,7 @@ CREATE INDEX idx_import_run_items_run
 ```
 
 **Search indexing rule**: rebuild or patch `content_fts` whenever any of these change:
+
 - `content_items.title`
 - `content_items.excerpt`
 - `content_bodies.body_text`
@@ -2192,6 +2245,7 @@ CREATE INDEX idx_import_run_items_run
 **Recommendation**: versioned SQL migrations in the storage crate, applied transactionally on startup, with `PRAGMA user_version` plus a migration history table.
 
 **Rules**:
+
 1. **Never mutate migrations in place.**
 2. Prefer **additive migrations** first; backfill later.
 3. Large derived structures like FTS can be rebuilt after schema migration rather than migrated row-by-row.
@@ -2199,6 +2253,7 @@ CREATE INDEX idx_import_run_items_run
 5. Any migration that rewrites large tables must be benchmarked against realistic libraries.
 
 **Suggested migration layout**:
+
 - `V001__core_schema.sql`
 - `V002__fts_and_indexes.sql`
 - `V003__obsidian_sync_state.sql`
@@ -2206,6 +2261,7 @@ CREATE INDEX idx_import_run_items_run
 - `V005__fsrs_review_state.sql`
 
 **Operational strategy**:
+
 - Run migrations inside a transaction where possible.
 - Put the DB in **WAL mode**.
 - Rebuild FTS after relevant migrations rather than trying to preserve it.
@@ -2239,6 +2295,7 @@ Import/export is not a supporting feature for pergamon. It is one of the main re
 | Obsidian note pull-back | Markdown + YAML | Manual note import for matched `folio_id`s | Phase 4 | 🟡 | [Validated] |
 
 **Launch priority**:
+
 1. RSS/Atom + OPML
 2. browser bookmarks HTML
 3. PDF import
@@ -2265,6 +2322,7 @@ That ordering gets pergamon usable fast while still targeting the services it re
 Dry-run is mandatory.
 
 Example behavior:
+
 - counts new vs matched vs conflicted records,
 - shows top-level mapping summary,
 - samples a few likely duplicates,
@@ -2289,15 +2347,18 @@ This should be recorded in `import_run_items.match_strategy`.
 #### Provenance
 
 Provenance should exist at two levels:
+
 - **record-level** via `external_refs`
 - **field-level** via `content_field_provenance`
 
 That allows pergamon to answer:
+
 - where an item came from,
 - which field was set by which importer,
 - whether the user has since overridden it.
 
 **User-edit precedence rule**:
+
 - once the user edits a field locally, that field should be marked as a user override,
 - later imports may suggest changes, but should not silently overwrite user-owned fields.
 
@@ -2306,10 +2367,12 @@ That allows pergamon to answer:
 Rollback should be explicit and auditable.
 
 **Recommendation**:
+
 - smaller imports: single transaction, simple rollback
 - larger imports: chunked commit + inverse journal in `import_run_items`
 
 That enables:
+
 - `pergamon import undo <run-id>`
 - removal of created items,
 - restoration of updated items from `before_snapshot_json`,
@@ -2318,6 +2381,7 @@ That enables:
 #### Import UX
 
 Every importer should produce the same four user-facing outputs:
+
 - parse summary,
 - match summary,
 - warning list,
@@ -2341,12 +2405,14 @@ Exports should be both **human-usable** and **lossless**.
 | Static HTML export | Publish/share personal archive locally | Phase 5 | 🟡 | [Validation Required] |
 
 **Export rules**:
+
 - every export should accept a **query filter**
 - every export should include enough metadata to round-trip where appropriate
 - export should never depend on a hosted service
 - raw binary assets should be optional except in canonical backup mode
 
 **Recommended commands**:
+
 - `pergamon export opml`
 - `pergamon export bookmarks-html`
 - `pergamon export json --query 'tag:ai archived:true'`
@@ -2383,6 +2449,7 @@ pergamon-export-2026-03-18.zip
 ```
 
 **Why this format is right**:
+
 - one portable file,
 - inspectable with standard tools,
 - friendly to scripts,
@@ -2391,6 +2458,7 @@ pergamon-export-2026-03-18.zip
 - includes real assets rather than only metadata.
 
 **What must be included**:
+
 - all canonical entity tables,
 - annotations and review history,
 - tags/collections/search definitions,
@@ -2398,6 +2466,7 @@ pergamon-export-2026-03-18.zip
 - binary assets needed for restoration.
 
 **What should be excluded**:
+
 - FTS indexes,
 - feed fetch caches,
 - transient HTTP metadata,
@@ -2406,6 +2475,7 @@ pergamon-export-2026-03-18.zip
 **Round-trip promise**:
 
 `pergamon export backup` → `pergamon import backup` should restore:
+
 - the same content items,
 - the same tags/collections,
 - the same review card states,
@@ -2417,6 +2487,7 @@ That round-trip guarantee is the real moat for a personal data product.
 
 **Manifest recommendation**:
 `manifest.json` should include:
+
 - export timestamp,
 - pergamon version,
 - schema version,
@@ -2664,21 +2735,27 @@ Core components:
 ### Key technical decisions
 
 #### Feed parsing: **`feed-rs`**  
+
 This is the correct choice for pergamon because the first problem to solve is *trustworthy normalized ingestion*, not squeezing out exotic parser edge cases via a custom implementation. `feed-rs` gets you to “real feeds work” quickly and keeps the complexity in `pergamon-core` where it belongs. **[Validated]**
 
 #### Reader extraction: **`readability` crate**  
+
 This is the right default because pergamon needs reader mode early to be credible as a Reader/Pocket replacement. The risk is not correctness; it is **quality variance** on ugly pages, newsletters, and JS-heavy sites. The product answer is not “build our own extractor”; it is “use `readability`, then fall back cleanly to original content when extraction is bad.” **[Validation Required]**
 
 #### Spaced repetition: **FSRS**  
+
 If pergamon is going to replace Readwise’s resurfacing loop, it should not settle for a simplistic scheduler. FSRS gives pergamon a modern retention engine and future-proofs review data instead of locking the product into a weak heuristic. **[Validated]**
 
 #### HTML sanitization: **`ammonia`**  
+
 Any ingestion system that stores extracted HTML needs a hard sanitization layer. `ammonia` is the boring, correct choice. This should be treated as mandatory infrastructure, not optional polish. **[Validated]**
 
 #### TUI rendering: **`termimad`**  
+
 The terminal reader must feel like reading, not like scrolling raw text blobs. `termimad` is a good fit for headers, blockquotes, code fences, lists, and links without inventing a bespoke renderer. The key question is performance and readability on long articles; that is a spike, not a reason to avoid the library. **[Validation Required]**
 
 #### HTTP transport: **`reqwest` + `rustls`**  
+
 Predictable, portable, well-maintained, and aligned with the rest of the Rust ecosystem. No need to get clever here. **[Validated]**
 
 ### Additional stack recommendations
@@ -2715,6 +2792,7 @@ Predictable, portable, well-maintained, and aligned with the rest of the Rust ec
 **Goal:** prove the core stack by subscribing to a feed, fetching entries, storing them locally, and opening a readable article in the CLI/TUI. **[Validated]**
 
 **Deliverables**
+
 1. Cargo workspace with `pergamon-core`, `pergamon-cli`, and storage crate boundaries. **[Validated]**
 2. Feed subscription + fetch pipeline using `feed-rs`, ETag, and Last-Modified support. **[Validated]**
 3. SQLite schema + FTS5 index for items, feeds, read state, and extracted content. **[Validated]**
@@ -2722,24 +2800,29 @@ Predictable, portable, well-maintained, and aligned with the rest of the Rust ec
 5. Fixture corpus for feeds and article extraction regressions. **[Validated]**
 
 **Acceptance criteria for top 3**
+
 - `pergamon feed add <url>` followed by `pergamon sync` ingests 10 representative feeds with stable item identity.  
 - `pergamon list` can display and filter a 1,000-item corpus with no visible lag.  
 - `pergamon open <item>` renders readable extracted content on a representative test corpus with acceptable fidelity.  
 
 **Dependencies**
+
 - None beyond repo bootstrap and the PoC gates in Section 12.1.
 
 **Risks**
+
 - Extracted content quality varies more than expected. **Mitigation:** clean fallback to original link view. **[Validation Required]**
 - Feed identity edge cases create duplicates. **Mitigation:** retain source IDs and provenance metadata. **[Validated]**
 
 **Cut line**
+
 - No OPML import.
 - No bookmark capture.
 - No highlights or review queue.
 - No web or iOS.
 
 **ADRs to write**
+
 - ADR-001 Workspace and crate boundaries.
 - ADR-002 Canonical item model and storage schema.
 - ADR-003 Feed identity, polling, and dedupe rules.
@@ -2752,6 +2835,7 @@ Predictable, portable, well-maintained, and aligned with the rest of the Rust ec
 **Goal:** ship a credible local-first replacement for core RSS reading plus basic read-later and bookmark capture. This is the first phase where pergamon must become part of the maintainer’s daily routine. **[Validated]**
 
 **Deliverables**
+
 1. OPML import, feed folders, source muting, and bulk feed management. **[Validated]**
 2. Reader TUI with unread/star/archive/save-later flows and keyboard-first triage. **[Validated]**
 3. `pergamon save <url>` for manual bookmark/read-later capture with extraction and dedupe. **[Validated]**
@@ -2759,25 +2843,30 @@ Predictable, portable, well-maintained, and aligned with the rest of the Rust ec
 5. Encrypted/local backup export and restore flow. **[Validated]**
 
 **Acceptance criteria for top 3**
+
 - Importing a 100-feed OPML file preserves titles and URLs with >95% fidelity and completes in one obvious flow.  
 - A user can process 500 unread items in the TUI without needing the mouse or leaving the keyboard.  
 - `pergamon save https://example.com/article` dedupes canonical duplicates and stores title, domain, excerpt, and extracted text.  
 
 **Dependencies**
+
 - Phase 0 complete.
 - Extraction, search, and rendering gates green enough for dogfooding.
 
 **Risks**
+
 - Too much UI ambition slows shipping. **Mitigation:** prefer fast list/detail flows over ornamental polish. **[Validated]**
 - Bookmark identity is trickier than feed identity. **Mitigation:** keep raw URL, canonical URL, and source provenance separately. **[Validated]**
 
 **Cut line**
+
 - No browser extension.
 - No smart collections.
 - No highlight review queue.
 - No sync.
 
 **ADRs to write**
+
 - ADR-004 OPML import semantics and source folders.
 - ADR-005 Bookmark canonicalization and duplicate policy.
 - ADR-006 Search index scope and ranking.
@@ -2790,6 +2879,7 @@ Predictable, portable, well-maintained, and aligned with the rest of the Rust ec
 **Goal:** turn pergamon from “reader with save support” into a real bookmark manager that can absorb a Raindrop or Pinboard export and stay pleasant to organize over time. **[Validated]**
 
 **Deliverables**
+
 1. Collections, tags, archive semantics, and bulk refile actions for saved links. **[Validated]**
 2. Import/export for Netscape bookmarks, Raindrop export, and pergamon backup. **[Validation Required]**
 3. Metadata enrichment: Open Graph fields, content type, author, favicon, and domain normalization. **[Validated]**
@@ -2797,25 +2887,30 @@ Predictable, portable, well-maintained, and aligned with the rest of the Rust ec
 5. Link health checks and “dead link” detection as a maintenance tool. **[Validation Required]**
 
 **Acceptance criteria for top 3**
+
 - A 5,000-bookmark import preserves URLs, titles, tags, and timestamps at >98% fidelity for supported fields.  
 - Collections and tags support fast bulk organization in both CLI and TUI flows.  
 - Imported duplicates are caught for exact and canonical URL matches without destructive false merges.  
 
 **Dependencies**
+
 - Phase 1 complete.
 - Stable bookmark identity model.
 
 **Risks**
+
 - Import formats are messy and under-documented. **Mitigation:** fixture-driven parsers, provenance fields, and dry-run preview. **[Validated]**
 - Dead-link checking can become noisy. **Mitigation:** treat as maintenance metadata, not user-facing panic. **[Validated]**
 
 **Cut line**
+
 - No screenshot archive.
 - No public collections.
 - No browser extension capture.
 - No AI tagging.
 
 **ADRs to write**
+
 - ADR-007 Bookmark import provenance.
 - ADR-008 Collection and tag model.
 - ADR-009 Duplicate detection and merge safety.
@@ -2828,6 +2923,7 @@ Predictable, portable, well-maintained, and aligned with the rest of the Rust ec
 **Goal:** add the retention loop that turns pergamon from archive to personal learning system: highlights, notes, resurfacing, and migration paths from Readwise/Kindle workflows. **[Validated]**
 
 **Deliverables**
+
 1. Unified highlight and note model across reader selections, imported clippings, and imported exports. **[Validated]**
 2. Review queue and spaced repetition scheduling using FSRS. **[Validated]**
 3. Kindle **My Clippings** import and Readwise export import. **[Validation Required]**
@@ -2835,25 +2931,30 @@ Predictable, portable, well-maintained, and aligned with the rest of the Rust ec
 5. Retention stats: due count, review completion, resurfaced highlights, source breakdown. **[Validated]**
 
 **Acceptance criteria for top 3**
+
 - Importing 10,000 highlights preserves source, author/title context, original text, and timestamps for supported formats.  
 - `pergamon review` produces deterministic due counts and FSRS rescheduling for the same test history on every platform.  
 - Highlights created inside pergamon appear in the review queue and export cleanly to Markdown/JSON.  
 
 **Dependencies**
+
 - Phases 1–2 complete.
 - Stable item IDs and export model.
 
 **Risks**
+
 - Kindle and Readwise data are inconsistent by source. **Mitigation:** support file-based imports first and preserve raw import payloads. **[Validated]**
 - Review UX may feel bolted on. **Mitigation:** keep the loop simple: due → review → resurface/export. **[Validated]**
 
 **Cut line**
+
 - No OCR.
 - No AI-generated flashcards.
 - No quiz authoring tools.
 - No handwriting/PDF markup.
 
 **ADRs to write**
+
 - ADR-010 Highlight and annotation schema.
 - ADR-011 FSRS parameters and review semantics.
 - ADR-012 Import contracts for Kindle and Readwise migrations.
@@ -2866,6 +2967,7 @@ Predictable, portable, well-maintained, and aligned with the rest of the Rust ec
 **Goal:** connect pergamon cleanly to Obsidian, add rule-based organization, and polish the product enough that it feels like a stable daily system instead of a powerful prototype. **[Validated]**
 
 **Deliverables**
+
 1. Official Obsidian plugin for browsing pergamon items, inserting references, and importing highlights into notes. **[Validation Required]**
 2. Stable Markdown/JSON export contracts with frontmatter, slugs, backlinks, and provenance. **[Validated]**
 3. Smart collections and saved searches driven by a query/rule DSL. **[Validated]**
@@ -2873,25 +2975,30 @@ Predictable, portable, well-maintained, and aligned with the rest of the Rust ec
 5. Usage stats: inbox size, reading streak, save rate, highlight rate, review completion. **[Validated]**
 
 **Acceptance criteria for top 3**
+
 - An Obsidian user can insert a pergamon item or highlight into a note with stable metadata and source links.  
 - Smart collections recompute deterministically and match the same results in CLI, TUI, and exports.  
 - Content rules can auto-tag/archive new items based on source, domain, title, or feed without manual intervention.  
 
 **Dependencies**
+
 - Phase 3 complete.
 - Stable export shape and item identity.
 - Obsidian plugin API validation.
 
 **Risks**
+
 - Plugin scope creep turns pergamon into a note editor. **Mitigation:** keep the plugin thin and file-oriented. **[Validated]**
 - Bidirectional sync temptation creates conflict hell. **Mitigation:** start with export/insert flows, not shared editing. **[Validated]**
 
 **Cut line**
+
 - No live bidirectional editing with Obsidian.
 - No markdown vault-as-database source of truth.
 - No collaborative vault features.
 
 **ADRs to write**
+
 - ADR-013 Obsidian plugin contract.
 - ADR-014 Export schema and frontmatter conventions.
 - ADR-015 Rule engine/query DSL.
@@ -2904,6 +3011,7 @@ Predictable, portable, well-maintained, and aligned with the rest of the Rust ec
 **Goal:** ship a deployable web interface for browsing, reading, searching, and organizing the pergamon library without abandoning the Rust core or the local-first philosophy. **[Validation Required]**
 
 **Deliverables**
+
 1. Axum-served web application with authentication/session handling and Docker packaging. **[Validated]**
 2. Web inbox, reader, bookmarks, highlights, search, and review views powered by the same core logic via WASM or shared validation. **[Validation Required]**
 3. Docker image / compose setup for self-hosted deployment. **[Validated]**
@@ -2911,26 +3019,31 @@ Predictable, portable, well-maintained, and aligned with the rest of the Rust ec
 5. Admin diagnostics for feed status, extraction failures, and import logs. **[Validated]**
 
 **Acceptance criteria for top 3**
+
 - A self-hosted user can run pergamon web with Docker in under 10 minutes from documented setup.  
 - Search and navigation remain responsive on a 50k-item library in normal desktop browsers.  
 - Items created or modified on the web obey the same schema, dedupe rules, and export shape as CLI/TUI flows.  
 
 **Dependencies**
+
 - Phase 4 complete.
 - WASM footprint and shared-core boundary validated.
 - Basic auth/session model defined.
 
 **Risks**
+
 - Web build complexity explodes. **Mitigation:** keep the client thin and reuse Rust logic aggressively. **[Validation Required]**
 - Browser storage/offline semantics tempt an early sync rewrite. **Mitigation:** keep Phase 5 scoped to a deployable web app, not full multi-device sync. **[Validated]**
 
 **Cut line**
+
 - No multi-user features.
 - No real-time collaboration.
 - No browser extension dependency.
 - No shared/public libraries.
 
 **ADRs to write**
+
 - ADR-016 Web architecture and WASM boundary.
 - ADR-017 Auth/session model for the web app.
 - ADR-018 Docker deployment and server persistence model.
@@ -2943,6 +3056,7 @@ Predictable, portable, well-maintained, and aligned with the rest of the Rust ec
 **Goal:** deliver a native-feeling iPhone app for reading, saving, reviewing, and quick ingestion while reusing the Rust core through UniFFI. **[Validation Required]**
 
 **Deliverables**
+
 1. UniFFI bindings and idiomatic Swift wrapper layer. **[Validated]**
 2. SwiftUI iPhone app with inbox, saved items, reader, highlights, and review queue. **[Validation Required]**
 3. Share extension for saving URLs, selected text, and simple metadata from Safari and supported apps. **[Validation Required]**
@@ -2950,26 +3064,31 @@ Predictable, portable, well-maintained, and aligned with the rest of the Rust ec
 5. iPad polish only if Phase 6 lands comfortably. **[Validation Required]**
 
 **Acceptance criteria for top 3**
+
 - Shared Rust logic compiles into an XCFramework and is consumed from Swift without manual unsafe glue.  
 - A user can save a page from the iOS share sheet into pergamon in under five seconds.  
 - Reader mode, search, and review queue work offline after initial sync/import.  
 
 **Dependencies**
+
 - Phase 4 complete.
 - UniFFI PoC green.
 - Mobile storage ownership clarified.
 
 **Risks**
+
 - UniFFI ergonomics or binary size become painful. **Mitigation:** keep the exposed surface area narrow and wrapper-friendly. **[Validated]**
 - Share extension constraints force async compromise. **Mitigation:** use a staging inbox and finalize ingestion in-app when needed. **[Validated]**
 
 **Cut line**
+
 - No widgets.
 - No watchOS.
 - No advanced iPad layouts.
 - No background-heavy sync guarantees before Phase 7.
 
 **ADRs to write**
+
 - ADR-019 UniFFI boundary and error mapping.
 - ADR-020 Mobile storage ownership and cache policy.
 - ADR-021 Share extension ingestion contract.
@@ -2982,6 +3101,7 @@ Predictable, portable, well-maintained, and aligned with the rest of the Rust ec
 **Goal:** add optional, encrypted multi-device sync through an Axum server without breaking the local-first trust model. This is the hardest phase and should only begin after the single-device experience is already strong. **[Validation Required]**
 
 **Deliverables**
+
 1. AGPL-3.0 Axum sync server storing encrypted blobs/events only. **[Validated]**
 2. Device onboarding, key management, and account bootstrap flows. **[Validation Required]**
 3. Conflict detection and typed merge policies for read state, tags, notes, and highlights. **[Validation Required]**
@@ -2989,26 +3109,31 @@ Predictable, portable, well-maintained, and aligned with the rest of the Rust ec
 5. Background sync behaviors for web/iOS where feasible. **[Validation Required]**
 
 **Acceptance criteria for top 3**
+
 - Saving or updating an item on one device appears on another device after sync, with the server unable to read plaintext content.  
 - Simultaneous edits to the same object either merge safely by type or surface a clear user-visible conflict.  
 - New-device bootstrap restores a large library and review state without corrupting identity, rules, or due counts.  
 
 **Dependencies**
+
 - Phase 5 and Phase 6 complete.
 - Stable item IDs, exports, and rule engine.
 - Server/license boundary already documented.
 
 **Risks**
+
 - Sync complexity consumes the roadmap. **Mitigation:** typed merge policies, narrow scope, and no social/shared libraries. **[Validated]**
 - Operational burden overwhelms a solo maintainer. **Mitigation:** self-host first, managed sync only after protocol confidence. **[Validated]**
 
 **Cut line**
+
 - No team accounts.
 - No shared family/workspaces.
 - No social feeds or following.
 - No public link publishing as a sync feature.
 
 **ADRs to write**
+
 - ADR-022 Sync protocol and envelope model.
 - ADR-023 Conflict policy by entity type.
 - ADR-024 Device onboarding and key lifecycle.
@@ -3021,6 +3146,7 @@ Predictable, portable, well-maintained, and aligned with the rest of the Rust ec
 **Goal:** only after the core system is stable, add high-upside convenience features that compound the value of the archive without changing pergamon’s product identity. **[Validation Required]**
 
 **Deliverables**
+
 1. Browser extension for one-click capture, selection capture, and tag-to-inbox workflows. **[Validation Required]**
 2. AI-assisted organization/retrieval built with on-device or BYO-model assumptions first. **[Validation Required]**
 3. Email newsletter or digest that resurfaces unread backlog, recent saves, and due highlights. **[Validation Required]**
@@ -3028,26 +3154,31 @@ Predictable, portable, well-maintained, and aligned with the rest of the Rust ec
 5. Optional semantic clustering, topic views, or “resurface this theme” workflows. **[Validation Required]**
 
 **Acceptance criteria for top 3**
+
 - The browser extension can capture page URL, title, selection, and tags into pergamon in one action.  
 - AI features are disabled by default or strictly privacy-bounded; no plaintext leaves the user’s device without explicit opt-in.  
 - Weekly digests are useful enough to keep users in the product loop without feeling like a growth hack.  
 
 **Dependencies**
+
 - Phase 7 complete.
 - Stable APIs for capture, export, and sync.
 - Strong product discipline.
 
 **Risks**
+
 - AI becomes a distraction from the trust story. **Mitigation:** keep AI assistive, optional, and privacy-bounded. **[Validated]**
 - Browser extension multiplies support burden. **Mitigation:** start narrow: capture and selection only. **[Validated]**
 
 **Cut line**
+
 - No server-side embeddings by default.
 - No social recommendations.
 - No algorithmic feed ranking.
 - No feature that weakens local-first ownership.
 
 **ADRs to write**
+
 - ADR-025 Browser extension architecture.
 - ADR-026 AI privacy and provider boundary.
 - ADR-027 Digest generation and opt-in policy.
@@ -3188,6 +3319,7 @@ Phase 8: Moonshots
 If pergamon cannot first win **single-device daily use**, sync and platform work become expensive ways to move an unproven product around. The product should be undeniably useful on one machine before it becomes available on every machine. **[Validated]**
 
 **Parallelizable work**
+
 - importer fixture collection
 - documentation and ADRs
 - Obsidian export prototyping
@@ -3315,6 +3447,7 @@ If the answer is no, vanity metrics do not matter. **[Validated]**
 | 15 | Product and binary name | **pergamon** | Precise meaning, terminal-friendly, portfolio-fit inside kafkade | **Decided [Validated]** |
 
 **Open questions that still deserve explicit validation**
+
 - Is `readability` strong enough on the actual corpus pergamon users will save? **[Validation Required]**
 - Does the web shell need more TypeScript than planned, or can the Rust/WASM boundary stay thin? **[Validation Required]**
 - Can the iOS share extension ingest enough metadata to feel magical without building a background service? **[Validation Required]**

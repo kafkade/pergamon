@@ -17,6 +17,7 @@ The unified `content_items` architecture already provides a shared identity mode
 pergamon will treat bookmarks and articles as the same top-level entity type family within `content_items`, distinguished by `content_type` and state rather than by separate root models.
 
 Specifically:
+
 - a bookmark is a `content_item` with `content_type = 'bookmark'` and optional extracted content
 - a read-later article is a `content_item` with `content_type = 'article'` and extracted content
 
@@ -27,6 +28,7 @@ If a `feed_item` is bookmarked by the user, pergamon will link that user action 
 ## Consequences
 
 ### Positive
+
 - Eliminates confusing user-facing distinctions between “bookmark” and “article.”
 - Simplifies tagging, collections, deduplication, and search.
 - Supports progressive enrichment from saved link to extracted reading object.
@@ -34,6 +36,7 @@ If a `feed_item` is bookmarked by the user, pergamon will link that user action 
 - Reduces duplicate records and synchronization complexity.
 
 ### Negative
+
 - Some UI and reporting logic must carefully explain state versus type.
 - Edge cases may arise when bookmark metadata and article extraction metadata disagree.
 - Migration from imported tools may require normalization rules to fit the unified model.

@@ -91,7 +91,7 @@ The name captures what this project is about:
 
 Cargo workspace following the [kafkade project DNA](https://github.com/kafkade):
 
-```
+```text
 pergamon/
 ├── crates/
 │   ├── pergamon-core/       # Domain models, state machine, SR engine (zero I/O)
