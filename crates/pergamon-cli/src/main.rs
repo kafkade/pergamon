@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use pergamon_core::content_type::ContentType;
-use pergamon_core::model::{ContentItem, Feed, FeedItemMeta};
+use pergamon_core::model::{ContentItem, Feed, FeedFolder, FeedItemMeta};
 use pergamon_core::status::DocumentStatus;
 use pergamon_storage::Database;
 use time::OffsetDateTime;
@@ -59,6 +59,16 @@ enum Command {
     },
     /// Open the TUI inbox / reader.
     Read,
+    /// Import data from external sources.
+    Import {
+        #[command(subcommand)]
+        action: ImportAction,
+    },
+    /// Export data to standard formats.
+    Export {
+        #[command(subcommand)]
+        action: ExportAction,
+    },
 }
 
 /// Feed management subcommands.
@@ -70,7 +80,11 @@ enum FeedAction {
         url: String,
     },
     /// List all subscribed feeds.
-    List,
+    List {
+        /// Show feeds grouped by folder in a tree view.
+        #[arg(long)]
+        tree: bool,
+    },
     /// Refresh feeds to fetch new items.
     Refresh {
         /// Only refresh the feed with this ID.
@@ -81,6 +95,38 @@ enum FeedAction {
     Remove {
         /// Feed ID to remove.
         id: String,
+    },
+    /// Move a feed to a folder.
+    Move {
+        /// Feed ID to move.
+        id: String,
+        /// Target folder name (created if it doesn't exist).
+        #[arg(long)]
+        folder: String,
+    },
+}
+
+/// Import subcommands.
+#[derive(Debug, Subcommand)]
+enum ImportAction {
+    /// Import feed subscriptions from an OPML file.
+    Opml {
+        /// Path to the OPML file.
+        file: PathBuf,
+        /// Show what would be imported without making changes.
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
+/// Export subcommands.
+#[derive(Debug, Subcommand)]
+enum ExportAction {
+    /// Export feed subscriptions as OPML.
+    Opml {
+        /// Output file path (default: stdout).
+        #[arg(long, short)]
+        output: Option<PathBuf>,
     },
 }
 
@@ -111,6 +157,8 @@ fn main() -> Result<()> {
         Command::Sync => refresh_feeds(&db, None),
         Command::Save { url } => save_url(&db, &url),
         Command::Read => run_tui(&db),
+        Command::Import { action } => handle_import(&db, action),
+        Command::Export { action } => handle_export(&db, action),
     }
 }
 
@@ -127,9 +175,16 @@ fn http_client() -> Result<reqwest::blocking::Client> {
 fn handle_feed(db: &Database, action: FeedAction) -> Result<()> {
     match action {
         FeedAction::Add { url } => feed_add(db, &url),
-        FeedAction::List => feed_list(db),
+        FeedAction::List { tree } => {
+            if tree {
+                feed_list_tree(db)
+            } else {
+                feed_list(db)
+            }
+        }
         FeedAction::Refresh { feed } => refresh_feeds(db, feed.as_deref()),
         FeedAction::Remove { id } => feed_remove(db, &id),
+        FeedAction::Move { id, folder } => feed_move(db, &id, &folder),
     }
 }
 
@@ -183,6 +238,7 @@ fn feed_add(db: &Database, url: &str) -> Result<()> {
         error_count: 0,
         last_error: None,
         last_fetched_at: Some(now),
+        folder_id: None,
         created_at: now,
         updated_at: now,
     };
@@ -399,6 +455,377 @@ fn feed_remove(db: &Database, id_str: &str) -> Result<()> {
         println!("Feed not found: {id_str}");
     }
     Ok(())
+}
+
+/// Move a feed to a folder (created if it doesn't exist).
+fn feed_move(db: &Database, id_str: &str, folder_name: &str) -> Result<()> {
+    let feed_id = Uuid::parse_str(id_str).context("invalid feed ID")?;
+    let feed = db.get_feed(feed_id).context("feed not found")?;
+
+    let folder = get_or_create_folder(db, folder_name, None)?;
+
+    db.update_feed_folder_id(feed_id, Some(folder.id))
+        .context("failed to move feed")?;
+
+    println!("Moved: {} → {}", feed.title, folder.name);
+    Ok(())
+}
+
+/// List feeds grouped by folder in a tree view.
+fn feed_list_tree(db: &Database) -> Result<()> {
+    let feeds = db.list_feeds().context("failed to list feeds")?;
+    let folders = db
+        .list_feed_folders()
+        .context("failed to list feed folders")?;
+
+    if feeds.is_empty() {
+        println!("No feeds subscribed. Use `pergamon feed add <url>` to add one.");
+        return Ok(());
+    }
+
+    // Group feeds by folder_id.
+    let mut by_folder: std::collections::HashMap<Option<Uuid>, Vec<&Feed>> =
+        std::collections::HashMap::new();
+    for feed in &feeds {
+        by_folder.entry(feed.folder_id).or_default().push(feed);
+    }
+
+    // Print folders with their feeds.
+    for folder in &folders {
+        if let Some(folder_feeds) = by_folder.get(&Some(folder.id)) {
+            println!("📁 {}", folder.name);
+            for feed in folder_feeds {
+                let status = feed_status_label(feed);
+                println!("  ├─ {} {status} [{}]", feed.title, feed.id);
+            }
+        }
+    }
+
+    // Print unfoldered feeds.
+    if let Some(unfoldered) = by_folder.get(&None) {
+        if !folders.is_empty() {
+            println!("📄 (no folder)");
+        }
+        for feed in unfoldered {
+            let status = feed_status_label(feed);
+            if folders.is_empty() {
+                println!("  {} {status} [{}]", feed.title, feed.id);
+            } else {
+                println!("  ├─ {} {status} [{}]", feed.title, feed.id);
+            }
+        }
+    }
+
+    println!("\n{} feed(s) in {} folder(s)", feeds.len(), folders.len());
+    Ok(())
+}
+
+/// Format a feed's status for display.
+fn feed_status_label(feed: &Feed) -> String {
+    if feed.error_count > 0 {
+        format!(
+            "ERR({}): {}",
+            feed.error_count,
+            feed.last_error.as_deref().unwrap_or("unknown")
+        )
+    } else {
+        feed.last_fetched_at.map_or_else(
+            || "never fetched".to_owned(),
+            |t| format!("ok @ {}", fmt_relative(t)),
+        )
+    }
+}
+
+// ======================================================================
+// Import / Export commands
+// ======================================================================
+
+/// Dispatch import subcommand.
+fn handle_import(db: &Database, action: ImportAction) -> Result<()> {
+    match action {
+        ImportAction::Opml { file, dry_run } => import_opml(db, &file, dry_run),
+    }
+}
+
+/// Dispatch export subcommand.
+fn handle_export(db: &Database, action: ExportAction) -> Result<()> {
+    match action {
+        ExportAction::Opml { output } => export_opml(db, output.as_deref()),
+    }
+}
+
+/// Import feed subscriptions from an OPML file.
+fn import_opml(db: &Database, path: &std::path::Path, dry_run: bool) -> Result<()> {
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("failed to read OPML file: {}", path.display()))?;
+
+    let doc = pergamon_feed::parse_opml(&bytes)
+        .with_context(|| format!("failed to parse OPML file: {}", path.display()))?;
+
+    let (total_feeds, total_folders) = pergamon_feed::count_outlines(&doc.outlines);
+
+    if dry_run {
+        println!("Dry run — no changes will be made.\n");
+    }
+
+    println!(
+        "OPML: \"{}\" ({total_feeds} feeds, {total_folders} folders)",
+        doc.title
+    );
+
+    let mut stats = ImportStats::default();
+    import_outlines(db, &doc.outlines, None, dry_run, &mut stats)?;
+
+    println!(
+        "\n{}: {} created, {} existing",
+        if dry_run {
+            "Folders (would)"
+        } else {
+            "Folders"
+        },
+        stats.folders_created,
+        stats.folders_existing,
+    );
+    println!(
+        "{}: {} added, {} existing, {} moved",
+        if dry_run { "Feeds (would)" } else { "Feeds" },
+        stats.feeds_added,
+        stats.feeds_existing,
+        stats.feeds_moved,
+    );
+
+    Ok(())
+}
+
+/// Import statistics.
+#[derive(Default)]
+struct ImportStats {
+    folders_created: u64,
+    folders_existing: u64,
+    feeds_added: u64,
+    feeds_existing: u64,
+    feeds_moved: u64,
+}
+
+/// Recursively import OPML outlines into the database.
+fn import_outlines(
+    db: &Database,
+    outlines: &[pergamon_feed::OpmlOutline],
+    parent_folder_id: Option<Uuid>,
+    dry_run: bool,
+    stats: &mut ImportStats,
+) -> Result<()> {
+    for outline in outlines {
+        if outline.is_feed() {
+            let xml_url = outline
+                .xml_url
+                .as_deref()
+                .unwrap_or_else(|| unreachable!("is_feed but no xml_url"));
+            let title = outline.display_name();
+
+            // Check for existing subscription (idempotent).
+            let existing = db
+                .get_feed_by_url(xml_url)
+                .context("failed to check existing feed")?;
+
+            if let Some(existing_feed) = existing {
+                // Feed already exists — check if folder changed.
+                if existing_feed.folder_id == parent_folder_id {
+                    println!("  ✓ {title} (already subscribed)");
+                    stats.feeds_existing += 1;
+                } else {
+                    if !dry_run {
+                        db.update_feed_folder_id(existing_feed.id, parent_folder_id)
+                            .context("failed to move feed")?;
+                    }
+                    println!("  ↻ {title} (moved to folder)");
+                    stats.feeds_moved += 1;
+                }
+            } else {
+                // New subscription — create without fetching.
+                if !dry_run {
+                    let now = OffsetDateTime::now_utc();
+                    let feed = Feed {
+                        id: Uuid::new_v4(),
+                        title: title.to_owned(),
+                        url: xml_url.to_owned(),
+                        site_url: outline.html_url.clone(),
+                        description: None,
+                        etag: None,
+                        last_modified_header: None,
+                        error_count: 0,
+                        last_error: None,
+                        last_fetched_at: None,
+                        folder_id: parent_folder_id,
+                        created_at: now,
+                        updated_at: now,
+                    };
+                    db.insert_feed(&feed)
+                        .with_context(|| format!("failed to insert feed: {xml_url}"))?;
+                }
+                println!("  + {title}");
+                stats.feeds_added += 1;
+            }
+        } else {
+            // Folder outline.
+            let folder_name = outline.display_name();
+
+            if folder_name.is_empty() {
+                // Skip unnamed folders — treat children as belonging to parent.
+                import_outlines(db, &outline.children, parent_folder_id, dry_run, stats)?;
+                continue;
+            }
+
+            let folder_id = if dry_run {
+                // In dry-run mode, check existence but don't create.
+                let existing = db
+                    .get_feed_folder_by_name(folder_name, parent_folder_id)
+                    .context("failed to check existing folder")?;
+                if let Some(f) = existing {
+                    println!("  📁 {folder_name} (exists)");
+                    stats.folders_existing += 1;
+                    Some(f.id)
+                } else {
+                    println!("  📁 {folder_name} (would create)");
+                    stats.folders_created += 1;
+                    // Use a temporary ID so children can reference it in output.
+                    Some(Uuid::new_v4())
+                }
+            } else {
+                let folder = get_or_create_folder(db, folder_name, parent_folder_id)?;
+                let is_new = folder.created_at == folder.updated_at;
+                if is_new {
+                    println!("  📁 {folder_name} (created)");
+                    stats.folders_created += 1;
+                } else {
+                    println!("  📁 {folder_name} (exists)");
+                    stats.folders_existing += 1;
+                }
+                Some(folder.id)
+            };
+
+            import_outlines(db, &outline.children, folder_id, dry_run, stats)?;
+        }
+    }
+    Ok(())
+}
+
+/// Get an existing folder by name or create a new one.
+fn get_or_create_folder(db: &Database, name: &str, parent_id: Option<Uuid>) -> Result<FeedFolder> {
+    if let Some(existing) = db
+        .get_feed_folder_by_name(name, parent_id)
+        .context("failed to check existing folder")?
+    {
+        return Ok(existing);
+    }
+
+    let now = OffsetDateTime::now_utc();
+    let folder = FeedFolder {
+        id: Uuid::new_v4(),
+        name: name.to_owned(),
+        parent_id,
+        created_at: now,
+        updated_at: now,
+    };
+    db.insert_feed_folder(&folder)
+        .context("failed to create folder")?;
+    Ok(folder)
+}
+
+/// Export all feed subscriptions as OPML.
+fn export_opml(db: &Database, output: Option<&std::path::Path>) -> Result<()> {
+    let feeds = db.list_feeds().context("failed to list feeds")?;
+    let folders = db
+        .list_feed_folders()
+        .context("failed to list feed folders")?;
+
+    // Build a tree of outlines from feeds and folders.
+    let outlines = build_opml_tree(&feeds, &folders);
+
+    let xml = pergamon_feed::generate_opml("pergamon subscriptions", &outlines)
+        .context("failed to generate OPML")?;
+
+    if let Some(path) = output {
+        std::fs::write(path, &xml)
+            .with_context(|| format!("failed to write OPML to {}", path.display()))?;
+        println!("Exported {} feed(s) to {}", feeds.len(), path.display());
+    } else {
+        println!("{xml}");
+    }
+
+    Ok(())
+}
+
+/// Build an OPML outline tree from database feeds and folders.
+fn build_opml_tree(feeds: &[Feed], folders: &[FeedFolder]) -> Vec<pergamon_feed::OpmlOutline> {
+    // Group feeds by folder_id.
+    let mut by_folder: std::collections::HashMap<Option<Uuid>, Vec<&Feed>> =
+        std::collections::HashMap::new();
+    for feed in feeds {
+        by_folder.entry(feed.folder_id).or_default().push(feed);
+    }
+
+    let mut outlines = Vec::new();
+
+    // Root-level folders (parent_id = None).
+    for folder in folders {
+        if folder.parent_id.is_none() {
+            outlines.push(build_folder_outline(folder, &by_folder, folders));
+        }
+    }
+
+    // Root-level feeds (no folder).
+    if let Some(root_feeds) = by_folder.get(&None) {
+        for feed in root_feeds {
+            outlines.push(feed_to_outline(feed));
+        }
+    }
+
+    outlines
+}
+
+/// Build a folder outline recursively.
+fn build_folder_outline(
+    folder: &FeedFolder,
+    by_folder: &std::collections::HashMap<Option<Uuid>, Vec<&Feed>>,
+    all_folders: &[FeedFolder],
+) -> pergamon_feed::OpmlOutline {
+    let mut children = Vec::new();
+
+    // Add child folders.
+    for child_folder in all_folders {
+        if child_folder.parent_id == Some(folder.id) {
+            children.push(build_folder_outline(child_folder, by_folder, all_folders));
+        }
+    }
+
+    // Add feeds in this folder.
+    if let Some(folder_feeds) = by_folder.get(&Some(folder.id)) {
+        for feed in folder_feeds {
+            children.push(feed_to_outline(feed));
+        }
+    }
+
+    pergamon_feed::OpmlOutline {
+        text: folder.name.clone(),
+        title: Some(folder.name.clone()),
+        xml_url: None,
+        html_url: None,
+        feed_type: None,
+        children,
+    }
+}
+
+/// Convert a feed to an OPML outline.
+fn feed_to_outline(feed: &Feed) -> pergamon_feed::OpmlOutline {
+    pergamon_feed::OpmlOutline {
+        text: feed.title.clone(),
+        title: Some(feed.title.clone()),
+        xml_url: Some(feed.url.clone()),
+        html_url: feed.site_url.clone(),
+        feed_type: Some("rss".to_owned()),
+        children: Vec::new(),
+    }
 }
 
 // ======================================================================

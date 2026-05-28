@@ -8,7 +8,9 @@
 //! - Feed URL discovery from web page `<link>` tags
 
 mod error;
+pub mod opml;
 mod parser;
 
 pub use error::FeedError;
+pub use opml::{OpmlDocument, OpmlOutline, count_outlines, generate_opml, parse_opml};
 pub use parser::{ParsedEntry, ParsedFeed, parse_feed};

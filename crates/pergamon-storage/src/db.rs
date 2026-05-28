@@ -14,7 +14,8 @@ use uuid::Uuid;
 
 use pergamon_core::content_type::ContentType;
 use pergamon_core::model::{
-    BookmarkMeta, Collection, ContentItem, Feed, FeedItemMeta, HighlightMeta, SearchResult, Tag,
+    BookmarkMeta, Collection, ContentItem, Feed, FeedFolder, FeedItemMeta, HighlightMeta,
+    SearchResult, Tag,
 };
 use pergamon_core::status::DocumentStatus;
 
@@ -35,6 +36,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         2,
         "feed_health_tracking",
         include_str!("../migrations/V2__feed_health_tracking.sql"),
+    ),
+    (
+        3,
+        "feed_folders",
+        include_str!("../migrations/V3__feed_folders.sql"),
     ),
 ];
 
@@ -112,8 +118,9 @@ impl Database {
         self.conn.execute(
             "INSERT INTO feeds (id, title, url, site_url, description, etag,
                 last_modified_header, error_count, last_error,
-                last_fetched_at, last_successful_fetch_at, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                last_fetched_at, last_successful_fetch_at, folder_id,
+                created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 feed.id.to_string(),
                 feed.title,
@@ -126,6 +133,7 @@ impl Database {
                 feed.last_error,
                 feed.last_fetched_at.map(fmt_time),
                 feed.last_fetched_at.map(fmt_time), // last_successful_fetch_at = last_fetched_at on insert
+                feed.folder_id.map(|id| id.to_string()),
                 fmt_time(feed.created_at),
                 fmt_time(feed.updated_at),
             ],
@@ -139,7 +147,7 @@ impl Database {
             .query_row(
                 "SELECT id, title, url, site_url, description, etag,
                         last_modified_header, error_count, last_error,
-                        last_fetched_at, created_at, updated_at
+                        last_fetched_at, folder_id, created_at, updated_at
                  FROM feeds WHERE id = ?1",
                 params![id.to_string()],
                 |row| Ok(row_to_feed(row)),
@@ -157,7 +165,7 @@ impl Database {
             .query_row(
                 "SELECT id, title, url, site_url, description, etag,
                         last_modified_header, error_count, last_error,
-                        last_fetched_at, created_at, updated_at
+                        last_fetched_at, folder_id, created_at, updated_at
                  FROM feeds WHERE url = ?1",
                 params![url],
                 |row| Ok(row_to_feed(row)),
@@ -171,7 +179,7 @@ impl Database {
         let mut stmt = self.conn.prepare(
             "SELECT id, title, url, site_url, description, etag,
                     last_modified_header, error_count, last_error,
-                    last_fetched_at, created_at, updated_at
+                    last_fetched_at, folder_id, created_at, updated_at
              FROM feeds ORDER BY title COLLATE NOCASE",
         )?;
         let rows = stmt.query_map([], |row| Ok(row_to_feed(row)))?;
@@ -253,6 +261,91 @@ impl Database {
              WHERE fm.feed_id = ?1 AND ci.url = ?2",
             params![feed_id.to_string(), url],
             |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Update the folder assignment for a feed.
+    pub fn update_feed_folder_id(
+        &self,
+        feed_id: Uuid,
+        folder_id: Option<Uuid>,
+    ) -> Result<(), StorageError> {
+        self.conn.execute(
+            "UPDATE feeds SET folder_id = ?1 WHERE id = ?2",
+            params![folder_id.map(|id| id.to_string()), feed_id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // Feed folders
+    // ------------------------------------------------------------------
+
+    /// Insert a new feed folder.
+    pub fn insert_feed_folder(&self, folder: &FeedFolder) -> Result<(), StorageError> {
+        self.conn.execute(
+            "INSERT INTO feed_folders (id, name, parent_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                folder.id.to_string(),
+                folder.name,
+                folder.parent_id.map(|id| id.to_string()),
+                fmt_time(folder.created_at),
+                fmt_time(folder.updated_at),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Find a feed folder by name within a parent (case-insensitive).
+    pub fn get_feed_folder_by_name(
+        &self,
+        name: &str,
+        parent_id: Option<Uuid>,
+    ) -> Result<Option<FeedFolder>, StorageError> {
+        let result = parent_id.map_or_else(
+            || {
+                self.conn.query_row(
+                    "SELECT id, name, parent_id, created_at, updated_at
+                     FROM feed_folders
+                     WHERE name = ?1 COLLATE NOCASE AND parent_id IS NULL",
+                    params![name],
+                    |row| Ok(row_to_feed_folder(row)),
+                )
+            },
+            |pid| {
+                self.conn.query_row(
+                    "SELECT id, name, parent_id, created_at, updated_at
+                     FROM feed_folders
+                     WHERE name = ?1 COLLATE NOCASE AND parent_id = ?2",
+                    params![name, pid.to_string()],
+                    |row| Ok(row_to_feed_folder(row)),
+                )
+            },
+        );
+        result.optional().map_err(StorageError::from)
+    }
+
+    /// List all feed folders, ordered by name.
+    pub fn list_feed_folders(&self) -> Result<Vec<FeedFolder>, StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, parent_id, created_at, updated_at
+             FROM feed_folders ORDER BY name COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map([], |row| Ok(row_to_feed_folder(row)))?;
+        let mut folders = Vec::new();
+        for row in rows {
+            folders.push(row?);
+        }
+        Ok(folders)
+    }
+
+    /// Delete a feed folder. Returns true if the folder existed.
+    pub fn delete_feed_folder(&self, id: Uuid) -> Result<bool, StorageError> {
+        let count = self.conn.execute(
+            "DELETE FROM feed_folders WHERE id = ?1",
+            params![id.to_string()],
         )?;
         Ok(count > 0)
     }
@@ -799,7 +892,7 @@ fn row_to_content_item(row: &rusqlite::Row<'_>) -> ContentItem {
 ///
 /// Expected column order: `id`, `title`, `url`, `site_url`, `description`, `etag`,
 /// `last_modified_header`, `error_count`, `last_error`, `last_fetched_at`,
-/// `created_at`, `updated_at`.
+/// `folder_id`, `created_at`, `updated_at`.
 fn row_to_feed(row: &rusqlite::Row<'_>) -> Feed {
     Feed {
         id: parse_uuid(&row.get::<_, String>(0).unwrap_or_default()),
@@ -815,7 +908,27 @@ fn row_to_feed(row: &rusqlite::Row<'_>) -> Feed {
             .get::<_, Option<String>>(9)
             .unwrap_or_default()
             .map(|s| parse_time(&s)),
-        created_at: parse_time(&row.get::<_, String>(10).unwrap_or_default()),
-        updated_at: parse_time(&row.get::<_, String>(11).unwrap_or_default()),
+        folder_id: row
+            .get::<_, Option<String>>(10)
+            .unwrap_or_default()
+            .map(|s| parse_uuid(&s)),
+        created_at: parse_time(&row.get::<_, String>(11).unwrap_or_default()),
+        updated_at: parse_time(&row.get::<_, String>(12).unwrap_or_default()),
+    }
+}
+
+/// Map a rusqlite `Row` to a [`FeedFolder`].
+///
+/// Expected column order: `id`, `name`, `parent_id`, `created_at`, `updated_at`.
+fn row_to_feed_folder(row: &rusqlite::Row<'_>) -> FeedFolder {
+    FeedFolder {
+        id: parse_uuid(&row.get::<_, String>(0).unwrap_or_default()),
+        name: row.get(1).unwrap_or_default(),
+        parent_id: row
+            .get::<_, Option<String>>(2)
+            .unwrap_or_default()
+            .map(|s| parse_uuid(&s)),
+        created_at: parse_time(&row.get::<_, String>(3).unwrap_or_default()),
+        updated_at: parse_time(&row.get::<_, String>(4).unwrap_or_default()),
     }
 }
