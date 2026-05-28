@@ -304,10 +304,15 @@ impl Database {
     }
 
     /// List content items matching a content type and/or status filter.
+    ///
+    /// Results are ordered by `created_at` descending. Use `limit` and
+    /// `offset` for pagination.
     pub fn list_content_items(
         &self,
         content_type: Option<ContentType>,
         status: Option<DocumentStatus>,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> Result<Vec<ContentItem>, StorageError> {
         let mut sql = String::from(
             "SELECT id, url, title, author, content_type, status,
@@ -326,6 +331,13 @@ impl Database {
         }
         sql.push_str(" ORDER BY created_at DESC");
 
+        if let Some(lim) = limit {
+            let _ = write!(sql, " LIMIT {lim}");
+        }
+        if let Some(off) = offset {
+            let _ = write!(sql, " OFFSET {off}");
+        }
+
         let mut stmt = self.conn.prepare(&sql)?;
         let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
             .iter()
@@ -338,6 +350,42 @@ impl Database {
             items.push(row?);
         }
         Ok(items)
+    }
+
+    /// Update the status of a content item.
+    pub fn update_content_item_status(
+        &self,
+        id: Uuid,
+        status: DocumentStatus,
+    ) -> Result<(), StorageError> {
+        let now = fmt_time(OffsetDateTime::now_utc());
+        let affected = self.conn.execute(
+            "UPDATE content_items SET status = ?1, updated_at = ?2 WHERE id = ?3",
+            params![status.as_str(), now, id.to_string()],
+        )?;
+        if affected == 0 {
+            return Err(StorageError::NotFound {
+                entity: "content_item",
+                id: id.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Count content items matching a status filter.
+    pub fn count_content_items(&self, status: Option<DocumentStatus>) -> Result<u64, StorageError> {
+        let count: i64 = if let Some(st) = status {
+            self.conn.query_row(
+                "SELECT COUNT(*) FROM content_items WHERE status = ?1",
+                params![st.as_str()],
+                |row| row.get(0),
+            )?
+        } else {
+            self.conn
+                .query_row("SELECT COUNT(*) FROM content_items", [], |row| row.get(0))?
+        };
+        #[allow(clippy::cast_sign_loss)]
+        Ok(count as u64)
     }
 
     // ------------------------------------------------------------------

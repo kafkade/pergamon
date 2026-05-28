@@ -18,6 +18,7 @@ workspace = true
 
 [dependencies]
 pergamon-core = { workspace = true }
+pergamon-extract = { workspace = true }
 pergamon-feed = { workspace = true }
 pergamon-storage = { workspace = true }
 clap = { workspace = true }
@@ -25,3 +26,5 @@ anyhow = { workspace = true }
 reqwest = { workspace = true }
 uuid = { workspace = true }
 time = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
