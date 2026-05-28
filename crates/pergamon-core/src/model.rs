@@ -120,6 +120,28 @@ pub struct BookmarkMeta {
     pub favicon_url: Option<String>,
 }
 
+/// Link health check result for a content item.
+///
+/// Tracks the HTTP status, final destination (after redirects), redirect
+/// count, and any connection errors for a URL. Used by `pergamon doctor links`
+/// to detect dead links, redirects, and domain changes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkHealth {
+    /// ID of the associated content item.
+    pub content_item_id: Uuid,
+    /// HTTP status code from the final response (`None` if the request failed
+    /// before receiving a response — e.g., DNS failure, timeout).
+    pub http_status: Option<i32>,
+    /// The URL after following all redirects (`None` if no redirect occurred).
+    pub final_url: Option<String>,
+    /// Number of HTTP redirects followed to reach the final URL.
+    pub redirect_count: i32,
+    /// When this health check was performed.
+    pub last_checked_at: OffsetDateTime,
+    /// Error description when the request failed (timeout, DNS, TLS, etc.).
+    pub error_message: Option<String>,
+}
+
 /// Extension metadata for highlights / annotations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HighlightMeta {

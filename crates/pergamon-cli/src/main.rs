@@ -13,7 +13,7 @@ use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, Parser, Subcommand};
 use pergamon_core::content_type::ContentType;
 use pergamon_core::model::{
-    BookmarkMeta, Collection, ContentItem, Feed, FeedFolder, FeedItemMeta, Tag,
+    BookmarkMeta, Collection, ContentItem, Feed, FeedFolder, FeedItemMeta, LinkHealth, Tag,
 };
 use pergamon_core::status::DocumentStatus;
 use pergamon_storage::Database;
@@ -395,6 +395,12 @@ enum DoctorAction {
         /// Skip confirmation prompt.
         #[arg(long)]
         yes: bool,
+    },
+    /// Check link health by probing saved URLs for dead/broken links.
+    Links {
+        /// Only check links not checked in the last N days.
+        #[arg(long)]
+        stale: Option<u32>,
     },
 }
 
@@ -2264,6 +2270,7 @@ fn handle_doctor(db: &Database, action: DoctorAction) -> Result<()> {
     match action {
         DoctorAction::Dupes => doctor_dupes(db),
         DoctorAction::Merge { keep, discard, yes } => doctor_merge(db, &keep, &discard, yes),
+        DoctorAction::Links { stale } => doctor_links(db, stale),
     }
 }
 
@@ -2458,6 +2465,224 @@ fn doctor_merge(db: &Database, keep_str: &str, discard_str: &str, yes: bool) -> 
     );
 
     Ok(())
+}
+
+/// Check link health by probing saved URLs for dead/broken links.
+fn doctor_links(db: &Database, stale_days: Option<u32>) -> Result<()> {
+    use std::collections::HashMap;
+
+    let urls = db
+        .list_urls_for_health_check(stale_days)
+        .context("listing URLs")?;
+
+    if urls.is_empty() {
+        println!("No URLs to check.");
+        return Ok(());
+    }
+
+    println!("Checking {} URL(s)...\n", urls.len());
+
+    // Build a client that does NOT follow redirects so we can track them.
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(format!("pergamon/{}", pergamon_core::VERSION))
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .context("failed to build link-check HTTP client")?;
+
+    // Group by domain for rate-limiting.
+    let mut domain_last: HashMap<String, std::time::Instant> = HashMap::new();
+    let rate_limit = std::time::Duration::from_millis(200);
+
+    let mut healthy = 0u32;
+    let mut redirected = 0u32;
+    let mut dead = 0u32;
+    let mut server_error = 0u32;
+    let mut conn_error = 0u32;
+
+    for (idx, (item_id, url, _title)) in urls.iter().enumerate() {
+        // Progress reporting every 50 items.
+        if idx > 0 && idx % 50 == 0 {
+            println!("  ... checked {idx}/{} URLs", urls.len());
+        }
+
+        // Rate-limit per domain.
+        if let Ok(parsed) = reqwest::Url::parse(url) {
+            if let Some(host) = parsed.host_str() {
+                let host_key = host.to_lowercase();
+                if let Some(last) = domain_last.get(&host_key) {
+                    let elapsed = last.elapsed();
+                    if elapsed < rate_limit {
+                        std::thread::sleep(rate_limit.checked_sub(elapsed).unwrap_or_default());
+                    }
+                }
+                domain_last.insert(host_key, std::time::Instant::now());
+            }
+        }
+
+        let health = check_url(&client, *item_id, url);
+
+        match health.http_status {
+            Some(s) if (200..300).contains(&s) => {
+                if health.redirect_count > 0 {
+                    redirected += 1;
+                } else {
+                    healthy += 1;
+                }
+            }
+            Some(s) if (400..500).contains(&s) => dead += 1,
+            Some(s) if s >= 500 => server_error += 1,
+            Some(_) => healthy += 1,
+            None => conn_error += 1,
+        }
+
+        db.upsert_link_health(&health)
+            .with_context(|| format!("saving link health for {item_id}"))?;
+    }
+
+    // Summary.
+    println!("\nLink health check complete:");
+    println!("  ✓ Healthy (2xx):      {healthy}");
+    println!("  → Redirected (→2xx):  {redirected}");
+    println!("  ✗ Dead (4xx):         {dead}");
+    println!("  ! Server error (5xx): {server_error}");
+    println!("  ⚠ Connection error:   {conn_error}");
+
+    // List dead/unhealthy links.
+    let unhealthy = db
+        .list_unhealthy_links()
+        .context("listing unhealthy links")?;
+
+    if !unhealthy.is_empty() {
+        println!("\nDead / errored links:");
+        for (lh, title) in &unhealthy {
+            let status_str = lh
+                .http_status
+                .map_or_else(|| "ERR".into(), |s| s.to_string());
+            let err_str = lh.error_message.as_deref().unwrap_or("");
+            println!("  [{status_str}] {title}");
+            if !err_str.is_empty() {
+                println!("        {err_str}");
+            }
+            println!("        ID: {}", lh.content_item_id);
+        }
+    }
+
+    Ok(())
+}
+
+/// Probe a single URL, following redirects manually up to 10 hops.
+///
+/// Tries HEAD first; falls back to GET on 405/501 or suspicious 4xx.
+fn check_url(client: &reqwest::blocking::Client, item_id: Uuid, url: &str) -> LinkHealth {
+    let now = OffsetDateTime::now_utc();
+    let max_redirects = 10;
+
+    let mut current_url = url.to_string();
+    let mut redirect_count: i32 = 0;
+
+    for _ in 0..=max_redirects {
+        // Try HEAD first.
+        let resp = match client.head(&current_url).send() {
+            Ok(r) => r,
+            Err(e) => {
+                return LinkHealth {
+                    content_item_id: item_id,
+                    http_status: None,
+                    final_url: Some(current_url),
+                    redirect_count,
+                    last_checked_at: now,
+                    error_message: Some(format!("{e:#}")),
+                };
+            }
+        };
+
+        let status = i32::from(resp.status().as_u16());
+
+        // Follow 3xx redirects.
+        if (300..400).contains(&status) {
+            if let Some(loc) = resp.headers().get("location") {
+                if let Ok(loc_str) = loc.to_str() {
+                    // Resolve relative redirects.
+                    current_url = reqwest::Url::parse(loc_str).map_or_else(
+                        |_| {
+                            reqwest::Url::parse(&current_url).map_or_else(
+                                |_| loc_str.to_string(),
+                                |base| {
+                                    base.join(loc_str)
+                                        .map_or_else(|_| loc_str.to_string(), |u| u.to_string())
+                                },
+                            )
+                        },
+                        |abs| abs.to_string(),
+                    );
+                    redirect_count += 1;
+                    continue;
+                }
+            }
+            // No valid location header — treat as error.
+            return LinkHealth {
+                content_item_id: item_id,
+                http_status: Some(status),
+                final_url: Some(current_url),
+                redirect_count,
+                last_checked_at: now,
+                error_message: Some("redirect without Location header".into()),
+            };
+        }
+
+        // HEAD got 405/501 → retry with GET.
+        if status == 405 || status == 501 {
+            match client.get(&current_url).send() {
+                Ok(r) => {
+                    let get_status = i32::from(r.status().as_u16());
+                    return LinkHealth {
+                        content_item_id: item_id,
+                        http_status: Some(get_status),
+                        final_url: Some(current_url),
+                        redirect_count,
+                        last_checked_at: now,
+                        error_message: None,
+                    };
+                }
+                Err(e) => {
+                    return LinkHealth {
+                        content_item_id: item_id,
+                        http_status: None,
+                        final_url: Some(current_url),
+                        redirect_count,
+                        last_checked_at: now,
+                        error_message: Some(format!("{e:#}")),
+                    };
+                }
+            }
+        }
+
+        // Final result for this URL.
+        return LinkHealth {
+            content_item_id: item_id,
+            http_status: Some(status),
+            final_url: if current_url == url {
+                None
+            } else {
+                Some(current_url)
+            },
+            redirect_count,
+            last_checked_at: now,
+            error_message: None,
+        };
+    }
+
+    // Exceeded max redirects.
+    LinkHealth {
+        content_item_id: item_id,
+        http_status: None,
+        final_url: Some(current_url),
+        redirect_count,
+        last_checked_at: now,
+        error_message: Some(format!("too many redirects (>{max_redirects})")),
+    }
 }
 
 // ======================================================================
