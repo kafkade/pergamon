@@ -26,3 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Conditional GET support with ETag and Last-Modified headers for efficient feed polling
 - Feed health tracking: error count, last error message, and last successful fetch timestamp
 - Duplicate entry detection using GUID with URL fallback during feed ingestion
+- Article extraction pipeline using readability algorithm with ammonia HTML sanitization (`pergamon-extract`)
+- Metadata extraction from Open Graph, Twitter Card, and standard meta tags
+- PDF text-layer extraction via lopdf
+- `save <url>` command: fetch a web page, extract article content, and store as an inbox item
+- `read` command: TUI inbox and article reader powered by ratatui with vim-style keybindings
+- TUI keybindings for triage: `r` read, `l` later, `s` star, `a` archive, `d` discard
+- Help overlay in the TUI (press `?` to toggle)
+- Pagination support (limit/offset) for content item listing
+- Status update and count queries for content items in storage layer

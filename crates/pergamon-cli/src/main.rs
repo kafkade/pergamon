@@ -4,6 +4,8 @@
 //! system. Combines RSS reader, read-later, bookmark manager, and
 //! knowledge retention engine into a single CLI + ratatui TUI.
 
+mod tui;
+
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
@@ -50,6 +52,13 @@ enum Command {
     },
     /// Refresh all feeds (alias for `feed refresh`).
     Sync,
+    /// Save a URL as an article (fetch, extract, store).
+    Save {
+        /// URL to save.
+        url: String,
+    },
+    /// Open the TUI inbox / reader.
+    Read,
 }
 
 /// Feed management subcommands.
@@ -100,6 +109,8 @@ fn main() -> Result<()> {
     match command {
         Command::Feed { action } => handle_feed(&db, action),
         Command::Sync => refresh_feeds(&db, None),
+        Command::Save { url } => save_url(&db, &url),
+        Command::Read => run_tui(&db),
     }
 }
 
@@ -387,6 +398,137 @@ fn feed_remove(db: &Database, id_str: &str) -> Result<()> {
     } else {
         println!("Feed not found: {id_str}");
     }
+    Ok(())
+}
+
+// ======================================================================
+// Save command
+// ======================================================================
+
+/// Save a URL as an article: fetch → extract → store.
+fn save_url(db: &Database, url: &str) -> Result<()> {
+    let client = http_client()?;
+    let response = client
+        .get(url)
+        .send()
+        .with_context(|| format!("failed to fetch {url}"))?;
+
+    let final_url = response.url().to_string();
+
+    if !response.status().is_success() {
+        bail!("HTTP {} for {url}", response.status());
+    }
+
+    let bytes = response
+        .bytes()
+        .with_context(|| format!("failed to read response from {url}"))?;
+
+    let now = OffsetDateTime::now_utc();
+
+    // Try full article extraction; fall back to metadata-only.
+    let (title, author, content_text, excerpt, published_at) =
+        if let Ok(article) = pergamon_extract::extract_article(&bytes, &final_url) {
+            (
+                article.title.unwrap_or_else(|| final_url.clone()),
+                article.author,
+                Some(article.content_text),
+                article.excerpt,
+                article.published_at,
+            )
+        } else {
+            // Fall back to metadata extraction only.
+            let html = String::from_utf8_lossy(&bytes);
+            let meta = pergamon_extract::extract_metadata(&html);
+            (
+                meta.title.unwrap_or_else(|| final_url.clone()),
+                meta.author,
+                None,
+                meta.description,
+                None,
+            )
+        };
+
+    let item = ContentItem {
+        id: Uuid::new_v4(),
+        url: Some(final_url),
+        title,
+        author,
+        content_type: ContentType::Article,
+        status: DocumentStatus::Inbox,
+        content_text,
+        excerpt,
+        published_at,
+        created_at: now,
+        updated_at: now,
+    };
+
+    db.insert_content_item(&item)
+        .context("failed to save article")?;
+
+    println!("Saved: {} [{}]", item.title, item.id);
+    Ok(())
+}
+
+// ======================================================================
+// TUI command
+// ======================================================================
+
+/// Terminal guard that restores the terminal state on drop.
+///
+/// Ensures raw mode and the alternate screen are cleaned up even
+/// if the application panics.
+struct TerminalGuard;
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = crossterm::terminal::disable_raw_mode();
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen);
+    }
+}
+
+/// Launch the TUI inbox and article reader.
+fn run_tui(db: &Database) -> Result<()> {
+    use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
+    use ratatui::Terminal;
+    use ratatui::backend::CrosstermBackend;
+
+    // Load inbox items (all statuses shown initially).
+    let items = db
+        .list_content_items(None, None, Some(200), None)
+        .context("failed to load content items")?;
+
+    // Set up terminal.
+    enable_raw_mode().context("failed to enable raw mode")?;
+    crossterm::execute!(std::io::stdout(), EnterAlternateScreen)
+        .context("failed to enter alternate screen")?;
+
+    let _guard = TerminalGuard;
+
+    let backend = CrosstermBackend::new(std::io::stdout());
+    let mut terminal = Terminal::new(backend).context("failed to initialize terminal")?;
+
+    let mut app = tui::app::App::new(items);
+
+    // Main loop.
+    while !app.should_quit {
+        terminal
+            .draw(|frame| tui::ui::render(&app, frame))
+            .context("failed to draw TUI")?;
+
+        match tui::event::handle_events(&mut app, db)? {
+            tui::event::Action::Reload => {
+                app.items = db
+                    .list_content_items(None, None, Some(200), None)
+                    .context("failed to reload content items")?;
+                // Keep selection in bounds.
+                if app.selected >= app.items.len() && !app.items.is_empty() {
+                    app.selected = app.items.len() - 1;
+                }
+            }
+            tui::event::Action::None => {}
+        }
+    }
+
     Ok(())
 }
 

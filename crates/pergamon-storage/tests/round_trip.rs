@@ -176,19 +176,19 @@ fn list_content_items_with_filters() {
         .unwrap_or_else(|e| unreachable!("insert bookmark failed: {e}"));
 
     let articles = db
-        .list_content_items(Some(ContentType::Article), None)
+        .list_content_items(Some(ContentType::Article), None, None, None)
         .unwrap_or_else(|e| unreachable!("list articles failed: {e}"));
     assert_eq!(articles.len(), 1);
     assert_eq!(articles[0].title, "An Article");
 
     let reading = db
-        .list_content_items(None, Some(DocumentStatus::Reading))
+        .list_content_items(None, Some(DocumentStatus::Reading), None, None)
         .unwrap_or_else(|e| unreachable!("list reading failed: {e}"));
     assert_eq!(reading.len(), 1);
     assert_eq!(reading[0].title, "An Article");
 
     let all = db
-        .list_content_items(None, None)
+        .list_content_items(None, None, None, None)
         .unwrap_or_else(|e| unreachable!("list all failed: {e}"));
     assert_eq!(all.len(), 2);
 }
