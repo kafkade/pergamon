@@ -62,6 +62,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "feed_folders",
         include_str!("../migrations/V3__feed_folders.sql"),
     ),
+    (
+        4,
+        "url_unique_index",
+        include_str!("../migrations/V4__url_unique_index.sql"),
+    ),
 ];
 
 /// Run all pending migrations inside a transaction.
@@ -416,6 +421,23 @@ impl Database {
             })
     }
 
+    /// Find a content item by its URL.
+    ///
+    /// Returns `None` if no item has the given URL.
+    pub fn get_content_item_by_url(&self, url: &str) -> Result<Option<ContentItem>, StorageError> {
+        let item = self
+            .conn
+            .query_row(
+                "SELECT id, url, title, author, content_type, status,
+                        content_text, excerpt, published_at, created_at, updated_at
+                 FROM content_items WHERE url = ?1",
+                params![url],
+                |row| Ok(row_to_content_item(row)),
+            )
+            .optional()?;
+        Ok(item)
+    }
+
     /// List content items matching a content type and/or status filter.
     ///
     /// Results are ordered by `created_at` descending. Use `limit` and
@@ -748,6 +770,37 @@ impl Database {
             .ok_or_else(|| StorageError::NotFound {
                 entity: "tag",
                 id: id.to_string(),
+            })
+    }
+
+    /// Get an existing tag by name (case-insensitive) or create one.
+    ///
+    /// Uses `INSERT OR IGNORE` to avoid races, then selects the row.
+    pub fn get_or_create_tag(&self, name: &str) -> Result<Tag, StorageError> {
+        let now = fmt_time(OffsetDateTime::now_utc());
+        let id = Uuid::new_v4();
+
+        self.conn.execute(
+            "INSERT OR IGNORE INTO tags (id, name, created_at) VALUES (?1, ?2, ?3)",
+            params![id.to_string(), name, now],
+        )?;
+
+        self.conn
+            .query_row(
+                "SELECT id, name, created_at FROM tags WHERE name = ?1 COLLATE NOCASE",
+                params![name],
+                |row| {
+                    Ok(Tag {
+                        id: parse_uuid(&row.get::<_, String>(0)?),
+                        name: row.get(1)?,
+                        created_at: parse_time(&row.get::<_, String>(2)?),
+                    })
+                },
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "tag",
+                id: name.to_owned(),
             })
     }
 
