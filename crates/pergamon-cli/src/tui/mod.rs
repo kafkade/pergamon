@@ -6,3 +6,374 @@
 pub mod app;
 pub mod event;
 pub mod ui;
+
+use std::time::Duration;
+
+use anyhow::{Context, Result};
+use crossterm::event::{Event, KeyCode, KeyModifiers};
+use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
+use pergamon_core::fsrs::{MemoryState, Parameters, Rating, Scheduler};
+use pergamon_core::model::{ReviewCard, ReviewLog};
+use pergamon_storage::Database;
+use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{Block, Borders, Gauge, Paragraph, Wrap};
+use time::OffsetDateTime;
+use uuid::Uuid;
+
+/// Run a standalone TUI review session.
+#[allow(clippy::too_many_lines)]
+pub fn run_review(db: &Database, cards: Vec<ReviewCard>) -> Result<()> {
+    enable_raw_mode().context("failed to enable raw mode")?;
+    crossterm::execute!(std::io::stdout(), EnterAlternateScreen)
+        .context("failed to enter alternate screen")?;
+
+    let _guard = ReviewTermGuard;
+
+    let backend = CrosstermBackend::new(std::io::stdout());
+    let mut terminal = Terminal::new(backend).context("failed to initialize terminal")?;
+
+    let scheduler = Scheduler::new(&Parameters::default());
+    let total = cards.len();
+    let mut reviewed = 0_usize;
+    let mut again_count = 0_usize;
+
+    let mut queue: Vec<ReviewCard> = cards;
+    let mut current_idx = 0_usize;
+    let mut show_answer = false;
+
+    while current_idx < queue.len() {
+        let card = &queue[current_idx];
+
+        // Fetch the highlight text for display.
+        let (quote_text, source_title) = {
+            let highlight = db.get_highlight_meta(card.content_item_id).ok();
+            let quote = highlight
+                .as_ref()
+                .map_or_else(|| "(no text)".to_owned(), |h| h.quote_text.clone());
+            let note = highlight.as_ref().and_then(|h| h.note.clone());
+            let source = highlight
+                .as_ref()
+                .and_then(|h| h.source_item_id)
+                .and_then(|sid| db.get_content_item(sid).ok())
+                .map(|item| item.title);
+            let display = if let Some(n) = note {
+                format!("{quote}\n\n  Note: {n}")
+            } else {
+                quote
+            };
+            (display, source.unwrap_or_default())
+        };
+
+        // Draw
+        terminal
+            .draw(|frame| {
+                render_review(
+                    frame,
+                    &ReviewRender {
+                        quote_text: &quote_text,
+                        source_title: &source_title,
+                        card,
+                        show_answer,
+                        reviewed,
+                        total,
+                        again_count,
+                    },
+                );
+            })
+            .context("failed to draw review UI")?;
+
+        // Handle input
+        if !crossterm::event::poll(Duration::from_millis(100))? {
+            continue;
+        }
+
+        let Event::Key(key) = crossterm::event::read()? else {
+            continue;
+        };
+
+        // Ctrl+C or 'q' to quit
+        if (key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c'))
+            || key.code == KeyCode::Char('q')
+        {
+            break;
+        }
+
+        if !show_answer {
+            // Space or Enter to reveal answer
+            if matches!(key.code, KeyCode::Char(' ') | KeyCode::Enter) {
+                show_answer = true;
+            }
+            continue;
+        }
+
+        // Rating keys: 1=Again, 2=Hard, 3=Good, 4=Easy
+        let rating = match key.code {
+            KeyCode::Char('1') => Some(Rating::Again),
+            KeyCode::Char('2') => Some(Rating::Hard),
+            KeyCode::Char('3') => Some(Rating::Good),
+            KeyCode::Char('4') => Some(Rating::Easy),
+            _ => None,
+        };
+
+        if let Some(rating) = rating {
+            let now = OffsetDateTime::now_utc();
+            let elapsed_days = card.last_reviewed_at.map_or(0.0, |last| {
+                let dur = now - last;
+                dur.as_seconds_f64() / 86400.0
+            });
+
+            let memory = match (card.stability, card.difficulty) {
+                (Some(s), Some(d)) => Some(MemoryState {
+                    stability: s,
+                    difficulty: d,
+                }),
+                _ => None,
+            };
+
+            let output = scheduler.schedule(card.state, memory, elapsed_days, rating);
+
+            let due_at = now + time::Duration::seconds_f64(output.scheduled_days * 86400.0);
+            let new_review_count = card.review_count + 1;
+            let new_lapse_count = if rating == Rating::Again {
+                card.lapse_count + 1
+            } else {
+                card.lapse_count
+            };
+
+            // Update the card in the database
+            db.update_review_card(
+                card.id,
+                output.next_state.as_str(),
+                output.memory.stability,
+                output.memory.difficulty,
+                due_at,
+                now,
+                new_review_count,
+                new_lapse_count,
+                output.scheduled_days,
+            )
+            .context("failed to update review card")?;
+
+            // Insert review log
+            let log = ReviewLog {
+                id: Uuid::new_v4(),
+                card_id: card.id,
+                rating,
+                state_before: card.state,
+                stability_before: card.stability,
+                difficulty_before: card.difficulty,
+                state_after: output.next_state,
+                stability_after: output.memory.stability,
+                difficulty_after: output.memory.difficulty,
+                elapsed_days,
+                scheduled_days: output.scheduled_days,
+                reviewed_at: now,
+            };
+            db.insert_review_log(&log)
+                .context("failed to insert review log")?;
+
+            reviewed += 1;
+            if rating == Rating::Again {
+                again_count += 1;
+                // Re-enqueue lapsed card at the end
+                let mut updated_card = queue[current_idx].clone();
+                updated_card.state = output.next_state;
+                updated_card.stability = Some(output.memory.stability);
+                updated_card.difficulty = Some(output.memory.difficulty);
+                updated_card.due_at = due_at;
+                updated_card.last_reviewed_at = Some(now);
+                updated_card.review_count = new_review_count;
+                updated_card.lapse_count = new_lapse_count;
+                updated_card.scheduled_days = Some(output.scheduled_days);
+                queue.push(updated_card);
+            }
+
+            current_idx += 1;
+            show_answer = false;
+        }
+    }
+
+    // Show summary before exiting
+    terminal
+        .draw(|frame| {
+            render_review_summary(frame, reviewed, again_count);
+        })
+        .context("failed to draw summary")?;
+
+    // Wait for any key to dismiss
+    loop {
+        if crossterm::event::poll(Duration::from_millis(100))? {
+            if let Event::Key(_) = crossterm::event::read()? {
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// State tracked during a review session for rendering.
+struct ReviewRender<'a> {
+    quote_text: &'a str,
+    source_title: &'a str,
+    card: &'a ReviewCard,
+    show_answer: bool,
+    reviewed: usize,
+    total: usize,
+    again_count: usize,
+}
+
+fn render_review(frame: &mut ratatui::Frame, state: &ReviewRender<'_>) {
+    let area = frame.area();
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // header
+            Constraint::Min(5),    // card content
+            Constraint::Length(3), // controls
+            Constraint::Length(1), // progress bar
+        ])
+        .split(area);
+
+    // Header
+    let header_text = format!(
+        "Review Session — {}/{} reviewed | {} lapsed",
+        state.reviewed, state.total, state.again_count
+    );
+    let header = Paragraph::new(header_text)
+        .alignment(Alignment::Center)
+        .block(Block::default().borders(Borders::BOTTOM));
+    frame.render_widget(header, chunks[0]);
+
+    // Card content
+    let card_block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(
+            " {} | state: {} ",
+            short_id(state.card.id),
+            state.card.state
+        ))
+        .title_alignment(Alignment::Left);
+
+    let inner = card_block.inner(chunks[1]);
+    frame.render_widget(card_block, chunks[1]);
+
+    let content_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // source
+            Constraint::Length(1), // spacer
+            Constraint::Min(3),    // quote
+        ])
+        .split(inner);
+
+    // Source title
+    if !state.source_title.is_empty() {
+        let src = Paragraph::new(Line::from(vec![
+            Span::styled("Source: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(state.source_title, Style::default().fg(Color::Cyan)),
+        ]));
+        frame.render_widget(src, content_chunks[0]);
+    }
+
+    // Quote text (always visible)
+    let quote = Paragraph::new(Text::from(state.quote_text))
+        .wrap(Wrap { trim: false })
+        .style(Style::default().add_modifier(Modifier::ITALIC));
+    frame.render_widget(quote, content_chunks[2]);
+
+    // Controls
+    let controls = if state.show_answer {
+        Paragraph::new(Line::from(vec![
+            Span::styled("[1] Again  ", Style::default().fg(Color::Red)),
+            Span::styled("[2] Hard  ", Style::default().fg(Color::Yellow)),
+            Span::styled("[3] Good  ", Style::default().fg(Color::Green)),
+            Span::styled("[4] Easy  ", Style::default().fg(Color::Cyan)),
+            Span::raw("  [q] Quit"),
+        ]))
+        .alignment(Alignment::Center)
+        .block(Block::default().borders(Borders::TOP))
+    } else {
+        Paragraph::new("[Space/Enter] Show answer  [q] Quit")
+            .alignment(Alignment::Center)
+            .block(Block::default().borders(Borders::TOP))
+    };
+    frame.render_widget(controls, chunks[2]);
+
+    // Progress bar
+    #[allow(clippy::cast_precision_loss)]
+    let progress = if state.total > 0 {
+        state.reviewed as f64 / state.total as f64
+    } else {
+        0.0
+    };
+    let gauge = Gauge::default()
+        .ratio(progress.min(1.0))
+        .gauge_style(Style::default().fg(Color::Green));
+    frame.render_widget(gauge, chunks[3]);
+}
+
+fn render_review_summary(frame: &mut ratatui::Frame, reviewed: usize, again_count: usize) {
+    let area = frame.area();
+    let center = centered_rect(40, 10, area);
+
+    let success = reviewed.saturating_sub(again_count);
+    #[allow(clippy::cast_precision_loss)]
+    let retention = if reviewed > 0 {
+        success as f64 / reviewed as f64 * 100.0
+    } else {
+        0.0
+    };
+
+    let text = vec![
+        Line::raw(""),
+        Line::styled(
+            "Session Complete!",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Line::raw(""),
+        Line::raw(format!("  Reviewed:   {reviewed}")),
+        Line::raw(format!("  Correct:    {success}")),
+        Line::raw(format!("  Lapsed:     {again_count}")),
+        Line::raw(format!("  Retention:  {retention:.0}%")),
+        Line::raw(""),
+        Line::styled(
+            "Press any key to exit",
+            Style::default().fg(Color::DarkGray),
+        ),
+    ];
+
+    let summary = Paragraph::new(text).alignment(Alignment::Center).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Review Summary "),
+    );
+    frame.render_widget(summary, center);
+}
+
+fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    Rect::new(x, y, width.min(area.width), height.min(area.height))
+}
+
+fn short_id(id: Uuid) -> String {
+    id.to_string()[..8].to_owned()
+}
+
+/// Guard that restores terminal state on drop for review sessions.
+struct ReviewTermGuard;
+
+impl Drop for ReviewTermGuard {
+    fn drop(&mut self) {
+        let _ = crossterm::terminal::disable_raw_mode();
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen);
+    }
+}

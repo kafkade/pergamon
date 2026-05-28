@@ -228,3 +228,91 @@ pub struct SearchHit {
     /// Snippet with match context from the best-matching FTS column.
     pub snippet: Option<String>,
 }
+
+/// A spaced-repetition review card linked to a highlight.
+///
+/// Each highlight can optionally have one review card that tracks its
+/// FSRS scheduling state. Created via `review enable`, removed via
+/// `review disable`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReviewCard {
+    /// Stable unique identifier.
+    pub id: Uuid,
+    /// ID of the highlight's `content_item` (FK → `highlight_meta`).
+    pub content_item_id: Uuid,
+    /// Current card state in the FSRS lifecycle.
+    pub state: crate::fsrs::CardState,
+    /// Current stability (days until 90% recall). `None` for new cards.
+    pub stability: Option<f64>,
+    /// Current difficulty (1.0–10.0). `None` for new cards.
+    pub difficulty: Option<f64>,
+    /// When the next review is due.
+    pub due_at: OffsetDateTime,
+    /// When the card was last reviewed. `None` if never reviewed.
+    pub last_reviewed_at: Option<OffsetDateTime>,
+    /// Total number of reviews performed.
+    pub review_count: i32,
+    /// Number of lapses (Again ratings).
+    pub lapse_count: i32,
+    /// Last scheduled interval in days. `None` for new cards.
+    pub scheduled_days: Option<f64>,
+    /// When this card was created.
+    pub created_at: OffsetDateTime,
+    /// When this card was last updated.
+    pub updated_at: OffsetDateTime,
+}
+
+/// A log entry recording a single review event.
+///
+/// Captures both the before and after state of a review for analytics
+/// and potential future algorithm optimization.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReviewLog {
+    /// Stable unique identifier.
+    pub id: Uuid,
+    /// ID of the review card (FK → `review_cards`).
+    pub card_id: Uuid,
+    /// Rating given by the user.
+    pub rating: crate::fsrs::Rating,
+    /// Card state before this review.
+    pub state_before: crate::fsrs::CardState,
+    /// Stability before this review.
+    pub stability_before: Option<f64>,
+    /// Difficulty before this review.
+    pub difficulty_before: Option<f64>,
+    /// Card state after this review.
+    pub state_after: crate::fsrs::CardState,
+    /// Stability after this review.
+    pub stability_after: f64,
+    /// Difficulty after this review.
+    pub difficulty_after: f64,
+    /// Days elapsed since the last review (or card creation).
+    pub elapsed_days: f64,
+    /// Scheduled interval in days after this review.
+    pub scheduled_days: f64,
+    /// When this review was performed.
+    pub reviewed_at: OffsetDateTime,
+}
+
+/// Aggregated review statistics.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReviewStats {
+    /// Total number of review cards.
+    pub total_cards: i64,
+    /// Number of cards currently due.
+    pub due_count: i64,
+    /// Total number of reviews ever performed.
+    pub total_reviews: i64,
+    /// Number of successful reviews (rating ≥ Hard).
+    pub success_count: i64,
+    /// Observed retention rate (`success_count` / `total_reviews`).
+    pub observed_retention: f64,
+    /// Number of new cards (never reviewed).
+    pub new_count: i64,
+    /// Number of cards in learning state.
+    pub learning_count: i64,
+    /// Number of cards in review state.
+    pub review_count: i64,
+    /// Number of cards in relearning state.
+    pub relearning_count: i64,
+}

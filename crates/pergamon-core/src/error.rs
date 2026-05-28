@@ -12,4 +12,8 @@ pub enum CoreError {
     /// A document status string could not be parsed.
     #[error("unknown document status: {0}")]
     UnknownDocumentStatus(String),
+
+    /// A card state string could not be parsed.
+    #[error("unknown card state: {0}")]
+    UnknownCardState(String),
 }
