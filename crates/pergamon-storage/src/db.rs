@@ -15,7 +15,7 @@ use uuid::Uuid;
 use pergamon_core::content_type::ContentType;
 use pergamon_core::model::{
     BookmarkMeta, Collection, ContentItem, Feed, FeedFolder, FeedItemMeta, HighlightMeta,
-    SearchHit, SearchResult, Tag,
+    LinkHealth, SearchHit, SearchResult, Tag,
 };
 use pergamon_core::status::DocumentStatus;
 
@@ -99,6 +99,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         5,
         "bookmark_meta_enrichment",
         include_str!("../migrations/V5__bookmark_meta_enrichment.sql"),
+    ),
+    (
+        6,
+        "link_health",
+        include_str!("../migrations/V6__link_health.sql"),
     ),
 ];
 
@@ -1946,11 +1951,131 @@ impl Database {
         )?;
         Ok(())
     }
-}
 
-// ======================================================================
-// Query builder helpers
-// ======================================================================
+    // ------------------------------------------------------------------
+    // Link health checking (#17)
+    // ------------------------------------------------------------------
+
+    /// Upsert a link health check result.
+    ///
+    /// Inserts a new record or updates an existing one for the given
+    /// content item.
+    pub fn upsert_link_health(&self, health: &LinkHealth) -> Result<(), StorageError> {
+        self.conn.execute(
+            "INSERT INTO link_health (content_item_id, http_status, final_url, redirect_count, last_checked_at, error_message)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(content_item_id) DO UPDATE SET
+                http_status = excluded.http_status,
+                final_url = excluded.final_url,
+                redirect_count = excluded.redirect_count,
+                last_checked_at = excluded.last_checked_at,
+                error_message = excluded.error_message",
+            params![
+                health.content_item_id.to_string(),
+                health.http_status,
+                health.final_url,
+                health.redirect_count,
+                fmt_time(health.last_checked_at),
+                health.error_message,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// List content item URLs that need a health check.
+    ///
+    /// When `stale_days` is `None`, returns **all** items with a URL.
+    /// When set, returns only items with no health record or whose
+    /// `last_checked_at` is older than the given number of days.
+    ///
+    /// Returns `(content_item_id, url, title)` triples ordered by
+    /// `created_at`.
+    pub fn list_urls_for_health_check(
+        &self,
+        stale_days: Option<u32>,
+    ) -> Result<Vec<(Uuid, String, String)>, StorageError> {
+        let mut result = Vec::new();
+
+        match stale_days {
+            None => {
+                let mut stmt = self.conn.prepare(
+                    "SELECT c.id, c.url, c.title
+                     FROM content_items c
+                     WHERE c.url IS NOT NULL
+                     ORDER BY c.created_at",
+                )?;
+                let rows = stmt.query_map([], |row| {
+                    let id: String = row.get(0)?;
+                    let url: String = row.get(1)?;
+                    let title: String = row.get(2)?;
+                    Ok((parse_uuid(&id), url, title))
+                })?;
+                for row in rows {
+                    result.push(row?);
+                }
+            }
+            Some(days) => {
+                let cutoff = OffsetDateTime::now_utc() - time::Duration::days(i64::from(days));
+                let cutoff_str = fmt_time(cutoff);
+                let mut stmt = self.conn.prepare(
+                    "SELECT c.id, c.url, c.title
+                     FROM content_items c
+                     LEFT JOIN link_health lh ON lh.content_item_id = c.id
+                     WHERE c.url IS NOT NULL
+                       AND (lh.content_item_id IS NULL
+                            OR lh.last_checked_at < ?1)
+                     ORDER BY c.created_at",
+                )?;
+                let rows = stmt.query_map(params![cutoff_str], |row| {
+                    let id: String = row.get(0)?;
+                    let url: String = row.get(1)?;
+                    let title: String = row.get(2)?;
+                    Ok((parse_uuid(&id), url, title))
+                })?;
+                for row in rows {
+                    result.push(row?);
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// List all link health records with dead or errored status.
+    ///
+    /// Returns records where the HTTP status is 4xx/5xx or where the
+    /// request failed entirely (no status).
+    pub fn list_unhealthy_links(&self) -> Result<Vec<(LinkHealth, String)>, StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT lh.content_item_id, lh.http_status, lh.final_url,
+                    lh.redirect_count, lh.last_checked_at, lh.error_message,
+                    c.title
+             FROM link_health lh
+             JOIN content_items c ON c.id = lh.content_item_id
+             WHERE lh.http_status IS NULL
+                OR lh.http_status >= 400
+             ORDER BY lh.http_status, c.title",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let id: String = row.get(0)?;
+            let health = LinkHealth {
+                content_item_id: parse_uuid(&id),
+                http_status: row.get(1)?,
+                final_url: row.get(2)?,
+                redirect_count: row.get(3)?,
+                last_checked_at: parse_time(&row.get::<_, String>(4)?),
+                error_message: row.get(5)?,
+            };
+            let title: String = row.get(6)?;
+            Ok((health, title))
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+}
 
 /// Build a SQL query for content items matching a [`ContentItemFilter`].
 ///

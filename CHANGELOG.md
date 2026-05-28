@@ -92,3 +92,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Re-saving a URL as `--bookmark` upserts metadata without creating a duplicate
 - `pergamon doctor dupes` command: scan for duplicate URLs using canonical URL matching with confidence levels (exact vs. canonical)
 - `pergamon doctor merge <keep> <discard>` command: safely merge two duplicate items — transfers tags and collections, preserves extension metadata, backdates `created_at`, and deletes the discarded item
+- `pergamon doctor links` command: check link health by probing saved URLs — detects dead links (4xx), server errors (5xx), redirect chains, and connection failures
+- `--stale <days>` flag for `doctor links` to only check URLs not verified in the last N days
+- Link health results stored in database for incremental re-checking
