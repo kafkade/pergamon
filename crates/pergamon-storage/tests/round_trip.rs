@@ -1169,6 +1169,8 @@ fn backup_round_trip() {
         &cit,
         &ci,
         &[],
+        &[],
+        &[],
     )
     .unwrap_or_else(|e| unreachable!("restore failed: {e}"));
 
@@ -1227,7 +1229,21 @@ fn restore_rejects_nonempty_database() {
     db.insert_tag(&tag)
         .unwrap_or_else(|e| unreachable!("insert: {e}"));
 
-    let result = db.restore_backup(&[], &[], &[], &[], &[], &[], &[], &[], &[], &[], &[]);
+    let result = db.restore_backup(
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+    );
     match result {
         Ok(()) => unreachable!("expected restore to fail on non-empty DB"),
         Err(e) => {
@@ -1243,8 +1259,8 @@ fn schema_version_returns_latest() {
     let version = db
         .schema_version()
         .unwrap_or_else(|e| unreachable!("version: {e}"));
-    // We have 7 migrations (V1–V7).
-    assert_eq!(version, 7);
+    // We have 8 migrations (V1–V8).
+    assert_eq!(version, 8);
 }
 
 #[test]
@@ -2092,6 +2108,8 @@ fn backup_restore_includes_notes() {
         &[],
         &[],
         &notes_out,
+        &[],
+        &[],
     )
     .unwrap_or_else(|e| unreachable!("restore: {e}"));
 
@@ -2100,4 +2118,525 @@ fn backup_restore_includes_notes() {
         .unwrap_or_else(|e| unreachable!("dst notes: {e}"));
     assert_eq!(dst_notes.len(), 1);
     assert_eq!(dst_notes[0].body, "A note to backup");
+}
+
+// ======================================================================
+// Review card round-trip
+// ======================================================================
+
+#[test]
+fn review_card_insert_get_and_update() {
+    use pergamon_core::fsrs::CardState;
+    use pergamon_core::model::ReviewCard;
+
+    let db = test_db();
+
+    // Create source article + highlight (FK requirement).
+    let source = ContentItem {
+        id: Uuid::new_v4(),
+        url: Some("https://example.com/review-src".to_owned()),
+        title: "Review Source".to_owned(),
+        author: None,
+        content_type: ContentType::Article,
+        status: DocumentStatus::Inbox,
+        content_text: Some("text for review testing".to_owned()),
+        excerpt: None,
+        published_at: None,
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.insert_content_item(&source)
+        .unwrap_or_else(|e| unreachable!("insert source: {e}"));
+
+    let highlight = ContentItem {
+        id: Uuid::new_v4(),
+        url: None,
+        title: "Review Highlight".to_owned(),
+        author: None,
+        content_type: ContentType::Highlight,
+        status: DocumentStatus::Inbox,
+        content_text: Some("review testing".to_owned()),
+        excerpt: None,
+        published_at: None,
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.insert_content_item(&highlight)
+        .unwrap_or_else(|e| unreachable!("insert highlight: {e}"));
+
+    let meta = HighlightMeta {
+        content_item_id: highlight.id,
+        source_item_id: Some(source.id),
+        quote_text: "review testing".to_owned(),
+        note: None,
+        position_start: None,
+        position_end: None,
+        color: None,
+    };
+    db.insert_highlight_meta(&meta)
+        .unwrap_or_else(|e| unreachable!("insert meta: {e}"));
+
+    // Insert review card.
+    let card = ReviewCard {
+        id: Uuid::new_v4(),
+        content_item_id: highlight.id,
+        state: CardState::New,
+        stability: None,
+        difficulty: None,
+        due_at: now(),
+        last_reviewed_at: None,
+        review_count: 0,
+        lapse_count: 0,
+        scheduled_days: None,
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.insert_review_card(&card)
+        .unwrap_or_else(|e| unreachable!("insert card: {e}"));
+
+    // Get by id.
+    let got = db
+        .get_review_card(card.id)
+        .unwrap_or_else(|e| unreachable!("get card: {e}"));
+    assert_eq!(got.id, card.id);
+    assert_eq!(got.content_item_id, highlight.id);
+    assert_eq!(got.state, CardState::New);
+    assert_eq!(got.review_count, 0);
+
+    // Get by content item.
+    let got2 = db
+        .get_review_card_for_item(highlight.id)
+        .unwrap_or_else(|e| unreachable!("get for item: {e}"));
+    assert!(got2.is_some());
+    assert_eq!(
+        got2.unwrap_or_else(|| unreachable!("already checked")).id,
+        card.id
+    );
+
+    // Update.
+    let due_at = now() + time::Duration::days(5);
+    let last_rev = now();
+    db.update_review_card(card.id, "review", 5.0, 4.5, due_at, last_rev, 1, 0, 5.0)
+        .unwrap_or_else(|e| unreachable!("update card: {e}"));
+
+    let got3 = db
+        .get_review_card(card.id)
+        .unwrap_or_else(|e| unreachable!("get after update: {e}"));
+    assert_eq!(got3.state, CardState::Review);
+    assert!(
+        (got3
+            .stability
+            .unwrap_or_else(|| unreachable!("stability should be set"))
+            - 5.0)
+            .abs()
+            < f64::EPSILON
+    );
+    assert!(
+        (got3
+            .difficulty
+            .unwrap_or_else(|| unreachable!("difficulty should be set"))
+            - 4.5)
+            .abs()
+            < f64::EPSILON
+    );
+    assert_eq!(got3.review_count, 1);
+}
+
+#[test]
+fn review_card_list_due() {
+    use pergamon_core::fsrs::CardState;
+    use pergamon_core::model::ReviewCard;
+
+    let db = test_db();
+
+    // Create two highlights with review cards.
+    let items: Vec<_> = (0..2)
+        .map(|i| {
+            let source = ContentItem {
+                id: Uuid::new_v4(),
+                url: Some(format!("https://example.com/due-{i}")),
+                title: format!("Due Source {i}"),
+                author: None,
+                content_type: ContentType::Article,
+                status: DocumentStatus::Inbox,
+                content_text: Some(format!("text {i}")),
+                excerpt: None,
+                published_at: None,
+                created_at: now(),
+                updated_at: now(),
+            };
+            db.insert_content_item(&source)
+                .unwrap_or_else(|e| unreachable!("insert source {i}: {e}"));
+            let hl = ContentItem {
+                id: Uuid::new_v4(),
+                url: None,
+                title: format!("Due Highlight {i}"),
+                author: None,
+                content_type: ContentType::Highlight,
+                status: DocumentStatus::Inbox,
+                content_text: Some(format!("highlight {i}")),
+                excerpt: None,
+                published_at: None,
+                created_at: now(),
+                updated_at: now(),
+            };
+            db.insert_content_item(&hl)
+                .unwrap_or_else(|e| unreachable!("insert hl {i}: {e}"));
+            let meta = HighlightMeta {
+                content_item_id: hl.id,
+                source_item_id: Some(source.id),
+                quote_text: format!("highlight {i}"),
+                note: None,
+                position_start: None,
+                position_end: None,
+                color: None,
+            };
+            db.insert_highlight_meta(&meta)
+                .unwrap_or_else(|e| unreachable!("insert meta {i}: {e}"));
+            hl.id
+        })
+        .collect();
+
+    // Card 0: due in the past (should be listed).
+    let past = now() - time::Duration::hours(1);
+    let card0 = ReviewCard {
+        id: Uuid::new_v4(),
+        content_item_id: items[0],
+        state: CardState::New,
+        stability: None,
+        difficulty: None,
+        due_at: past,
+        last_reviewed_at: None,
+        review_count: 0,
+        lapse_count: 0,
+        scheduled_days: None,
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.insert_review_card(&card0)
+        .unwrap_or_else(|e| unreachable!("insert card0: {e}"));
+
+    // Card 1: due far in the future (should NOT be listed).
+    let future = now() + time::Duration::days(30);
+    let card1 = ReviewCard {
+        id: Uuid::new_v4(),
+        content_item_id: items[1],
+        state: CardState::Review,
+        stability: Some(10.0),
+        difficulty: Some(5.0),
+        due_at: future,
+        last_reviewed_at: Some(now()),
+        review_count: 3,
+        lapse_count: 0,
+        scheduled_days: Some(30.0),
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.insert_review_card(&card1)
+        .unwrap_or_else(|e| unreachable!("insert card1: {e}"));
+
+    let due = db
+        .list_due_review_cards(now())
+        .unwrap_or_else(|e| unreachable!("list due: {e}"));
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].id, card0.id);
+
+    // list_all should return both.
+    let all = db
+        .list_all_review_cards()
+        .unwrap_or_else(|e| unreachable!("list all: {e}"));
+    assert_eq!(all.len(), 2);
+}
+
+#[test]
+fn review_card_delete_and_cascade() {
+    use pergamon_core::fsrs::CardState;
+    use pergamon_core::model::ReviewCard;
+
+    let db = test_db();
+
+    let source = ContentItem {
+        id: Uuid::new_v4(),
+        url: Some("https://example.com/cascade-review".to_owned()),
+        title: "Cascade Review Source".to_owned(),
+        author: None,
+        content_type: ContentType::Article,
+        status: DocumentStatus::Inbox,
+        content_text: Some("cascade test".to_owned()),
+        excerpt: None,
+        published_at: None,
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.insert_content_item(&source)
+        .unwrap_or_else(|e| unreachable!("insert source: {e}"));
+
+    let hl = ContentItem {
+        id: Uuid::new_v4(),
+        url: None,
+        title: "Cascade Highlight".to_owned(),
+        author: None,
+        content_type: ContentType::Highlight,
+        status: DocumentStatus::Inbox,
+        content_text: Some("cascade".to_owned()),
+        excerpt: None,
+        published_at: None,
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.insert_content_item(&hl)
+        .unwrap_or_else(|e| unreachable!("insert hl: {e}"));
+
+    let meta = HighlightMeta {
+        content_item_id: hl.id,
+        source_item_id: Some(source.id),
+        quote_text: "cascade".to_owned(),
+        note: None,
+        position_start: None,
+        position_end: None,
+        color: None,
+    };
+    db.insert_highlight_meta(&meta)
+        .unwrap_or_else(|e| unreachable!("insert meta: {e}"));
+
+    let card = ReviewCard {
+        id: Uuid::new_v4(),
+        content_item_id: hl.id,
+        state: CardState::New,
+        stability: None,
+        difficulty: None,
+        due_at: now(),
+        last_reviewed_at: None,
+        review_count: 0,
+        lapse_count: 0,
+        scheduled_days: None,
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.insert_review_card(&card)
+        .unwrap_or_else(|e| unreachable!("insert card: {e}"));
+
+    // Delete the highlight content item → card should cascade.
+    db.delete_content_item(hl.id)
+        .unwrap_or_else(|e| unreachable!("delete hl: {e}"));
+
+    assert!(db.get_review_card(card.id).is_err());
+}
+
+#[test]
+fn review_log_insert_and_list() {
+    use pergamon_core::fsrs::{CardState, Rating};
+    use pergamon_core::model::{ReviewCard, ReviewLog};
+
+    let db = test_db();
+
+    let source = ContentItem {
+        id: Uuid::new_v4(),
+        url: Some("https://example.com/log-src".to_owned()),
+        title: "Log Source".to_owned(),
+        author: None,
+        content_type: ContentType::Article,
+        status: DocumentStatus::Inbox,
+        content_text: Some("log text".to_owned()),
+        excerpt: None,
+        published_at: None,
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.insert_content_item(&source)
+        .unwrap_or_else(|e| unreachable!("insert source: {e}"));
+
+    let hl = ContentItem {
+        id: Uuid::new_v4(),
+        url: None,
+        title: "Log Highlight".to_owned(),
+        author: None,
+        content_type: ContentType::Highlight,
+        status: DocumentStatus::Inbox,
+        content_text: Some("log hl".to_owned()),
+        excerpt: None,
+        published_at: None,
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.insert_content_item(&hl)
+        .unwrap_or_else(|e| unreachable!("insert hl: {e}"));
+
+    let meta = HighlightMeta {
+        content_item_id: hl.id,
+        source_item_id: Some(source.id),
+        quote_text: "log hl".to_owned(),
+        note: None,
+        position_start: None,
+        position_end: None,
+        color: None,
+    };
+    db.insert_highlight_meta(&meta)
+        .unwrap_or_else(|e| unreachable!("insert meta: {e}"));
+
+    let card = ReviewCard {
+        id: Uuid::new_v4(),
+        content_item_id: hl.id,
+        state: CardState::New,
+        stability: None,
+        difficulty: None,
+        due_at: now(),
+        last_reviewed_at: None,
+        review_count: 0,
+        lapse_count: 0,
+        scheduled_days: None,
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.insert_review_card(&card)
+        .unwrap_or_else(|e| unreachable!("insert card: {e}"));
+
+    // Insert a review log.
+    let log = ReviewLog {
+        id: Uuid::new_v4(),
+        card_id: card.id,
+        rating: Rating::Good,
+        state_before: CardState::New,
+        stability_before: None,
+        difficulty_before: None,
+        state_after: CardState::Review,
+        stability_after: 2.3,
+        difficulty_after: 5.5,
+        elapsed_days: 0.0,
+        scheduled_days: 2.3,
+        reviewed_at: now(),
+    };
+    db.insert_review_log(&log)
+        .unwrap_or_else(|e| unreachable!("insert log: {e}"));
+
+    let logs = db
+        .list_review_logs_for_card(card.id)
+        .unwrap_or_else(|e| unreachable!("list logs: {e}"));
+    assert_eq!(logs.len(), 1);
+    assert_eq!(logs[0].rating, Rating::Good);
+    assert_eq!(logs[0].state_before, CardState::New);
+    assert_eq!(logs[0].state_after, CardState::Review);
+    assert!((logs[0].stability_after - 2.3).abs() < f64::EPSILON);
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn review_stats_computed_correctly() {
+    use pergamon_core::fsrs::{CardState, Rating};
+    use pergamon_core::model::{ReviewCard, ReviewLog};
+
+    let db = test_db();
+
+    // Stats on empty DB.
+    let stats = db
+        .review_stats(now())
+        .unwrap_or_else(|e| unreachable!("stats empty: {e}"));
+    assert_eq!(stats.total_cards, 0);
+    assert_eq!(stats.total_reviews, 0);
+
+    // Create a highlight + card.
+    let source = ContentItem {
+        id: Uuid::new_v4(),
+        url: Some("https://example.com/stats-src".to_owned()),
+        title: "Stats Source".to_owned(),
+        author: None,
+        content_type: ContentType::Article,
+        status: DocumentStatus::Inbox,
+        content_text: Some("stats".to_owned()),
+        excerpt: None,
+        published_at: None,
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.insert_content_item(&source)
+        .unwrap_or_else(|e| unreachable!("insert source: {e}"));
+
+    let hl = ContentItem {
+        id: Uuid::new_v4(),
+        url: None,
+        title: "Stats Highlight".to_owned(),
+        author: None,
+        content_type: ContentType::Highlight,
+        status: DocumentStatus::Inbox,
+        content_text: Some("stats hl".to_owned()),
+        excerpt: None,
+        published_at: None,
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.insert_content_item(&hl)
+        .unwrap_or_else(|e| unreachable!("insert hl: {e}"));
+
+    let meta = HighlightMeta {
+        content_item_id: hl.id,
+        source_item_id: Some(source.id),
+        quote_text: "stats hl".to_owned(),
+        note: None,
+        position_start: None,
+        position_end: None,
+        color: None,
+    };
+    db.insert_highlight_meta(&meta)
+        .unwrap_or_else(|e| unreachable!("insert meta: {e}"));
+
+    let card = ReviewCard {
+        id: Uuid::new_v4(),
+        content_item_id: hl.id,
+        state: CardState::New,
+        stability: None,
+        difficulty: None,
+        due_at: now(),
+        last_reviewed_at: None,
+        review_count: 0,
+        lapse_count: 0,
+        scheduled_days: None,
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.insert_review_card(&card)
+        .unwrap_or_else(|e| unreachable!("insert card: {e}"));
+
+    // Add two review logs: one Good (success), one Again (failure).
+    let log1 = ReviewLog {
+        id: Uuid::new_v4(),
+        card_id: card.id,
+        rating: Rating::Good,
+        state_before: CardState::New,
+        stability_before: None,
+        difficulty_before: None,
+        state_after: CardState::Review,
+        stability_after: 2.3,
+        difficulty_after: 5.0,
+        elapsed_days: 0.0,
+        scheduled_days: 2.3,
+        reviewed_at: now(),
+    };
+    db.insert_review_log(&log1)
+        .unwrap_or_else(|e| unreachable!("insert log1: {e}"));
+
+    let log2 = ReviewLog {
+        id: Uuid::new_v4(),
+        card_id: card.id,
+        rating: Rating::Again,
+        state_before: CardState::Review,
+        stability_before: Some(2.3),
+        difficulty_before: Some(5.0),
+        state_after: CardState::Relearning,
+        stability_after: 0.5,
+        difficulty_after: 6.0,
+        elapsed_days: 2.0,
+        scheduled_days: 0.5,
+        reviewed_at: now(),
+    };
+    db.insert_review_log(&log2)
+        .unwrap_or_else(|e| unreachable!("insert log2: {e}"));
+
+    let stats = db
+        .review_stats(now())
+        .unwrap_or_else(|e| unreachable!("stats: {e}"));
+    assert_eq!(stats.total_cards, 1);
+    assert_eq!(stats.total_reviews, 2);
+    assert_eq!(stats.success_count, 1); // Good counts as success (rating >= 2)
+    assert!((stats.observed_retention - 0.5).abs() < f64::EPSILON);
+    assert_eq!(stats.new_count, 1); // Card is still in New state in DB
 }

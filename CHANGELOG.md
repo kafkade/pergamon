@@ -23,6 +23,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Auto-position detection for highlights: byte offsets are recorded when quote text uniquely matches the source
 - Notes table with foreign key cascade deletion (V7 migration)
 - Backup and restore now includes notes
+- FSRS-5 spaced repetition engine in `pergamon-core` (pure computation, zero I/O): power forgetting curve, stability/difficulty updates, interval scheduling
+- `ReviewCard` and `ReviewLog` domain types with full FSRS state tracking
+- `review enable <id>` command: create a review card for any highlight
+- `review disable <id>` command: remove a review card and its logs
+- `review due` command: list cards due for review with configurable `--limit`
+- `review stats` command: display aggregated review statistics (total cards, due count, retention rate, state breakdown)
+- `review start` command: launch interactive TUI review session with Again/Hard/Good/Easy ratings
+- TUI review mode: card display with source context, rating controls, progress bar, and session summary
+- Review cards and review logs tables with FK cascades (V8 migration)
+- Backup and restore now includes review cards and review logs
 
 ## [0.2.0] - 2026-05-28
 

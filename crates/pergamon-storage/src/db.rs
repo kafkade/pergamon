@@ -13,9 +13,10 @@ use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
 use pergamon_core::content_type::ContentType;
+use pergamon_core::fsrs::{CardState, Rating};
 use pergamon_core::model::{
     BookmarkMeta, Collection, ContentItem, Feed, FeedFolder, FeedItemMeta, HighlightMeta,
-    LinkHealth, Note, SearchHit, SearchResult, Tag,
+    LinkHealth, Note, ReviewCard, ReviewLog, ReviewStats, SearchHit, SearchResult, Tag,
 };
 use pergamon_core::status::DocumentStatus;
 
@@ -109,6 +110,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         7,
         "notes_table",
         include_str!("../migrations/V7__notes_table.sql"),
+    ),
+    (
+        8,
+        "review_cards",
+        include_str!("../migrations/V8__review_cards.sql"),
     ),
 ];
 
@@ -1045,6 +1051,289 @@ impl Database {
     }
 
     // ------------------------------------------------------------------
+    // Review cards (FSRS spaced repetition)
+    // ------------------------------------------------------------------
+
+    /// Insert a new review card for a highlight.
+    pub fn insert_review_card(&self, card: &ReviewCard) -> Result<(), StorageError> {
+        self.conn.execute(
+            "INSERT INTO review_cards (
+                id, content_item_id, state, stability, difficulty,
+                due_at, last_reviewed_at, review_count, lapse_count,
+                scheduled_days, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                card.id.to_string(),
+                card.content_item_id.to_string(),
+                card.state.as_str(),
+                card.stability,
+                card.difficulty,
+                fmt_time(card.due_at),
+                card.last_reviewed_at.map(fmt_time),
+                card.review_count,
+                card.lapse_count,
+                card.scheduled_days,
+                fmt_time(card.created_at),
+                fmt_time(card.updated_at),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Retrieve a review card by ID.
+    pub fn get_review_card(&self, id: Uuid) -> Result<ReviewCard, StorageError> {
+        self.conn
+            .query_row(
+                "SELECT id, content_item_id, state, stability, difficulty,
+                        due_at, last_reviewed_at, review_count, lapse_count,
+                        scheduled_days, created_at, updated_at
+                 FROM review_cards WHERE id = ?1",
+                params![id.to_string()],
+                |row| Ok(row_to_review_card(row)),
+            )
+            .map_err(StorageError::from)
+    }
+
+    /// Retrieve the review card for a given highlight content item.
+    pub fn get_review_card_for_item(
+        &self,
+        content_item_id: Uuid,
+    ) -> Result<Option<ReviewCard>, StorageError> {
+        self.conn
+            .query_row(
+                "SELECT id, content_item_id, state, stability, difficulty,
+                        due_at, last_reviewed_at, review_count, lapse_count,
+                        scheduled_days, created_at, updated_at
+                 FROM review_cards WHERE content_item_id = ?1",
+                params![content_item_id.to_string()],
+                |row| Ok(row_to_review_card(row)),
+            )
+            .optional()
+            .map_err(StorageError::from)
+    }
+
+    /// Update a review card after a review (state, memory, schedule).
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_review_card(
+        &self,
+        id: Uuid,
+        state: &str,
+        stability: f64,
+        difficulty: f64,
+        due_at: OffsetDateTime,
+        last_reviewed_at: OffsetDateTime,
+        review_count: i32,
+        lapse_count: i32,
+        scheduled_days: f64,
+    ) -> Result<(), StorageError> {
+        let rows = self.conn.execute(
+            "UPDATE review_cards SET
+                state = ?1, stability = ?2, difficulty = ?3,
+                due_at = ?4, last_reviewed_at = ?5,
+                review_count = ?6, lapse_count = ?7, scheduled_days = ?8
+             WHERE id = ?9",
+            params![
+                state,
+                stability,
+                difficulty,
+                fmt_time(due_at),
+                fmt_time(last_reviewed_at),
+                review_count,
+                lapse_count,
+                scheduled_days,
+                id.to_string(),
+            ],
+        )?;
+        if rows == 0 {
+            return Err(StorageError::NotFound {
+                entity: "review_card",
+                id: id.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Delete a review card (disable review tracking for a highlight).
+    pub fn delete_review_card(&self, id: Uuid) -> Result<bool, StorageError> {
+        let rows = self.conn.execute(
+            "DELETE FROM review_cards WHERE id = ?1",
+            params![id.to_string()],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// Delete the review card for a given highlight content item.
+    pub fn delete_review_card_for_item(&self, content_item_id: Uuid) -> Result<bool, StorageError> {
+        let rows = self.conn.execute(
+            "DELETE FROM review_cards WHERE content_item_id = ?1",
+            params![content_item_id.to_string()],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// List all review cards due on or before the given time.
+    pub fn list_due_review_cards(
+        &self,
+        now: OffsetDateTime,
+    ) -> Result<Vec<ReviewCard>, StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, content_item_id, state, stability, difficulty,
+                    due_at, last_reviewed_at, review_count, lapse_count,
+                    scheduled_days, created_at, updated_at
+             FROM review_cards
+             WHERE due_at <= ?1
+             ORDER BY due_at ASC",
+        )?;
+        let rows = stmt.query_map(params![fmt_time(now)], |row| Ok(row_to_review_card(row)))?;
+        let mut cards = Vec::new();
+        for row in rows {
+            cards.push(row?);
+        }
+        Ok(cards)
+    }
+
+    /// List all review cards.
+    pub fn list_all_review_cards(&self) -> Result<Vec<ReviewCard>, StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, content_item_id, state, stability, difficulty,
+                    due_at, last_reviewed_at, review_count, lapse_count,
+                    scheduled_days, created_at, updated_at
+             FROM review_cards ORDER BY created_at",
+        )?;
+        let rows = stmt.query_map([], |row| Ok(row_to_review_card(row)))?;
+        let mut cards = Vec::new();
+        for row in rows {
+            cards.push(row?);
+        }
+        Ok(cards)
+    }
+
+    // ------------------------------------------------------------------
+    // Review logs
+    // ------------------------------------------------------------------
+
+    /// Insert a review log entry.
+    pub fn insert_review_log(&self, log: &ReviewLog) -> Result<(), StorageError> {
+        self.conn.execute(
+            "INSERT INTO review_logs (
+                id, card_id, rating, state_before, stability_before,
+                difficulty_before, state_after, stability_after,
+                difficulty_after, elapsed_days, scheduled_days, reviewed_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                log.id.to_string(),
+                log.card_id.to_string(),
+                log.rating.value(),
+                log.state_before.as_str(),
+                log.stability_before,
+                log.difficulty_before,
+                log.state_after.as_str(),
+                log.stability_after,
+                log.difficulty_after,
+                log.elapsed_days,
+                log.scheduled_days,
+                fmt_time(log.reviewed_at),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// List all review logs for a given card.
+    pub fn list_review_logs_for_card(&self, card_id: Uuid) -> Result<Vec<ReviewLog>, StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, card_id, rating, state_before, stability_before,
+                    difficulty_before, state_after, stability_after,
+                    difficulty_after, elapsed_days, scheduled_days, reviewed_at
+             FROM review_logs
+             WHERE card_id = ?1
+             ORDER BY reviewed_at ASC",
+        )?;
+        let rows = stmt.query_map(params![card_id.to_string()], |row| {
+            Ok(row_to_review_log(row))
+        })?;
+        let mut logs = Vec::new();
+        for row in rows {
+            logs.push(row?);
+        }
+        Ok(logs)
+    }
+
+    /// List all review logs (for backup export).
+    pub fn list_all_review_logs(&self) -> Result<Vec<ReviewLog>, StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, card_id, rating, state_before, stability_before,
+                    difficulty_before, state_after, stability_after,
+                    difficulty_after, elapsed_days, scheduled_days, reviewed_at
+             FROM review_logs ORDER BY reviewed_at ASC",
+        )?;
+        let rows = stmt.query_map([], |row| Ok(row_to_review_log(row)))?;
+        let mut logs = Vec::new();
+        for row in rows {
+            logs.push(row?);
+        }
+        Ok(logs)
+    }
+
+    /// Compute aggregated review statistics.
+    pub fn review_stats(&self, now: OffsetDateTime) -> Result<ReviewStats, StorageError> {
+        let total_cards: i64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM review_cards", [], |row| row.get(0))?;
+        let due_count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM review_cards WHERE due_at <= ?1",
+            params![fmt_time(now)],
+            |row| row.get(0),
+        )?;
+        let total_reviews: i64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM review_logs", [], |row| row.get(0))?;
+        let success_count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM review_logs WHERE rating >= 2",
+            [],
+            |row| row.get(0),
+        )?;
+        #[allow(clippy::cast_precision_loss)]
+        let observed_retention = if total_reviews > 0 {
+            success_count as f64 / total_reviews as f64
+        } else {
+            0.0
+        };
+
+        let new_count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM review_cards WHERE state = 'new'",
+            [],
+            |row| row.get(0),
+        )?;
+        let learning_count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM review_cards WHERE state = 'learning'",
+            [],
+            |row| row.get(0),
+        )?;
+        let review_count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM review_cards WHERE state = 'review'",
+            [],
+            |row| row.get(0),
+        )?;
+        let relearning_count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM review_cards WHERE state = 'relearning'",
+            [],
+            |row| row.get(0),
+        )?;
+
+        Ok(ReviewStats {
+            total_cards,
+            due_count,
+            total_reviews,
+            success_count,
+            observed_retention,
+            new_count,
+            learning_count,
+            review_count,
+            relearning_count,
+        })
+    }
+
+    // ------------------------------------------------------------------
     // Tags
     // ------------------------------------------------------------------
 
@@ -1663,6 +1952,8 @@ impl Database {
         content_item_tags: &[(Uuid, Uuid)],
         collection_items: &[(Uuid, Uuid, i32)],
         notes: &[Note],
+        review_cards: &[ReviewCard],
+        review_logs: &[ReviewLog],
     ) -> Result<(), StorageError> {
         if !self.is_empty()? {
             return Err(StorageError::Generic(
@@ -1684,6 +1975,8 @@ impl Database {
             content_item_tags,
             collection_items,
             notes,
+            review_cards,
+            review_logs,
         );
         // Re-enable FK checks regardless of success.
         self.conn.execute_batch("PRAGMA foreign_keys = ON;")?;
@@ -1705,6 +1998,8 @@ impl Database {
         content_item_tags: &[(Uuid, Uuid)],
         collection_items: &[(Uuid, Uuid, i32)],
         notes: &[Note],
+        review_cards: &[ReviewCard],
+        review_logs: &[ReviewLog],
     ) -> Result<(), StorageError> {
         self.conn.execute_batch("BEGIN;")?;
 
@@ -1744,6 +2039,12 @@ impl Database {
             }
             for note in notes {
                 self.insert_note(note)?;
+            }
+            for card in review_cards {
+                self.insert_review_card(card)?;
+            }
+            for log in review_logs {
+                self.insert_review_log(log)?;
             }
             for &(item_id, tag_id) in content_item_tags {
                 self.conn.execute(
@@ -2680,5 +2981,64 @@ fn truncate_for_title(text: &str) -> String {
     } else {
         let truncated: String = first_line.chars().take(77).collect();
         format!("{truncated}…")
+    }
+}
+
+/// Map a rusqlite `Row` to a [`ReviewCard`].
+///
+/// Expected column order: `id`, `content_item_id`, `state`, `stability`,
+/// `difficulty`, `due_at`, `last_reviewed_at`, `review_count`, `lapse_count`,
+/// `scheduled_days`, `created_at`, `updated_at`.
+fn row_to_review_card(row: &rusqlite::Row<'_>) -> ReviewCard {
+    ReviewCard {
+        id: parse_uuid(&row.get::<_, String>(0).unwrap_or_default()),
+        content_item_id: parse_uuid(&row.get::<_, String>(1).unwrap_or_default()),
+        state: row
+            .get::<_, String>(2)
+            .unwrap_or_default()
+            .parse::<CardState>()
+            .unwrap_or(CardState::New),
+        stability: row.get(3).unwrap_or_default(),
+        difficulty: row.get(4).unwrap_or_default(),
+        due_at: parse_time(&row.get::<_, String>(5).unwrap_or_default()),
+        last_reviewed_at: row
+            .get::<_, Option<String>>(6)
+            .unwrap_or_default()
+            .map(|s| parse_time(&s)),
+        review_count: row.get(7).unwrap_or_default(),
+        lapse_count: row.get(8).unwrap_or_default(),
+        scheduled_days: row.get(9).unwrap_or_default(),
+        created_at: parse_time(&row.get::<_, String>(10).unwrap_or_default()),
+        updated_at: parse_time(&row.get::<_, String>(11).unwrap_or_default()),
+    }
+}
+
+/// Map a rusqlite `Row` to a [`ReviewLog`].
+///
+/// Expected column order: `id`, `card_id`, `rating`, `state_before`,
+/// `stability_before`, `difficulty_before`, `state_after`, `stability_after`,
+/// `difficulty_after`, `elapsed_days`, `scheduled_days`, `reviewed_at`.
+fn row_to_review_log(row: &rusqlite::Row<'_>) -> ReviewLog {
+    ReviewLog {
+        id: parse_uuid(&row.get::<_, String>(0).unwrap_or_default()),
+        card_id: parse_uuid(&row.get::<_, String>(1).unwrap_or_default()),
+        rating: Rating::from_value(row.get::<_, u32>(2).unwrap_or(3)).unwrap_or(Rating::Good),
+        state_before: row
+            .get::<_, String>(3)
+            .unwrap_or_default()
+            .parse::<CardState>()
+            .unwrap_or(CardState::New),
+        stability_before: row.get(4).unwrap_or_default(),
+        difficulty_before: row.get(5).unwrap_or_default(),
+        state_after: row
+            .get::<_, String>(6)
+            .unwrap_or_default()
+            .parse::<CardState>()
+            .unwrap_or(CardState::New),
+        stability_after: row.get(7).unwrap_or_default(),
+        difficulty_after: row.get(8).unwrap_or_default(),
+        elapsed_days: row.get(9).unwrap_or_default(),
+        scheduled_days: row.get(10).unwrap_or_default(),
+        reviewed_at: parse_time(&row.get::<_, String>(11).unwrap_or_default()),
     }
 }

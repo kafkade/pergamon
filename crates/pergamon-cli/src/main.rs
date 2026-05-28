@@ -137,6 +137,11 @@ enum Command {
         #[command(subcommand)]
         action: NoteAction,
     },
+    /// Spaced repetition review (FSRS-5).
+    Review {
+        #[command(subcommand)]
+        action: ReviewAction,
+    },
     /// Show current configuration.
     Config,
     /// Generate shell completions.
@@ -505,6 +510,38 @@ enum NoteAction {
     },
 }
 
+/// Spaced-repetition review subcommands.
+#[derive(Debug, Subcommand)]
+enum ReviewAction {
+    /// Enable spaced repetition for a highlight.
+    Enable {
+        /// Highlight content item ID.
+        id: String,
+    },
+    /// Disable spaced repetition for a highlight.
+    Disable {
+        /// Highlight content item ID.
+        id: String,
+    },
+    /// List due review cards.
+    Due {
+        /// Maximum number of cards to show.
+        #[arg(long, default_value = "20")]
+        limit: usize,
+        /// Output format: text or json.
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
+    /// Show review statistics.
+    Stats,
+    /// Start an interactive review session in the TUI.
+    Start {
+        /// Maximum number of cards to review (default: all due).
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -576,6 +613,7 @@ fn main() -> Result<()> {
         Command::Doctor { action } => handle_doctor(&db, action),
         Command::Highlight { action } => handle_highlight(&db, action),
         Command::Note { action } => handle_note(&db, action),
+        Command::Review { action } => handle_review(&db, action),
         // Already handled above — unreachable at runtime.
         Command::Config | Command::Completions { .. } => Ok(()),
     }
@@ -3201,6 +3239,190 @@ fn note_delete(db: &Database, id: &str) -> Result<()> {
     Ok(())
 }
 
+// ------------------------------------------------------------------
+// Review (FSRS spaced repetition)
+// ------------------------------------------------------------------
+
+fn handle_review(db: &Database, action: ReviewAction) -> Result<()> {
+    match action {
+        ReviewAction::Enable { id } => review_enable(db, &id),
+        ReviewAction::Disable { id } => review_disable(db, &id),
+        ReviewAction::Due { limit, format } => review_due(db, limit, &format),
+        ReviewAction::Stats => review_stats(db),
+        ReviewAction::Start { limit } => review_start(db, limit),
+    }
+}
+
+/// Enable spaced repetition for a highlight.
+fn review_enable(db: &Database, item_id: &str) -> Result<()> {
+    let uuid = item_id
+        .parse::<Uuid>()
+        .with_context(|| format!("invalid UUID: {item_id}"))?;
+
+    // Verify it's a highlight.
+    let item = db
+        .get_content_item(uuid)
+        .with_context(|| format!("content item not found: {uuid}"))?;
+    if item.content_type != ContentType::Highlight {
+        bail!(
+            "item {uuid} is a {} — only highlights can be reviewed",
+            item.content_type
+        );
+    }
+
+    // Check if already enabled.
+    if let Some(existing) = db
+        .get_review_card_for_item(uuid)
+        .context("checking existing review card")?
+    {
+        println!(
+            "Review already enabled for {uuid} (card {})",
+            short_uuid(existing.id)
+        );
+        return Ok(());
+    }
+
+    let now = OffsetDateTime::now_utc();
+    let card = pergamon_core::model::ReviewCard {
+        id: Uuid::new_v4(),
+        content_item_id: uuid,
+        state: pergamon_core::fsrs::CardState::New,
+        stability: None,
+        difficulty: None,
+        due_at: now,
+        last_reviewed_at: None,
+        review_count: 0,
+        lapse_count: 0,
+        scheduled_days: None,
+        created_at: now,
+        updated_at: now,
+    };
+
+    db.insert_review_card(&card)
+        .context("failed to create review card")?;
+
+    println!("Review enabled for highlight {}", short_uuid(uuid));
+    println!("  Card: {}", card.id);
+
+    Ok(())
+}
+
+/// Disable spaced repetition for a highlight.
+fn review_disable(db: &Database, item_id: &str) -> Result<()> {
+    let uuid = item_id
+        .parse::<Uuid>()
+        .with_context(|| format!("invalid UUID: {item_id}"))?;
+
+    let deleted = db
+        .delete_review_card_for_item(uuid)
+        .context("failed to delete review card")?;
+
+    if deleted {
+        println!("Review disabled for highlight {}", short_uuid(uuid));
+    } else {
+        println!("No review card found for {}", short_uuid(uuid));
+    }
+
+    Ok(())
+}
+
+/// List due review cards.
+fn review_due(db: &Database, limit: usize, format: &str) -> Result<()> {
+    let now = OffsetDateTime::now_utc();
+    let cards = db
+        .list_due_review_cards(now)
+        .context("failed to list due cards")?;
+
+    let display: Vec<_> = cards.into_iter().take(limit).collect();
+
+    if display.is_empty() {
+        println!("No cards due for review.");
+        return Ok(());
+    }
+
+    if format == "json" {
+        let json_items: Vec<serde_json::Value> = display
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "id": c.id.to_string(),
+                    "content_item_id": c.content_item_id.to_string(),
+                    "state": c.state.as_str(),
+                    "stability": c.stability,
+                    "difficulty": c.difficulty,
+                    "due_at": c.due_at.format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
+                    "review_count": c.review_count,
+                    "lapse_count": c.lapse_count,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json_items).unwrap_or_else(|_| "[]".to_owned())
+        );
+    } else {
+        println!("{} card(s) due:\n", display.len());
+        for card in &display {
+            let highlight = db.get_content_item(card.content_item_id).ok();
+            let title = highlight.as_ref().map_or_else(
+                || "(unknown)".to_owned(),
+                |h| truncate_display(&h.title, 50),
+            );
+            println!(
+                "  {} | {} | {} reviews | {}",
+                short_uuid(card.id),
+                card.state,
+                card.review_count,
+                title,
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Show aggregated review statistics.
+fn review_stats(db: &Database) -> Result<()> {
+    let now = OffsetDateTime::now_utc();
+    let stats = db.review_stats(now).context("failed to get review stats")?;
+
+    println!("Review Statistics");
+    println!("─────────────────");
+    println!("Total cards:     {}", stats.total_cards);
+    println!("  New:           {}", stats.new_count);
+    println!("  Learning:      {}", stats.learning_count);
+    println!("  Review:        {}", stats.review_count);
+    println!("  Relearning:    {}", stats.relearning_count);
+    println!("Due now:         {}", stats.due_count);
+    println!("Total reviews:   {}", stats.total_reviews);
+    println!("Retention:       {:.1}%", stats.observed_retention * 100.0);
+
+    Ok(())
+}
+
+/// Start an interactive TUI review session.
+fn review_start(db: &Database, limit: Option<usize>) -> Result<()> {
+    let now = OffsetDateTime::now_utc();
+    let mut cards = db
+        .list_due_review_cards(now)
+        .context("failed to list due cards")?;
+
+    if let Some(max) = limit {
+        cards.truncate(max);
+    }
+
+    if cards.is_empty() {
+        println!("No cards due for review. Great work!");
+        return Ok(());
+    }
+
+    println!("{} card(s) due — launching review session...", cards.len());
+
+    tui::run_review(db, cards).context("review session failed")?;
+
+    Ok(())
+}
+
 /// Truncate a string for display, adding "…" if cut.
 fn truncate_display(text: &str, max: usize) -> String {
     let first_line = text.lines().next().unwrap_or(text);
@@ -3387,6 +3609,8 @@ fn export_backup(db: &Database, output: &std::path::Path) -> Result<()> {
         .list_all_highlight_meta()
         .context("listing highlight meta")?;
     let notes = db.list_all_notes().context("listing notes")?;
+    let review_cards = db.list_all_review_cards().context("listing review cards")?;
+    let review_logs = db.list_all_review_logs().context("listing review logs")?;
     let content_item_tags = db
         .list_all_content_item_tags()
         .context("listing content item tags")?;
@@ -3413,6 +3637,8 @@ fn export_backup(db: &Database, output: &std::path::Path) -> Result<()> {
     write_json_entry(&mut zip, &opts, "bookmark_meta.json", &bookmark_meta)?;
     write_json_entry(&mut zip, &opts, "highlight_meta.json", &highlight_meta)?;
     write_json_entry(&mut zip, &opts, "notes.json", &notes)?;
+    write_json_entry(&mut zip, &opts, "review_cards.json", &review_cards)?;
+    write_json_entry(&mut zip, &opts, "review_logs.json", &review_logs)?;
     write_json_entry(
         &mut zip,
         &opts,
@@ -3432,17 +3658,20 @@ fn export_backup(db: &Database, output: &std::path::Path) -> Result<()> {
         + bookmark_meta.len()
         + highlight_meta.len()
         + notes.len()
+        + review_cards.len()
+        + review_logs.len()
         + content_item_tags.len()
         + collection_items.len();
 
     println!("Backup written to {}", output.display());
     println!(
-        "  {} feeds, {} items, {} tags, {} collections, {} notes ({total} records total)",
+        "  {} feeds, {} items, {} tags, {} collections, {} notes, {} review cards ({total} records total)",
         feeds.len(),
         content_items.len(),
         tags.len(),
         collections.len(),
         notes.len(),
+        review_cards.len(),
     );
 
     Ok(())
@@ -3468,7 +3697,10 @@ fn write_json_entry<W: Write + std::io::Seek, T: serde::Serialize>(
 
 /// Restore from a full backup archive.
 fn restore_backup(db: &Database, path: &std::path::Path) -> Result<()> {
-    use pergamon_core::model::{BookmarkMeta, Collection, HighlightMeta, Note as NoteModel, Tag};
+    use pergamon_core::model::{
+        BookmarkMeta, Collection, HighlightMeta, Note as NoteModel, ReviewCard as ReviewCardModel,
+        ReviewLog as ReviewLogModel, Tag,
+    };
     use zip::ZipArchive;
 
     let file = std::fs::File::open(path)
@@ -3503,6 +3735,10 @@ fn restore_backup(db: &Database, path: &std::path::Path) -> Result<()> {
     let bookmark_meta: Vec<BookmarkMeta> = read_json_entry(&mut archive, "bookmark_meta.json")?;
     let highlight_meta: Vec<HighlightMeta> = read_json_entry(&mut archive, "highlight_meta.json")?;
     let notes: Vec<NoteModel> = read_json_entry(&mut archive, "notes.json").unwrap_or_default();
+    let review_cards: Vec<ReviewCardModel> =
+        read_json_entry(&mut archive, "review_cards.json").unwrap_or_default();
+    let review_logs: Vec<ReviewLogModel> =
+        read_json_entry(&mut archive, "review_logs.json").unwrap_or_default();
     let content_item_tags: Vec<(Uuid, Uuid)> =
         read_json_entry(&mut archive, "content_item_tags.json")?;
     let collection_items: Vec<(Uuid, Uuid, i32)> =
@@ -3520,6 +3756,8 @@ fn restore_backup(db: &Database, path: &std::path::Path) -> Result<()> {
         &content_item_tags,
         &collection_items,
         &notes,
+        &review_cards,
+        &review_logs,
     )
     .context("failed to restore backup into database")?;
 
@@ -3532,17 +3770,20 @@ fn restore_backup(db: &Database, path: &std::path::Path) -> Result<()> {
         + bookmark_meta.len()
         + highlight_meta.len()
         + notes.len()
+        + review_cards.len()
+        + review_logs.len()
         + content_item_tags.len()
         + collection_items.len();
 
     println!("Backup restored from {}", path.display());
     println!(
-        "  {} feeds, {} items, {} tags, {} collections, {} notes ({total} records total)",
+        "  {} feeds, {} items, {} tags, {} collections, {} notes, {} review cards ({total} records total)",
         feeds.len(),
         content_items.len(),
         tags.len(),
         collections.len(),
         notes.len(),
+        review_cards.len(),
     );
 
     Ok(())
