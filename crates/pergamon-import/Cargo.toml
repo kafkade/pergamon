@@ -1,0 +1,20 @@
+[package]
+name = "pergamon-import"
+description = "Import parsers for Raindrop.io, Pocket, and other services."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+csv = "1"
+scraper = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true }
+
+[lints]
+workspace = true

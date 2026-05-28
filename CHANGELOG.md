@@ -81,3 +81,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Nested collection hierarchy with cycle detection on moves
 - "Unsorted" filter: `--uncollected` flag to find items not in any collection
 - Bulk operations use transactions for atomicity and require confirmation before executing
+- `pergamon import raindrop <file>` command: import bookmarks from a Raindrop.io CSV export with tags, collections, and provenance tracking
+- `pergamon import pocket <file>` command: import bookmarks from a Pocket HTML export with tags and timestamps
+- Dry-run mode for Raindrop and Pocket imports (`--dry-run`) to preview changes
+- Idempotent re-import for Raindrop and Pocket: existing items get tags and collections updated
+- URL canonicalization applied to all imported URLs for deduplication
+- Import summary report showing created and existing (updated) item counts
