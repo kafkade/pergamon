@@ -1,0 +1,126 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross (for cross-compilation)
+        if: matrix.cross
+        run: cargo install cross --locked
+
+      - name: Build release binary
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }} -p pergamon-cli
+          else
+            cargo build --release --target ${{ matrix.target }} -p pergamon-cli
+          fi
+        shell: bash
+
+      - name: Smoke test binary
+        if: "!matrix.cross"
+        run: target/${{ matrix.target }}/release/pergamon${{ runner.os == 'Windows' && '.exe' || '' }} --info
+        shell: bash
+
+      - name: Package binary (unix)
+        if: runner.os != 'Windows'
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../pergamon-${{ github.ref_name }}-${{ matrix.target }}.tar.gz pergamon
+          cd ../../..
+          sha256sum pergamon-${{ github.ref_name }}-${{ matrix.target }}.tar.gz > pergamon-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256
+
+      - name: Package binary (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "target/${{ matrix.target }}/release/pergamon.exe" -DestinationPath "pergamon-${{ github.ref_name }}-${{ matrix.target }}.zip"
+          $hash = (Get-FileHash "pergamon-${{ github.ref_name }}-${{ matrix.target }}.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  pergamon-${{ github.ref_name }}-${{ matrix.target }}.zip" | Out-File -Encoding ascii "pergamon-${{ github.ref_name }}-${{ matrix.target }}.zip.sha256"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: pergamon-${{ matrix.target }}
+          path: |
+            pergamon-*.tar.gz
+            pergamon-*.zip
+            pergamon-*.sha256
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Extract release notes from CHANGELOG.md
+        id: extract
+        uses: ffurrer2/extract-release-notes@v3
+
+      - name: Determine pre-release status
+        id: prerelease
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          MAJOR="${VERSION%%.*}"
+          if [ "$MAJOR" = "0" ]; then
+            echo "flag=--prerelease" >> "$GITHUB_OUTPUT"
+          else
+            echo "flag=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_NOTES: ${{ steps.extract.outputs.release_notes }}
+        run: |
+          echo "$RELEASE_NOTES" > "$RUNNER_TEMP/release-notes.md"
+          gh release create "${{ github.ref_name }}" \
+            --title "${{ github.ref_name }}" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
+            ${{ steps.prerelease.outputs.flag }} \
+            artifacts/*
