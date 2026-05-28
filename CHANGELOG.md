@@ -33,6 +33,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TUI review mode: card display with source context, rating controls, progress bar, and session summary
 - Review cards and review logs tables with FK cascades (V8 migration)
 - Backup and restore now includes review cards and review logs
+- `pergamon import kindle <file>` command: import highlights and notes from a Kindle My Clippings.txt file
+- `pergamon import readwise <file>` command: import highlights from a Readwise CSV export with tags, source grouping, and provenance tracking
+- Kindle parser: BOM-tolerant, handles highlights/notes/bookmarks, extracts title/author/location/date across Kindle device variants
+- Readwise parser: flexible case-insensitive header matching, supports varying CSV column layouts
+- `--dry-run` flag for Kindle and Readwise imports to preview changes without modifying the database
+- `--enable-review` flag for Kindle and Readwise imports to auto-create FSRS review cards for imported highlights
+- Idempotent re-import for Kindle and Readwise: duplicate detection via synthetic stable URLs (`kindle://` and `readwise://` schemes)
+- Kindle notes imported as standalone notes attached to the source book
+- Readwise source type mapping: books and articles to Article, podcasts to PodcastEpisode, PDFs to Pdf
+- Readwise location field stored as highlight position for imported highlights
+- Kindle note deduplication on re-import: skips notes with identical text already attached to the same source
+- Transaction-wrapped imports for Kindle and Readwise: all inserts run in a single SQLite transaction for atomicity and performance
+- `Database::in_transaction()`, `begin_transaction()`, `commit_transaction()`, `rollback_transaction()` public API in `pergamon-storage`
 
 ## [0.2.0] - 2026-05-28
 
