@@ -17,13 +17,16 @@ pergamon feed refresh                            # Fetch new articles
 pergamon read                                    # Open the TUI reader
 pergamon save https://example.com/article        # Save for later
 pergamon search "distributed systems"            # Full-text search everything
-pergamon review                                  # Spaced repetition session
-pergamon import inoreader ~/subscriptions.opml   # Bring your feeds
+pergamon highlight add <id> --quote "key idea"   # Capture a highlight
+pergamon review start                            # Spaced repetition session
+pergamon import opml ~/subscriptions.opml        # Bring your feeds
 pergamon import raindrop ~/export.csv            # Bring your bookmarks
-pergamon export obsidian                         # Push highlights to Obsidian
+pergamon import kindle ~/My\ Clippings.txt       # Bring your Kindle highlights
+pergamon import readwise ~/readwise-export.csv   # Bring your Readwise highlights
+pergamon export backup -o library.zip            # Full backup
 ```
 
-> **Status**: Early development. Not yet usable.
+> **Status**: Active development — Phase 3 (Knowledge Retention). Core reading, bookmarking, and organization features are complete. Highlights, spaced repetition, and import from Kindle/Readwise are implemented.
 
 ---
 
@@ -73,19 +76,32 @@ The name captures what this project is about:
   knowledge sticks — not just accumulates.
 - **Open source.** Apache-2.0 licensed. Contributions welcome.
 
-## Features (Planned)
+## Features
 
-- 📡 RSS/Atom/JSON Feed subscription and reader mode
-- 🔖 Bookmark management with nested collections, tags, and full-text search
-- 📑 Read-later with full article extraction and offline reading
-- 🧠 Spaced repetition resurfacing of highlights (FSRS algorithm)
-- 📚 Kindle highlights import from My Clippings.txt
+### Implemented
+
+- 📡 RSS/Atom/JSON Feed subscription with conditional GET, feed health tracking, and folder management
+- 📑 Read-later with full article extraction, offline reading, and TUI reader with vim-style keybindings
+- 🔖 Bookmark management with nested collections, tags, bulk operations, and full-text search
+- 🔍 Full-text search across all content types (SQLite FTS5) with faceted filters
+- ✏️ Highlights and notes: create, list, search, export, and TUI capture
+- 🧠 Spaced repetition with FSRS-5 algorithm: review queue, interactive TUI sessions, retention stats
+- 📚 Kindle My Clippings.txt import with highlight and note extraction
+- 📥 Readwise CSV import with tags, source grouping, and provenance tracking
+- 📥 Import from OPML, Raindrop.io (CSV), and Pocket (HTML) with dry-run and idempotent re-import
+- 📤 Export: OPML feeds, full backup (ZIP with JSON), highlight export (Markdown/JSON)
+- 🔗 URL canonicalization, duplicate detection, and link health checking
+- 🏗️ TUI with vim-style keybindings for reading, triage, highlighting, and reviewing
+- ⚙️ Configuration file (TOML), shell completions (bash/zsh/fish/PowerShell)
+
+### Planned
+
 - 🔌 Obsidian plugin for syncing highlights and notes to your vault
-- 📄 PDF import with text extraction
-- 🔍 Full-text search across all content types (SQLite FTS5)
-- 📥 Import from Inoreader, Raindrop.io, Readwise, Pocket, Instapaper, Newsboat
-- 📤 Export to OPML, JSON, CSV, Markdown, Obsidian-compatible notes
-- 🏗️ TUI with vim-style keybindings for reading, browsing, and reviewing
+- 📧 Newsletter ingestion (IMAP, `.eml` import)
+- 🤖 Smart collections, content rules, and analytics
+- 🌐 Web interface (Axum + WASM)
+- 📱 iOS client (SwiftUI via UniFFI)
+- 🔄 Cross-device sync server
 
 ## Architecture
 
@@ -94,7 +110,7 @@ Cargo workspace following the [kafkade project DNA](https://github.com/kafkade):
 ```text
 pergamon/
 ├── crates/
-│   ├── pergamon-core/       # Domain models, state machine, SR engine (zero I/O)
+│   ├── pergamon-core/       # Domain models, state machine, FSRS-5 engine (zero I/O)
 │   ├── pergamon-storage/    # SQLite + FTS5, migrations, content archival
 │   ├── pergamon-feed/       # RSS/Atom/JSON Feed parsing, OPML, discovery
 │   ├── pergamon-extract/    # Article extraction, PDF parsing, HTML sanitization
@@ -118,7 +134,7 @@ pergamon/
 | **TUI** | ratatui + crossterm |
 | **Feed parsing** | feed-rs |
 | **Article extraction** | readability + ammonia |
-| **Spaced repetition** | FSRS |
+| **Spaced repetition** | FSRS-5 (pure Rust implementation) |
 | **HTTP** | reqwest (rustls) |
 
 ## Documentation
