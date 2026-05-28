@@ -95,6 +95,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "url_unique_index",
         include_str!("../migrations/V4__url_unique_index.sql"),
     ),
+    (
+        5,
+        "bookmark_meta_enrichment",
+        include_str!("../migrations/V5__bookmark_meta_enrichment.sql"),
+    ),
 ];
 
 /// Run all pending migrations inside a transaction.
@@ -685,14 +690,16 @@ impl Database {
     /// Insert bookmark metadata.
     pub fn insert_bookmark_meta(&self, meta: &BookmarkMeta) -> Result<(), StorageError> {
         self.conn.execute(
-            "INSERT INTO bookmark_meta (content_item_id, original_url, saved_from, thumbnail_url, description)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO bookmark_meta (content_item_id, original_url, saved_from, thumbnail_url, description, site_name, favicon_url)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 meta.content_item_id.to_string(),
                 meta.original_url,
                 meta.saved_from,
                 meta.thumbnail_url,
                 meta.description,
+                meta.site_name,
+                meta.favicon_url,
             ],
         )?;
         Ok(())
@@ -702,7 +709,7 @@ impl Database {
     pub fn get_bookmark_meta(&self, content_item_id: Uuid) -> Result<BookmarkMeta, StorageError> {
         self.conn
             .query_row(
-                "SELECT content_item_id, original_url, saved_from, thumbnail_url, description
+                "SELECT content_item_id, original_url, saved_from, thumbnail_url, description, site_name, favicon_url
                  FROM bookmark_meta WHERE content_item_id = ?1",
                 params![content_item_id.to_string()],
                 |row| {
@@ -712,6 +719,8 @@ impl Database {
                         saved_from: row.get(2)?,
                         thumbnail_url: row.get(3)?,
                         description: row.get(4)?,
+                        site_name: row.get(5)?,
+                        favicon_url: row.get(6)?,
                     })
                 },
             )
@@ -1257,7 +1266,7 @@ impl Database {
     #[allow(clippy::missing_errors_doc)]
     pub fn list_all_bookmark_meta(&self) -> Result<Vec<BookmarkMeta>, StorageError> {
         let mut stmt = self.conn.prepare(
-            "SELECT content_item_id, original_url, saved_from, thumbnail_url, description
+            "SELECT content_item_id, original_url, saved_from, thumbnail_url, description, site_name, favicon_url
              FROM bookmark_meta",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -1267,6 +1276,8 @@ impl Database {
                 saved_from: row.get(2)?,
                 thumbnail_url: row.get(3)?,
                 description: row.get(4)?,
+                site_name: row.get(5)?,
+                favicon_url: row.get(6)?,
             })
         })?;
         let mut metas = Vec::new();
@@ -1806,6 +1817,134 @@ impl Database {
             .query_map(params![content_item_id.to_string()], |row| row.get(0))?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(names.join(", "))
+    }
+
+    // ------------------------------------------------------------------
+    // Duplicate detection & merge (#16)
+    // ------------------------------------------------------------------
+
+    /// List all content item IDs and their URLs (for dedup scanning).
+    ///
+    /// Only items with a non-NULL URL are returned.
+    pub fn list_all_urls(&self) -> Result<Vec<(Uuid, String)>, StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, url FROM content_items WHERE url IS NOT NULL ORDER BY created_at",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let id: String = row.get(0)?;
+            let url: String = row.get(1)?;
+            Ok((parse_uuid(&id), url))
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
+    /// Delete a content item and its FTS entry.
+    ///
+    /// Extension tables (`feed_item_meta`, `bookmark_meta`, etc.) and
+    /// junction tables (`content_item_tags`, `content_item_collections`)
+    /// are cleaned up via `ON DELETE CASCADE`.
+    pub fn delete_content_item(&self, id: Uuid) -> Result<bool, StorageError> {
+        // Remove FTS entry first (no CASCADE on virtual tables).
+        self.conn.execute(
+            "DELETE FROM content_items_fts WHERE content_item_id = ?1",
+            params![id.to_string()],
+        )?;
+
+        let affected = self.conn.execute(
+            "DELETE FROM content_items WHERE id = ?1",
+            params![id.to_string()],
+        )?;
+        Ok(affected > 0)
+    }
+
+    /// Transfer all tags from one content item to another.
+    ///
+    /// Uses `INSERT OR IGNORE` so pre-existing associations are kept.
+    pub fn transfer_tags(&self, from_id: Uuid, to_id: Uuid) -> Result<(), StorageError> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO content_item_tags (content_item_id, tag_id)
+             SELECT ?1, tag_id FROM content_item_tags WHERE content_item_id = ?2",
+            params![to_id.to_string(), from_id.to_string()],
+        )?;
+        self.refresh_fts_tags(to_id)?;
+        Ok(())
+    }
+
+    /// Transfer all collection memberships from one content item to another.
+    ///
+    /// Uses `INSERT OR IGNORE` so pre-existing associations are kept.
+    pub fn transfer_collections(&self, from_id: Uuid, to_id: Uuid) -> Result<(), StorageError> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO content_item_collections (content_item_id, collection_id, sort_order)
+             SELECT ?1, collection_id, sort_order FROM content_item_collections WHERE content_item_id = ?2",
+            params![to_id.to_string(), from_id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Update a content item's `created_at` to an earlier timestamp.
+    ///
+    /// Only applies the update if `earlier` is before the current value.
+    pub fn backdate_created_at(
+        &self,
+        id: Uuid,
+        earlier: OffsetDateTime,
+    ) -> Result<(), StorageError> {
+        self.conn.execute(
+            "UPDATE content_items SET created_at = ?1
+             WHERE id = ?2 AND created_at > ?1",
+            params![fmt_time(earlier), id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Check whether bookmark metadata exists for a content item.
+    pub fn has_bookmark_meta(&self, content_item_id: Uuid) -> Result<bool, StorageError> {
+        let exists: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM bookmark_meta WHERE content_item_id = ?1)",
+            params![content_item_id.to_string()],
+            |row| row.get(0),
+        )?;
+        Ok(exists)
+    }
+
+    /// Check whether feed item metadata exists for a content item.
+    pub fn has_feed_item_meta(&self, content_item_id: Uuid) -> Result<bool, StorageError> {
+        let exists: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM feed_item_meta WHERE content_item_id = ?1)",
+            params![content_item_id.to_string()],
+            |row| row.get(0),
+        )?;
+        Ok(exists)
+    }
+
+    /// Upsert bookmark metadata (insert if absent, update if present).
+    pub fn upsert_bookmark_meta(&self, meta: &BookmarkMeta) -> Result<(), StorageError> {
+        self.conn.execute(
+            "INSERT INTO bookmark_meta (content_item_id, original_url, saved_from, thumbnail_url, description, site_name, favicon_url)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(content_item_id) DO UPDATE SET
+                original_url = COALESCE(excluded.original_url, bookmark_meta.original_url),
+                saved_from = COALESCE(excluded.saved_from, bookmark_meta.saved_from),
+                thumbnail_url = COALESCE(excluded.thumbnail_url, bookmark_meta.thumbnail_url),
+                description = COALESCE(excluded.description, bookmark_meta.description),
+                site_name = COALESCE(excluded.site_name, bookmark_meta.site_name),
+                favicon_url = COALESCE(excluded.favicon_url, bookmark_meta.favicon_url)",
+            params![
+                meta.content_item_id.to_string(),
+                meta.original_url,
+                meta.saved_from,
+                meta.thumbnail_url,
+                meta.description,
+                meta.site_name,
+                meta.favicon_url,
+            ],
+        )?;
+        Ok(())
     }
 }
 

@@ -12,7 +12,9 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, Parser, Subcommand};
 use pergamon_core::content_type::ContentType;
-use pergamon_core::model::{Collection, ContentItem, Feed, FeedFolder, FeedItemMeta, Tag};
+use pergamon_core::model::{
+    BookmarkMeta, Collection, ContentItem, Feed, FeedFolder, FeedItemMeta, Tag,
+};
 use pergamon_core::status::DocumentStatus;
 use pergamon_storage::Database;
 use time::OffsetDateTime;
@@ -119,6 +121,11 @@ enum Command {
     Bulk {
         #[command(subcommand)]
         action: BulkAction,
+    },
+    /// Diagnose and fix data quality issues.
+    Doctor {
+        #[command(subcommand)]
+        action: DoctorAction,
     },
     /// Show current configuration.
     Config,
@@ -374,6 +381,23 @@ enum BulkAction {
     },
 }
 
+/// Doctor subcommands — data quality and deduplication.
+#[derive(Debug, Subcommand)]
+enum DoctorAction {
+    /// Scan for duplicate URLs (exact and canonical matches).
+    Dupes,
+    /// Merge two duplicate items, keeping one and discarding the other.
+    Merge {
+        /// ID of the item to keep.
+        keep: String,
+        /// ID of the item to discard (will be deleted after merge).
+        discard: String,
+        /// Skip confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -442,6 +466,7 @@ fn main() -> Result<()> {
         Command::Collection { action } => handle_collection(&db, action),
         Command::Tag { action } => handle_tag(&db, action),
         Command::Bulk { action } => handle_bulk(&db, action),
+        Command::Doctor { action } => handle_doctor(&db, action),
         // Already handled above — unreachable at runtime.
         Command::Config | Command::Completions { .. } => Ok(()),
     }
@@ -1099,6 +1124,8 @@ fn import_raindrop(db: &Database, path: &std::path::Path, dry_run: bool) -> Resu
             saved_from: Some(format!("raindrop:{}", item.id)),
             thumbnail_url: item.cover.clone(),
             description,
+            site_name: None,
+            favicon_url: None,
         };
         db.insert_bookmark_meta(&bookmark_meta)
             .with_context(|| format!("failed to insert bookmark meta: {}", item.url))?;
@@ -1206,6 +1233,8 @@ fn import_pocket(db: &Database, path: &std::path::Path, dry_run: bool) -> Result
             saved_from: Some("pocket".to_owned()),
             thumbnail_url: None,
             description: None,
+            site_name: None,
+            favicon_url: None,
         };
         db.insert_bookmark_meta(&bookmark_meta)
             .with_context(|| format!("failed to insert bookmark meta: {}", item.url))?;
@@ -1430,10 +1459,36 @@ fn extract_content(
     }
 }
 
+/// Build enriched `BookmarkMeta` from HTML bytes.
+fn build_enriched_bookmark_meta(
+    content_item_id: Uuid,
+    bytes: &[u8],
+    original_url: &str,
+    final_url: &str,
+) -> BookmarkMeta {
+    let html = String::from_utf8_lossy(bytes);
+    let meta = pergamon_extract::extract_metadata(&html);
+
+    let favicon_url = meta
+        .favicon_url
+        .and_then(|href| pergamon_extract::resolve_favicon_url(&href, final_url));
+
+    BookmarkMeta {
+        content_item_id,
+        original_url: Some(original_url.to_owned()),
+        saved_from: Some("cli".to_owned()),
+        thumbnail_url: meta.og_image,
+        description: meta.description,
+        site_name: meta.site_name,
+        favicon_url,
+    }
+}
+
 /// Save a URL as an article: fetch → extract → store.
 ///
 /// Deduplicates against the canonical form of the final (post-redirect)
 /// URL. When a duplicate is found, still applies any requested tags.
+/// Creates enriched `BookmarkMeta` with OG image, favicon, and site name.
 fn save_url(db: &Database, raw_url: Option<&str>, tags: &[String], bookmark: bool) -> Result<()> {
     let url = resolve_url_input(raw_url)?;
 
@@ -1464,6 +1519,14 @@ fn save_url(db: &Database, raw_url: Option<&str>, tags: &[String], bookmark: boo
         .context("failed to check for duplicate")?
     {
         let applied = apply_tags(db, existing.id, tags)?;
+
+        // If saving as bookmark and no BookmarkMeta exists, create one
+        // with enriched metadata from the fetched page.
+        if bookmark {
+            let meta = build_enriched_bookmark_meta(existing.id, &bytes, &url, &final_url);
+            let _ = db.upsert_bookmark_meta(&meta);
+        }
+
         if applied.is_empty() {
             println!("Already saved: {} [{}]", existing.title, existing.id);
         } else {
@@ -1497,6 +1560,11 @@ fn save_url(db: &Database, raw_url: Option<&str>, tags: &[String], bookmark: boo
 
     db.insert_content_item(&item)
         .context("failed to save item")?;
+
+    // Store enriched bookmark metadata (OG image, favicon, site name).
+    let meta = build_enriched_bookmark_meta(item.id, &bytes, &url, &final_url);
+    db.insert_bookmark_meta(&meta)
+        .context("failed to save bookmark metadata")?;
 
     let applied = apply_tags(db, item.id, tags)?;
 
@@ -2184,6 +2252,211 @@ fn bulk_delete(
     let ids: Vec<Uuid> = items.iter().map(|i| i.id).collect();
     let count = db.bulk_discard(&ids).context("failed to bulk discard")?;
     println!("Discarded {count} item(s).");
+    Ok(())
+}
+
+// ======================================================================
+// Doctor command — data quality & dedup
+// ======================================================================
+
+/// Dispatch doctor subcommand.
+fn handle_doctor(db: &Database, action: DoctorAction) -> Result<()> {
+    match action {
+        DoctorAction::Dupes => doctor_dupes(db),
+        DoctorAction::Merge { keep, discard, yes } => doctor_merge(db, &keep, &discard, yes),
+    }
+}
+
+/// Scan for duplicate URLs (exact and canonical matches).
+fn doctor_dupes(db: &Database) -> Result<()> {
+    let urls = db
+        .list_all_urls()
+        .context("failed to load URLs from database")?;
+
+    if urls.is_empty() {
+        println!("No content items with URLs found.");
+        return Ok(());
+    }
+
+    // Group by canonical URL.
+    let mut groups: std::collections::HashMap<String, Vec<(Uuid, String)>> =
+        std::collections::HashMap::new();
+
+    for (id, url) in &urls {
+        let canonical = pergamon_extract::canonicalize_url(url).unwrap_or_else(|_| url.clone());
+        groups
+            .entry(canonical)
+            .or_default()
+            .push((*id, url.clone()));
+    }
+
+    // Filter to groups with duplicates.
+    let mut dupe_groups: Vec<(String, Vec<(Uuid, String)>)> = groups
+        .into_iter()
+        .filter(|(_, items)| items.len() > 1)
+        .collect();
+
+    if dupe_groups.is_empty() {
+        println!("No duplicates found across {} URL(s).", urls.len());
+        return Ok(());
+    }
+
+    dupe_groups.sort_by(|a, b| a.0.cmp(&b.0));
+
+    println!(
+        "Found {} duplicate group(s) across {} URL(s):\n",
+        dupe_groups.len(),
+        urls.len()
+    );
+
+    for (canonical, items) in &dupe_groups {
+        let all_exact = items.iter().all(|(_, u)| u == canonical);
+        let confidence = if all_exact { "exact" } else { "canonical" };
+
+        println!("  {canonical} ({confidence})");
+        for (id, url) in items {
+            let label = if url == canonical { "" } else { " (variant)" };
+            // Look up the item for its title.
+            if let Ok(item) = db.get_content_item(*id) {
+                println!(
+                    "    {} {id} — {}{label}",
+                    item.content_type.as_str(),
+                    item.title,
+                );
+            } else {
+                println!("    unknown {id}{label}");
+            }
+        }
+        println!();
+    }
+
+    println!("To merge duplicates, run:");
+    println!("  pergamon doctor merge <keep-id> <discard-id>");
+
+    Ok(())
+}
+
+/// Merge two duplicate items: transfer tags/collections, preserve extension
+/// tables, backdate `created_at`, and delete the discarded item.
+fn doctor_merge(db: &Database, keep_str: &str, discard_str: &str, yes: bool) -> Result<()> {
+    let keep_id = keep_str
+        .parse::<Uuid>()
+        .with_context(|| format!("invalid keep ID: {keep_str}"))?;
+    let discard_id = discard_str
+        .parse::<Uuid>()
+        .with_context(|| format!("invalid discard ID: {discard_str}"))?;
+
+    if keep_id == discard_id {
+        bail!("keep and discard IDs must be different");
+    }
+
+    let keep_item = db
+        .get_content_item(keep_id)
+        .with_context(|| format!("item not found: {keep_id}"))?;
+    let discard_item = db
+        .get_content_item(discard_id)
+        .with_context(|| format!("item not found: {discard_id}"))?;
+
+    println!("Merge plan:");
+    println!(
+        "  KEEP:    {} [{}] — {} ({})",
+        keep_item.title,
+        keep_id,
+        keep_item.content_type.as_str(),
+        keep_item.status.as_str()
+    );
+    println!(
+        "  DISCARD: {} [{}] — {} ({})",
+        discard_item.title,
+        discard_id,
+        discard_item.content_type.as_str(),
+        discard_item.status.as_str()
+    );
+
+    // Check extension table overlap.
+    let keep_has_feed = db
+        .has_feed_item_meta(keep_id)
+        .context("checking feed_item_meta")?;
+    let keep_has_bookmark = db
+        .has_bookmark_meta(keep_id)
+        .context("checking bookmark_meta")?;
+    let discard_has_feed = db
+        .has_feed_item_meta(discard_id)
+        .context("checking feed_item_meta")?;
+    let discard_has_bookmark = db
+        .has_bookmark_meta(discard_id)
+        .context("checking bookmark_meta")?;
+
+    if discard_has_feed && !keep_has_feed {
+        println!("  Note: discard item has feed_item_meta — will be lost in merge.");
+    }
+    if discard_has_bookmark && !keep_has_bookmark {
+        println!("  Note: discard item has bookmark_meta — will be merged into keep item.");
+    }
+
+    // Confirm unless --yes.
+    if !yes {
+        print!("\nProceed? [y/N] ");
+        std::io::stdout().flush().context("flush")?;
+        let mut input = String::new();
+        std::io::stdin()
+            .lock()
+            .read_line(&mut input)
+            .context("reading confirmation")?;
+        if !input.trim().eq_ignore_ascii_case("y") {
+            println!("Cancelled.");
+            return Ok(());
+        }
+    }
+
+    // 1. Transfer tags from discard → keep.
+    db.transfer_tags(discard_id, keep_id)
+        .context("transferring tags")?;
+
+    // 2. Transfer collections from discard → keep.
+    db.transfer_collections(discard_id, keep_id)
+        .context("transferring collections")?;
+
+    // 3. Upsert bookmark_meta if discard has one and keep doesn't.
+    if discard_has_bookmark && !keep_has_bookmark {
+        if let Ok(bm) = db.get_bookmark_meta(discard_id) {
+            let merged = BookmarkMeta {
+                content_item_id: keep_id,
+                original_url: bm.original_url,
+                saved_from: bm.saved_from,
+                thumbnail_url: bm.thumbnail_url,
+                description: bm.description,
+                site_name: bm.site_name,
+                favicon_url: bm.favicon_url,
+            };
+            db.upsert_bookmark_meta(&merged)
+                .context("merging bookmark_meta")?;
+            println!("Merged bookmark metadata.");
+        }
+    }
+
+    // 4. Backdate created_at to the earliest of the two.
+    if discard_item.created_at < keep_item.created_at {
+        db.backdate_created_at(keep_id, discard_item.created_at)
+            .context("backdating created_at")?;
+        println!(
+            "Backdated created_at to {}.",
+            discard_item
+                .created_at
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_else(|_| "unknown".into())
+        );
+    }
+
+    // 5. Delete the discard item.
+    db.delete_content_item(discard_id)
+        .context("deleting discard item")?;
+
+    println!(
+        "Merged into {} [{}]. Discarded item deleted.",
+        keep_item.title, keep_id
+    );
+
     Ok(())
 }
 

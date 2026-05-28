@@ -110,10 +110,14 @@ pub struct BookmarkMeta {
     pub original_url: Option<String>,
     /// Where the bookmark was saved from (e.g., "browser", "share sheet").
     pub saved_from: Option<String>,
-    /// Thumbnail / preview image URL.
+    /// Thumbnail / preview image URL (from OG or Twitter Card).
     pub thumbnail_url: Option<String>,
     /// User-provided or auto-generated description.
     pub description: Option<String>,
+    /// Site name (from `og:site_name` or similar).
+    pub site_name: Option<String>,
+    /// Favicon URL.
+    pub favicon_url: Option<String>,
 }
 
 /// Extension metadata for highlights / annotations.

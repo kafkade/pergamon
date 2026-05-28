@@ -284,6 +284,8 @@ fn bookmark_meta_round_trip() {
         saved_from: Some("browser".to_owned()),
         thumbnail_url: Some("https://example.com/thumb.jpg".to_owned()),
         description: Some("An interesting page".to_owned()),
+        site_name: Some("Example Site".to_owned()),
+        favicon_url: Some("https://example.com/favicon.ico".to_owned()),
     };
     db.insert_bookmark_meta(&meta)
         .unwrap_or_else(|e| unreachable!("insert_bookmark_meta failed: {e}"));
@@ -1080,6 +1082,8 @@ fn backup_round_trip() {
         saved_from: Some("cli".to_owned()),
         thumbnail_url: None,
         description: Some("A bookmark".to_owned()),
+        site_name: None,
+        favicon_url: None,
     };
     src.insert_bookmark_meta(&bm)
         .unwrap_or_else(|e| unreachable!("insert bookmark meta failed: {e}"));
@@ -1229,8 +1233,8 @@ fn schema_version_returns_latest() {
     let version = db
         .schema_version()
         .unwrap_or_else(|e| unreachable!("version: {e}"));
-    // We have 4 migrations (V1–V4).
-    assert_eq!(version, 4);
+    // We have 5 migrations (V1–V5).
+    assert_eq!(version, 5);
 }
 
 #[test]

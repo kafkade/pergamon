@@ -87,3 +87,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Idempotent re-import for Raindrop and Pocket: existing items get tags and collections updated
 - URL canonicalization applied to all imported URLs for deduplication
 - Import summary report showing created and existing (updated) item counts
+- Metadata enrichment for saved URLs: Twitter Card fallback, favicon extraction, JSON-LD author parsing, and `og:site_name` support
+- `pergamon save` now stores enriched `BookmarkMeta` (OG image, favicon, site name) for all saved URLs
+- Re-saving a URL as `--bookmark` upserts metadata without creating a duplicate
+- `pergamon doctor dupes` command: scan for duplicate URLs using canonical URL matching with confidence levels (exact vs. canonical)
+- `pergamon doctor merge <keep> <discard>` command: safely merge two duplicate items — transfers tags and collections, preserves extension metadata, backdates `created_at`, and deletes the discarded item
