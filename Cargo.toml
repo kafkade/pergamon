@@ -42,6 +42,7 @@ url = "2"
 lopdf = "0.34"
 ratatui = "0.29"
 crossterm = "0.28"
+open = "5"
 
 # Mandatory lint set. Members opt in with `[lints] workspace = true`.
 [workspace.lints.rust]

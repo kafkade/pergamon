@@ -1,6 +1,8 @@
 //! Application state for the TUI.
 
-use pergamon_core::model::ContentItem;
+use pergamon_core::model::{ContentItem, Feed, FeedFolder};
+use pergamon_core::status::DocumentStatus;
+use uuid::Uuid;
 
 /// Which view the TUI is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -9,6 +11,58 @@ pub enum View {
     ItemList,
     /// Article reader (full-screen scrollable text).
     Reader,
+}
+
+/// Active filter controlling which items are shown.
+#[derive(Debug, Clone)]
+pub enum FilterMode {
+    /// All items regardless of status.
+    All,
+    /// Items with a specific status.
+    Status(DocumentStatus),
+    /// Items from a specific feed.
+    Feed(Uuid, String),
+    /// Items from feeds in a specific folder.
+    Folder(Uuid, String),
+}
+
+impl std::fmt::Display for FilterMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::All => write!(f, "All"),
+            Self::Status(s) => write!(f, "{s}"),
+            Self::Feed(_, name) => write!(f, "Feed: {name}"),
+            Self::Folder(_, name) => write!(f, "Folder: {name}"),
+        }
+    }
+}
+
+/// What the feed/folder picker is currently displaying.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickerMode {
+    /// Showing feeds.
+    Feed,
+    /// Showing folders.
+    Folder,
+}
+
+/// A pending confirmation dialog.
+#[derive(Debug, Clone)]
+pub struct ConfirmDialog {
+    /// Message to display.
+    pub message: String,
+    /// Number of items that would be affected.
+    #[allow(dead_code)]
+    pub count: u64,
+    /// Action to take on confirmation.
+    pub action: ConfirmAction,
+}
+
+/// What to do when a confirmation is accepted.
+#[derive(Debug, Clone)]
+pub enum ConfirmAction {
+    /// Bulk mark items as read (archived).
+    BulkMarkRead,
 }
 
 /// Top-level application state.
@@ -27,6 +81,24 @@ pub struct App {
     pub show_help: bool,
     /// Status message (shown in the bottom bar).
     pub status_message: Option<String>,
+    /// Current filter mode.
+    pub filter: FilterMode,
+    /// All subscribed feeds (for the feed picker).
+    pub feeds: Vec<Feed>,
+    /// All feed folders (for the folder picker).
+    pub folders: Vec<FeedFolder>,
+    /// Whether the feed/folder picker overlay is visible.
+    pub show_picker: bool,
+    /// What the picker is showing (feeds or folders).
+    pub picker_mode: PickerMode,
+    /// Currently selected index in the picker.
+    pub picker_selected: usize,
+    /// Unread (inbox) item count for the status bar.
+    pub unread_count: u64,
+    /// Total item count matching the current filter.
+    pub total_count: u64,
+    /// Pending confirmation dialog.
+    pub confirm: Option<ConfirmDialog>,
 }
 
 impl App {
@@ -40,6 +112,15 @@ impl App {
             scroll: 0,
             show_help: false,
             status_message: None,
+            filter: FilterMode::Status(DocumentStatus::Inbox),
+            feeds: Vec::new(),
+            folders: Vec::new(),
+            show_picker: false,
+            picker_mode: PickerMode::Feed,
+            picker_selected: 0,
+            unread_count: 0,
+            total_count: 0,
+            confirm: None,
         }
     }
 
@@ -94,5 +175,34 @@ impl App {
     /// Clear the status message.
     pub fn clear_status(&mut self) {
         self.status_message = None;
+    }
+
+    /// Move picker selection up.
+    pub const fn picker_up(&mut self) {
+        if self.picker_selected > 0 {
+            self.picker_selected -= 1;
+        }
+    }
+
+    /// Move picker selection down.
+    pub const fn picker_down(&mut self, max: usize) {
+        if self.picker_selected < max.saturating_sub(1) {
+            self.picker_selected += 1;
+        }
+    }
+
+    /// Clamp the selected index to the current items length.
+    pub fn clamp_selection(&mut self) {
+        if self.items.is_empty() {
+            self.selected = 0;
+        } else if self.selected >= self.items.len() {
+            self.selected = self.items.len() - 1;
+        }
+    }
+
+    /// Filter label for the status bar.
+    #[must_use]
+    pub fn filter_label(&self) -> String {
+        self.filter.to_string()
     }
 }

@@ -22,6 +22,26 @@ use pergamon_core::status::DocumentStatus;
 use crate::error::StorageError;
 
 // ======================================================================
+// Query filter
+// ======================================================================
+
+/// Filter criteria for querying content items.
+///
+/// Combines multiple optional predicates. All specified predicates are
+/// combined with AND. Feed and folder filters use JOINs through `feed_item_meta`.
+#[derive(Debug, Clone, Default)]
+pub struct ContentItemFilter {
+    /// Filter by content type.
+    pub content_type: Option<ContentType>,
+    /// Filter by document status.
+    pub status: Option<DocumentStatus>,
+    /// Filter to items belonging to a specific feed.
+    pub feed_id: Option<Uuid>,
+    /// Filter to items belonging to feeds in a specific folder.
+    pub folder_id: Option<Uuid>,
+}
+
+// ======================================================================
 // Embedded migrations
 // ======================================================================
 
@@ -481,6 +501,95 @@ impl Database {
         Ok(count as u64)
     }
 
+    /// List content items matching a [`ContentItemFilter`].
+    ///
+    /// Results are ordered by `created_at` descending. Supports pagination
+    /// via `limit` and `offset`. Feed/folder filters use JOINs through
+    /// `feed_item_meta`.
+    #[allow(clippy::missing_errors_doc)]
+    pub fn list_content_items_filtered(
+        &self,
+        filter: &ContentItemFilter,
+        limit: Option<u32>,
+        offset: Option<u32>,
+    ) -> Result<Vec<ContentItem>, StorageError> {
+        let (sql, param_values) = build_content_item_query(
+            "SELECT DISTINCT ci.id, ci.url, ci.title, ci.author, ci.content_type, ci.status,
+                    ci.content_text, ci.excerpt, ci.published_at, ci.created_at, ci.updated_at",
+            filter,
+            limit,
+            offset,
+        );
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
+            .iter()
+            .map(|v| v as &dyn rusqlite::types::ToSql)
+            .collect();
+        let rows = stmt.query_map(param_refs.as_slice(), |row| Ok(row_to_content_item(row)))?;
+
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(row?);
+        }
+        Ok(items)
+    }
+
+    /// Count content items matching a [`ContentItemFilter`].
+    #[allow(clippy::missing_errors_doc)]
+    pub fn count_content_items_filtered(
+        &self,
+        filter: &ContentItemFilter,
+    ) -> Result<u64, StorageError> {
+        let (sql, param_values) =
+            build_content_item_query("SELECT COUNT(DISTINCT ci.id)", filter, None, None);
+
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
+            .iter()
+            .map(|v| v as &dyn rusqlite::types::ToSql)
+            .collect();
+        let count: i64 = self
+            .conn
+            .query_row(&sql, param_refs.as_slice(), |row| row.get(0))?;
+        #[allow(clippy::cast_sign_loss)]
+        Ok(count as u64)
+    }
+
+    /// Bulk update the status of content items matching a filter.
+    ///
+    /// Returns the number of rows affected.
+    #[allow(clippy::missing_errors_doc)]
+    pub fn bulk_update_status(
+        &self,
+        filter: &ContentItemFilter,
+        new_status: DocumentStatus,
+    ) -> Result<u64, StorageError> {
+        let now = fmt_time(OffsetDateTime::now_utc());
+
+        // Build a subquery to find matching IDs.
+        let (subquery, param_values) =
+            build_content_item_query("SELECT DISTINCT ci.id", filter, None, None);
+
+        let sql = format!(
+            "UPDATE content_items SET status = ?1, updated_at = ?2 WHERE id IN ({subquery})"
+        );
+
+        let mut all_params: Vec<String> = vec![new_status.as_str().to_owned(), now];
+        all_params.extend(param_values);
+
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> = all_params
+            .iter()
+            .map(|v| v as &dyn rusqlite::types::ToSql)
+            .collect();
+
+        // Re-index the subquery parameters (they start at ?3 instead of ?1).
+        let sql = reindex_params(&sql, 2);
+
+        let affected = self.conn.execute(&sql, param_refs.as_slice())?;
+        #[allow(clippy::cast_sign_loss)]
+        Ok(affected as u64)
+    }
+
     // ------------------------------------------------------------------
     // Extension tables
     // ------------------------------------------------------------------
@@ -827,6 +936,102 @@ impl Database {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(names.join(", "))
     }
+}
+
+// ======================================================================
+// Query builder helpers
+// ======================================================================
+
+/// Build a SQL query for content items matching a [`ContentItemFilter`].
+///
+/// Returns `(sql, param_values)` where `param_values` are positional strings.
+fn build_content_item_query(
+    select_clause: &str,
+    filter: &ContentItemFilter,
+    limit: Option<u32>,
+    offset: Option<u32>,
+) -> (String, Vec<String>) {
+    let mut param_values: Vec<String> = Vec::new();
+    let needs_join = filter.feed_id.is_some() || filter.folder_id.is_some();
+
+    let mut sql = if needs_join {
+        format!(
+            "{select_clause}
+             FROM content_items ci
+             JOIN feed_item_meta fim ON fim.content_item_id = ci.id"
+        )
+    } else {
+        format!("{select_clause} FROM content_items ci")
+    };
+
+    if filter.folder_id.is_some() {
+        sql.push_str(" JOIN feeds f ON f.id = fim.feed_id");
+    }
+
+    sql.push_str(" WHERE 1=1");
+
+    if let Some(ct) = filter.content_type {
+        param_values.push(ct.as_str().to_owned());
+        let _ = write!(sql, " AND ci.content_type = ?{}", param_values.len());
+    }
+    if let Some(st) = filter.status {
+        param_values.push(st.as_str().to_owned());
+        let _ = write!(sql, " AND ci.status = ?{}", param_values.len());
+    }
+    if let Some(fid) = filter.feed_id {
+        param_values.push(fid.to_string());
+        let _ = write!(sql, " AND fim.feed_id = ?{}", param_values.len());
+    }
+    if let Some(fld) = filter.folder_id {
+        param_values.push(fld.to_string());
+        let _ = write!(sql, " AND f.folder_id = ?{}", param_values.len());
+    }
+
+    sql.push_str(" ORDER BY ci.created_at DESC");
+
+    if let Some(lim) = limit {
+        let _ = write!(sql, " LIMIT {lim}");
+    }
+    if let Some(off) = offset {
+        let _ = write!(sql, " OFFSET {off}");
+    }
+
+    (sql, param_values)
+}
+
+/// Re-index placeholder parameters in a SQL string by an offset.
+///
+/// When a subquery with `?1, ?2, ...` is embedded inside a larger statement
+/// that already uses `?1` and `?2` (e.g. for `new_status` and `now`), this
+/// shifts the subquery placeholders so they don't collide.
+fn reindex_params(sql: &str, offset: usize) -> String {
+    let mut result = String::with_capacity(sql.len());
+    let mut chars = sql.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '?' {
+            // Collect digits after '?'
+            let mut digits = String::new();
+            while let Some(&d) = chars.peek() {
+                if d.is_ascii_digit() {
+                    digits.push(d);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            if let Ok(n) = digits.parse::<usize>() {
+                let _ = write!(result, "?{}", n + offset);
+            } else {
+                result.push('?');
+                result.push_str(&digits);
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+
+    result
 }
 
 // ======================================================================

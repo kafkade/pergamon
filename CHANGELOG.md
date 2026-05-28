@@ -40,3 +40,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Feed folder management: organize feeds into folders with `feed move` and `feed list --tree`
 - Dry-run mode for OPML import to preview changes without modifying the database
 - Idempotent re-import: existing subscriptions are detected by URL and folders reused by name
+- TUI triage workflow: filter items by status, feed, or folder with keyboard-first navigation
+- Quick status filters: `1`–`5` for inbox/later/reading/reference/archived, `0` for all, `Tab` to cycle
+- Feed/folder picker overlay in the TUI (press `f` for feeds, `F` for folders)
+- Bulk mark-as-read action with confirmation dialog (`R` key)
+- Open current item in the default browser from the TUI (`o` key)
+- Triage keybindings available in both list and reader views (`r`/`s`/`a`/`d`/`l`)
+- Jump to top/bottom navigation (`g`/`G` or Home/End)
+- Status-colored item rows and unread count in the TUI status bar
+- URL display in the article reader header
+- Filtered content item queries (`ContentItemFilter`) in the storage layer
