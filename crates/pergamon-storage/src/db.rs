@@ -183,6 +183,55 @@ impl Database {
         Ok(())
     }
 
+    /// Run a closure inside a database transaction.
+    ///
+    /// If the closure returns `Ok`, the transaction is committed.
+    /// If it returns `Err`, the transaction is rolled back.
+    pub fn in_transaction<F, T, E>(&self, f: F) -> Result<T, E>
+    where
+        F: FnOnce(&Self) -> Result<T, E>,
+        E: From<StorageError>,
+    {
+        self.conn
+            .execute_batch("BEGIN;")
+            .map_err(|e| E::from(StorageError::from(e)))?;
+        match f(self) {
+            Ok(val) => {
+                self.conn
+                    .execute_batch("COMMIT;")
+                    .map_err(|e| E::from(StorageError::from(e)))?;
+                Ok(val)
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK;");
+                Err(e)
+            }
+        }
+    }
+
+    /// Begin a database transaction manually.
+    ///
+    /// Use with [`commit_transaction`](Self::commit_transaction) and
+    /// [`rollback_transaction`](Self::rollback_transaction) when a closure-based
+    /// transaction (via [`in_transaction`](Self::in_transaction)) isn't suitable
+    /// (e.g. when the body mutates external state like caches or stats).
+    pub fn begin_transaction(&self) -> Result<(), StorageError> {
+        self.conn.execute_batch("BEGIN;")?;
+        Ok(())
+    }
+
+    /// Commit a previously started transaction.
+    pub fn commit_transaction(&self) -> Result<(), StorageError> {
+        self.conn.execute_batch("COMMIT;")?;
+        Ok(())
+    }
+
+    /// Roll back a previously started transaction.
+    pub fn rollback_transaction(&self) -> Result<(), StorageError> {
+        self.conn.execute_batch("ROLLBACK;")?;
+        Ok(())
+    }
+
     // ------------------------------------------------------------------
     // Feeds
     // ------------------------------------------------------------------

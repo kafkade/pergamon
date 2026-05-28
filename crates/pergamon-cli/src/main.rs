@@ -214,6 +214,28 @@ enum ImportAction {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Import highlights from a Kindle My Clippings.txt file.
+    Kindle {
+        /// Path to the My Clippings.txt file.
+        file: PathBuf,
+        /// Show what would be imported without making changes.
+        #[arg(long)]
+        dry_run: bool,
+        /// Automatically enable spaced repetition for imported highlights.
+        #[arg(long)]
+        enable_review: bool,
+    },
+    /// Import highlights from a Readwise CSV export.
+    Readwise {
+        /// Path to the Readwise CSV file.
+        file: PathBuf,
+        /// Show what would be imported without making changes.
+        #[arg(long)]
+        dry_run: bool,
+        /// Automatically enable spaced repetition for imported highlights.
+        #[arg(long)]
+        enable_review: bool,
+    },
     /// Restore from a full backup archive.
     Backup {
         /// Path to the backup ZIP file.
@@ -1003,6 +1025,16 @@ fn handle_import(db: &Database, action: ImportAction) -> Result<()> {
         ImportAction::Opml { file, dry_run } => import_opml(db, &file, dry_run),
         ImportAction::Raindrop { file, dry_run } => import_raindrop(db, &file, dry_run),
         ImportAction::Pocket { file, dry_run } => import_pocket(db, &file, dry_run),
+        ImportAction::Kindle {
+            file,
+            dry_run,
+            enable_review,
+        } => import_kindle(db, &file, dry_run, enable_review),
+        ImportAction::Readwise {
+            file,
+            dry_run,
+            enable_review,
+        } => import_readwise(db, &file, dry_run, enable_review),
         ImportAction::Backup { file } => restore_backup(db, &file),
     }
 }
@@ -1406,6 +1438,506 @@ fn import_pocket(db: &Database, path: &std::path::Path, dry_run: bool) -> Result
 struct BookmarkImportStats {
     created: u64,
     existing: u64,
+}
+
+/// Statistics for highlight imports (Kindle, Readwise).
+#[derive(Default)]
+struct HighlightImportStats {
+    sources_created: u64,
+    sources_existing: u64,
+    highlights_created: u64,
+    highlights_existing: u64,
+    notes_created: u64,
+    review_cards_created: u64,
+}
+
+// ======================================================================
+// Kindle import
+// ======================================================================
+
+/// Import highlights from a Kindle My Clippings.txt file.
+#[allow(clippy::too_many_lines)]
+fn import_kindle(
+    db: &Database,
+    path: &std::path::Path,
+    dry_run: bool,
+    enable_review: bool,
+) -> Result<()> {
+    use pergamon_core::model::{HighlightMeta, Note};
+    use pergamon_import::kindle::{KindleClippingType, kindle_highlight_key, kindle_source_key};
+
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("failed to read Kindle clippings: {}", path.display()))?;
+
+    let clippings = pergamon_import::parse_kindle_clippings(&bytes)
+        .with_context(|| format!("failed to parse Kindle clippings: {}", path.display()))?;
+
+    if dry_run {
+        println!("Dry run — no changes will be made.\n");
+    }
+
+    let total = clippings.len();
+    let highlight_count = clippings
+        .iter()
+        .filter(|c| c.clipping_type == KindleClippingType::Highlight)
+        .count();
+    let note_count = clippings
+        .iter()
+        .filter(|c| c.clipping_type == KindleClippingType::Note)
+        .count();
+    let bookmark_count = total - highlight_count - note_count;
+
+    println!(
+        "Kindle: {} entries ({} highlights, {} notes, {} bookmarks) in {}",
+        total,
+        highlight_count,
+        note_count,
+        bookmark_count,
+        path.display()
+    );
+
+    let mut stats = HighlightImportStats::default();
+    let now = OffsetDateTime::now_utc();
+
+    // Cache of source book URL → content item ID to avoid repeated lookups.
+    let mut source_cache: std::collections::HashMap<String, Uuid> =
+        std::collections::HashMap::new();
+
+    if !dry_run {
+        db.begin_transaction()
+            .context("failed to begin transaction")?;
+    }
+
+    let result = (|| -> Result<()> {
+        for clipping in &clippings {
+            // Skip bookmarks — they have no content.
+            if clipping.clipping_type == KindleClippingType::Bookmark {
+                continue;
+            }
+
+            let source_url = kindle_source_key(&clipping.book_title, clipping.author.as_deref());
+
+            // Find or create the source book content item.
+            let source_id = if let Some(&cached_id) = source_cache.get(&source_url) {
+                cached_id
+            } else if let Some(existing) = db
+                .get_content_item_by_url(&source_url)
+                .context("failed to look up source book")?
+            {
+                source_cache.insert(source_url.clone(), existing.id);
+                stats.sources_existing += 1;
+                println!("  📖 {} (exists)", clipping.book_title);
+                existing.id
+            } else if dry_run {
+                let book_id = Uuid::new_v4();
+                source_cache.insert(source_url.clone(), book_id);
+                stats.sources_created += 1;
+                println!("  📖 {} (would create)", clipping.book_title);
+                book_id
+            } else {
+                let book_id = Uuid::new_v4();
+                let created_at = clipping.added_at.unwrap_or(now);
+                let book_item = ContentItem {
+                    id: book_id,
+                    url: Some(source_url.clone()),
+                    title: clipping.book_title.clone(),
+                    author: clipping.author.clone(),
+                    content_type: ContentType::Article,
+                    status: DocumentStatus::Reference,
+                    content_text: None,
+                    excerpt: None,
+                    published_at: None,
+                    created_at,
+                    updated_at: now,
+                };
+                db.insert_content_item(&book_item).with_context(|| {
+                    format!("failed to create source book: {}", clipping.book_title)
+                })?;
+                let kindle_tag = vec!["kindle".to_owned()];
+                apply_tags(db, book_id, &kindle_tag)?;
+                source_cache.insert(source_url.clone(), book_id);
+                stats.sources_created += 1;
+                println!("  📖 {}", clipping.book_title);
+                book_id
+            };
+
+            match clipping.clipping_type {
+                KindleClippingType::Highlight => {
+                    let highlight_url = kindle_highlight_key(
+                        &clipping.book_title,
+                        clipping.author.as_deref(),
+                        clipping.location.as_deref(),
+                        &clipping.content,
+                    );
+
+                    // Dedup by highlight URL.
+                    if db
+                        .get_content_item_by_url(&highlight_url)
+                        .context("failed to check for duplicate highlight")?
+                        .is_some()
+                    {
+                        stats.highlights_existing += 1;
+                        continue;
+                    }
+
+                    if dry_run {
+                        let preview = truncate_str(&clipping.content, 60);
+                        println!("    + \"{preview}\" (would create)");
+                        stats.highlights_created += 1;
+                        continue;
+                    }
+
+                    let highlight_id = Uuid::new_v4();
+                    let created_at = clipping.added_at.unwrap_or(now);
+                    let highlight_item = ContentItem {
+                        id: highlight_id,
+                        url: Some(highlight_url),
+                        title: format!("Highlight from {}", truncate_str(&clipping.book_title, 80)),
+                        author: clipping.author.clone(),
+                        content_type: ContentType::Highlight,
+                        status: DocumentStatus::Reference,
+                        content_text: Some(clipping.content.clone()),
+                        excerpt: Some(truncate_str(&clipping.content, 200)),
+                        published_at: None,
+                        created_at,
+                        updated_at: now,
+                    };
+                    db.insert_content_item(&highlight_item)
+                        .context("failed to insert highlight")?;
+
+                    let position = clipping.location.as_ref().and_then(|l| {
+                        l.split('-')
+                            .next()
+                            .and_then(|s| s.replace("Page ", "").parse::<i64>().ok())
+                    });
+
+                    let meta = HighlightMeta {
+                        content_item_id: highlight_id,
+                        source_item_id: Some(source_id),
+                        quote_text: clipping.content.clone(),
+                        note: None,
+                        position_start: position,
+                        position_end: None,
+                        color: None,
+                    };
+                    db.insert_highlight_meta(&meta)
+                        .context("failed to insert highlight meta")?;
+
+                    if enable_review {
+                        create_review_card(db, highlight_id, now)?;
+                        stats.review_cards_created += 1;
+                    }
+
+                    stats.highlights_created += 1;
+                }
+                KindleClippingType::Note => {
+                    if clipping.content.is_empty() {
+                        continue;
+                    }
+
+                    // Dedup: skip if an identical note already exists on this source.
+                    let existing_notes = db
+                        .list_notes_for_item(source_id)
+                        .context("failed to list existing notes")?;
+                    if existing_notes.iter().any(|n| n.body == clipping.content) {
+                        continue;
+                    }
+
+                    if dry_run {
+                        let preview = truncate_str(&clipping.content, 60);
+                        println!("    📝 \"{preview}\" (would create note)");
+                        stats.notes_created += 1;
+                        continue;
+                    }
+
+                    let note = Note {
+                        id: Uuid::new_v4(),
+                        content_item_id: source_id,
+                        body: clipping.content.clone(),
+                        created_at: clipping.added_at.unwrap_or(now),
+                        updated_at: now,
+                    };
+                    db.insert_note(&note)
+                        .context("failed to insert Kindle note")?;
+
+                    stats.notes_created += 1;
+                }
+                KindleClippingType::Bookmark => {}
+            }
+        }
+        Ok(())
+    })();
+
+    if !dry_run {
+        if result.is_ok() {
+            db.commit_transaction()
+                .context("failed to commit transaction")?;
+        } else {
+            let _ = db.rollback_transaction();
+        }
+    }
+    result?;
+
+    let label = if dry_run { "Would import" } else { "Imported" };
+    println!(
+        "\n{label}: {} sources ({} new), {} highlights ({} new), {} notes, {} review cards",
+        stats.sources_created + stats.sources_existing,
+        stats.sources_created,
+        stats.highlights_created + stats.highlights_existing,
+        stats.highlights_created,
+        stats.notes_created,
+        stats.review_cards_created,
+    );
+    Ok(())
+}
+
+// ======================================================================
+// Readwise import
+// ======================================================================
+
+/// Import highlights from a Readwise CSV export.
+#[allow(clippy::too_many_lines)]
+fn import_readwise(
+    db: &Database,
+    path: &std::path::Path,
+    dry_run: bool,
+    enable_review: bool,
+) -> Result<()> {
+    use pergamon_core::model::HighlightMeta;
+    use pergamon_import::readwise::{readwise_highlight_key, readwise_source_key};
+
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("failed to read Readwise CSV: {}", path.display()))?;
+
+    let items = pergamon_import::parse_readwise_csv(&bytes)
+        .with_context(|| format!("failed to parse Readwise CSV: {}", path.display()))?;
+
+    if dry_run {
+        println!("Dry run — no changes will be made.\n");
+    }
+    println!(
+        "Readwise: {} highlight(s) in {}",
+        items.len(),
+        path.display()
+    );
+
+    let mut stats = HighlightImportStats::default();
+    let now = OffsetDateTime::now_utc();
+
+    // Cache of source URL → content item ID.
+    let mut source_cache: std::collections::HashMap<String, Uuid> =
+        std::collections::HashMap::new();
+
+    if !dry_run {
+        db.begin_transaction()
+            .context("failed to begin transaction")?;
+    }
+
+    let result = (|| -> Result<()> {
+        for item in &items {
+            let source_url = readwise_source_key(
+                item.source_url.as_deref(),
+                &item.title,
+                item.author.as_deref(),
+                item.source_type.as_deref(),
+            );
+
+            // Find or create the source content item.
+            let source_id = if let Some(&cached_id) = source_cache.get(&source_url) {
+                cached_id
+            } else if let Some(existing) = db
+                .get_content_item_by_url(&source_url)
+                .context("failed to look up source")?
+            {
+                source_cache.insert(source_url.clone(), existing.id);
+                stats.sources_existing += 1;
+                existing.id
+            } else if dry_run {
+                let src_id = Uuid::new_v4();
+                source_cache.insert(source_url.clone(), src_id);
+                stats.sources_created += 1;
+                println!("  📖 {} (would create)", item.title);
+                src_id
+            } else {
+                let src_id = Uuid::new_v4();
+                let content_type = map_readwise_content_type(
+                    item.source_type.as_deref(),
+                    item.category.as_deref(),
+                );
+                let created_at = item.highlighted_at.unwrap_or(now);
+                let source_item = ContentItem {
+                    id: src_id,
+                    url: Some(source_url.clone()),
+                    title: item.title.clone(),
+                    author: item.author.clone(),
+                    content_type,
+                    status: DocumentStatus::Reference,
+                    content_text: None,
+                    excerpt: None,
+                    published_at: None,
+                    created_at,
+                    updated_at: now,
+                };
+                db.insert_content_item(&source_item)
+                    .with_context(|| format!("failed to create source: {}", item.title))?;
+
+                // Apply book-level tags + "readwise" provenance tag.
+                let mut all_tags = item.book_tags.clone();
+                all_tags.push("readwise".to_owned());
+                apply_tags(db, src_id, &all_tags)?;
+
+                source_cache.insert(source_url.clone(), src_id);
+                stats.sources_created += 1;
+                println!("  📖 {}", item.title);
+                src_id
+            };
+
+            // Create the highlight.
+            let highlight_url = readwise_highlight_key(
+                item.uuid.as_deref(),
+                item.source_url.as_deref(),
+                &item.title,
+                item.author.as_deref(),
+                item.source_type.as_deref(),
+                &item.highlight,
+            );
+
+            // Dedup by highlight URL.
+            if db
+                .get_content_item_by_url(&highlight_url)
+                .context("failed to check for duplicate highlight")?
+                .is_some()
+            {
+                stats.highlights_existing += 1;
+                continue;
+            }
+
+            if dry_run {
+                let preview = truncate_str(&item.highlight, 60);
+                println!("    + \"{preview}\" (would create)");
+                stats.highlights_created += 1;
+                continue;
+            }
+
+            let highlight_id = Uuid::new_v4();
+            let created_at = item.highlighted_at.unwrap_or(now);
+            let highlight_item = ContentItem {
+                id: highlight_id,
+                url: Some(highlight_url),
+                title: format!("Highlight from {}", truncate_str(&item.title, 80)),
+                author: item.author.clone(),
+                content_type: ContentType::Highlight,
+                status: DocumentStatus::Reference,
+                content_text: Some(item.highlight.clone()),
+                excerpt: Some(truncate_str(&item.highlight, 200)),
+                published_at: None,
+                created_at,
+                updated_at: now,
+            };
+            db.insert_content_item(&highlight_item)
+                .context("failed to insert highlight")?;
+
+            let position_start = item.location.as_ref().and_then(|l| {
+                l.replace("Page ", "")
+                    .replace("Location ", "")
+                    .split('-')
+                    .next()
+                    .and_then(|s| s.trim().parse::<i64>().ok())
+            });
+
+            let meta = HighlightMeta {
+                content_item_id: highlight_id,
+                source_item_id: Some(source_id),
+                quote_text: item.highlight.clone(),
+                note: item.note.clone(),
+                position_start,
+                position_end: None,
+                color: None,
+            };
+            db.insert_highlight_meta(&meta)
+                .context("failed to insert highlight meta")?;
+
+            // Apply highlight-level tags.
+            if !item.tags.is_empty() {
+                apply_tags(db, highlight_id, &item.tags)?;
+            }
+
+            if enable_review {
+                create_review_card(db, highlight_id, now)?;
+                stats.review_cards_created += 1;
+            }
+
+            stats.highlights_created += 1;
+        }
+        Ok(())
+    })();
+
+    if !dry_run {
+        if result.is_ok() {
+            db.commit_transaction()
+                .context("failed to commit transaction")?;
+        } else {
+            let _ = db.rollback_transaction();
+        }
+    }
+    result?;
+
+    let label = if dry_run { "Would import" } else { "Imported" };
+    println!(
+        "\n{label}: {} sources ({} new), {} highlights ({} new), {} review cards",
+        stats.sources_created + stats.sources_existing,
+        stats.sources_created,
+        stats.highlights_created + stats.highlights_existing,
+        stats.highlights_created,
+        stats.review_cards_created,
+    );
+    Ok(())
+}
+
+/// Map a Readwise source type / category to a pergamon `ContentType`.
+fn map_readwise_content_type(source_type: Option<&str>, category: Option<&str>) -> ContentType {
+    let key = source_type.or(category).map(|s| s.trim().to_lowercase());
+
+    match key.as_deref() {
+        Some("podcast" | "podcasts" | "podcast_episode") => ContentType::PodcastEpisode,
+        Some("pdf") => ContentType::Pdf,
+        // Books, articles, tweets, and everything else map to Article.
+        _ => ContentType::Article,
+    }
+}
+
+/// Create a new FSRS review card for a highlight.
+fn create_review_card(db: &Database, highlight_id: Uuid, now: OffsetDateTime) -> Result<()> {
+    let card = pergamon_core::model::ReviewCard {
+        id: Uuid::new_v4(),
+        content_item_id: highlight_id,
+        state: pergamon_core::fsrs::CardState::New,
+        stability: None,
+        difficulty: None,
+        due_at: now,
+        last_reviewed_at: None,
+        review_count: 0,
+        lapse_count: 0,
+        scheduled_days: None,
+        created_at: now,
+        updated_at: now,
+    };
+    db.insert_review_card(&card)
+        .context("failed to create review card")?;
+    Ok(())
+}
+
+/// Truncate a string to a maximum length, appending "…" if truncated.
+fn truncate_str(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_owned()
+    } else {
+        let mut end = max_len;
+        while !s.is_char_boundary(end) && end > 0 {
+            end -= 1;
+        }
+        format!("{}…", &s[..end])
+    }
 }
 
 /// Apply a folder/collection to a content item, creating the collection if needed.

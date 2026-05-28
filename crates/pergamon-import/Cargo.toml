@@ -1,6 +1,6 @@
 [package]
 name = "pergamon-import"
-description = "Import parsers for Raindrop.io, Pocket, and other services."
+description = "Import parsers for Raindrop.io, Pocket, Kindle, Readwise, and other services."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
