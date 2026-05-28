@@ -15,6 +15,10 @@ pub fn render(app: &App, frame: &mut Frame<'_>) {
         View::Reader => render_reader(app, frame),
     }
 
+    if app.show_search_input {
+        render_search_input(app, frame);
+    }
+
     if app.show_picker {
         render_picker(app, frame);
     }
@@ -295,13 +299,28 @@ fn render_confirm(dialog: &super::app::ConfirmDialog, frame: &mut Frame<'_>) {
     frame.render_widget(confirm, popup_area);
 }
 
+/// Render the search input bar at the bottom of the screen.
+fn render_search_input(app: &App, frame: &mut Frame<'_>) {
+    let area = frame.area();
+    let input_area = Rect::new(0, area.height.saturating_sub(1), area.width, 1);
+
+    let label = Span::styled("/", Style::default().fg(Color::Yellow));
+    let text = Span::raw(&app.search_input);
+    let cursor = Span::styled("▌", Style::default().fg(Color::Yellow));
+
+    let line = Line::from(vec![label, text, cursor]);
+    let paragraph = Paragraph::new(line).style(Style::default().bg(Color::DarkGray));
+
+    frame.render_widget(paragraph, input_area);
+}
+
 /// Render a centered help overlay.
 fn render_help_overlay(frame: &mut Frame<'_>) {
     let area = frame.area();
 
     // Center a box in the middle of the screen.
     let width = 56.min(area.width.saturating_sub(4));
-    let height = 26.min(area.height.saturating_sub(4));
+    let height = 28.min(area.height.saturating_sub(4));
     let x = (area.width.saturating_sub(width)) / 2;
     let y = (area.height.saturating_sub(height)) / 2;
     let popup_area = Rect::new(x, y, width, height);
@@ -338,6 +357,9 @@ fn render_help_overlay(frame: &mut Frame<'_>) {
         Line::from("  Tab          Cycle status filter"),
         Line::from("  1-5          Quick filter (inbox/later/…)"),
         Line::from("  0            Show all"),
+        Line::from(""),
+        Line::styled("  Search", Style::default().add_modifier(Modifier::BOLD)),
+        Line::from("  /            Search all content"),
         Line::from("  ?            Toggle this help"),
     ];
 

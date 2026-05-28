@@ -171,3 +171,14 @@ pub struct SearchResult {
     /// BM25 relevance rank (lower is more relevant).
     pub rank: f64,
 }
+
+/// A rich search hit: full content item plus relevance and snippet.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchHit {
+    /// The matching content item.
+    pub item: ContentItem,
+    /// BM25 relevance rank (lower is more relevant).
+    pub rank: f64,
+    /// Snippet with match context from the best-matching FTS column.
+    pub snippet: Option<String>,
+}

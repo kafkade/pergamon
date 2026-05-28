@@ -13,4 +13,5 @@ pub mod error;
 
 pub use db::ContentItemFilter;
 pub use db::Database;
+pub use db::SearchFilter;
 pub use error::StorageError;

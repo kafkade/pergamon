@@ -15,7 +15,7 @@ use uuid::Uuid;
 use pergamon_core::content_type::ContentType;
 use pergamon_core::model::{
     BookmarkMeta, Collection, ContentItem, Feed, FeedFolder, FeedItemMeta, HighlightMeta,
-    SearchResult, Tag,
+    SearchHit, SearchResult, Tag,
 };
 use pergamon_core::status::DocumentStatus;
 
@@ -39,6 +39,27 @@ pub struct ContentItemFilter {
     pub feed_id: Option<Uuid>,
     /// Filter to items belonging to feeds in a specific folder.
     pub folder_id: Option<Uuid>,
+}
+
+/// Filter criteria for full-text search queries.
+///
+/// All specified predicates are combined with AND alongside the FTS
+/// `MATCH` clause. Search-specific facets (tag name, date range)
+/// augment the base FTS query.
+#[derive(Debug, Clone, Default)]
+pub struct SearchFilter {
+    /// Filter by content type.
+    pub content_type: Option<ContentType>,
+    /// Filter by document status.
+    pub status: Option<DocumentStatus>,
+    /// Filter by tag name (case-insensitive match).
+    pub tag_name: Option<String>,
+    /// Filter to items belonging to a specific feed.
+    pub feed_id: Option<Uuid>,
+    /// Only include items created on or after this time.
+    pub since: Option<OffsetDateTime>,
+    /// Only include items created before this time.
+    pub before: Option<OffsetDateTime>,
 }
 
 // ======================================================================
@@ -928,6 +949,68 @@ impl Database {
         Ok(results)
     }
 
+    /// Full-text search with faceted filters and rich results.
+    ///
+    /// Returns matching content items ordered by BM25 relevance with
+    /// recency as a tiebreaker. Each hit includes a snippet from the
+    /// best-matching FTS column.
+    #[allow(clippy::missing_errors_doc)]
+    pub fn search_filtered(
+        &self,
+        query: &str,
+        filter: &SearchFilter,
+        limit: Option<u32>,
+    ) -> Result<Vec<SearchHit>, StorageError> {
+        let safe_query = quote_fts_tokens(query);
+        if safe_query.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let (sql, param_values) = build_search_query(&safe_query, filter, limit);
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
+            .iter()
+            .map(|v| v as &dyn rusqlite::types::ToSql)
+            .collect();
+        let rows = stmt.query_map(param_refs.as_slice(), |row| {
+            Ok(SearchHit {
+                item: row_to_content_item(row),
+                rank: row.get(11)?,
+                snippet: row.get(12)?,
+            })
+        })?;
+
+        let mut hits = Vec::new();
+        for row in rows {
+            hits.push(row?);
+        }
+        Ok(hits)
+    }
+
+    // ------------------------------------------------------------------
+    // Tags (listing)
+    // ------------------------------------------------------------------
+
+    /// List all tags, ordered by name.
+    pub fn list_tags(&self) -> Result<Vec<Tag>, StorageError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, name, created_at FROM tags ORDER BY name COLLATE NOCASE")?;
+        let rows = stmt.query_map([], |row| {
+            Ok(Tag {
+                id: parse_uuid(&row.get::<_, String>(0)?),
+                name: row.get(1)?,
+                created_at: parse_time(&row.get::<_, String>(2)?),
+            })
+        })?;
+        let mut tags = Vec::new();
+        for row in rows {
+            tags.push(row?);
+        }
+        Ok(tags)
+    }
+
     // ------------------------------------------------------------------
     // FTS5 helpers (private)
     // ------------------------------------------------------------------
@@ -1085,6 +1168,96 @@ fn reindex_params(sql: &str, offset: usize) -> String {
     }
 
     result
+}
+
+/// Quote FTS5 query tokens so hyphens and special chars are treated as literals.
+///
+/// Each whitespace-delimited token is wrapped in double quotes unless it
+/// already contains a quote character.
+fn quote_fts_tokens(query: &str) -> String {
+    query
+        .split_whitespace()
+        .map(|token| {
+            if token.contains('"') {
+                token.to_owned()
+            } else {
+                format!("\"{token}\"")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Build a SQL query for full-text search with faceted filters.
+///
+/// Returns `(sql, param_values)`. The result columns are the standard
+/// 11 content-item columns (indices 0–10) followed by `rank` (11) and
+/// `snippet` (12).
+fn build_search_query(
+    safe_query: &str,
+    filter: &SearchFilter,
+    limit: Option<u32>,
+) -> (String, Vec<String>) {
+    let mut param_values: Vec<String> = Vec::new();
+
+    // ?1 is always the FTS MATCH query.
+    param_values.push(safe_query.to_owned());
+
+    let mut sql = String::from(
+        "SELECT ci.id, ci.url, ci.title, ci.author, ci.content_type, ci.status,
+                ci.content_text, ci.excerpt, ci.published_at, ci.created_at, ci.updated_at,
+                fts.rank,
+                snippet(content_items_fts, -1, '»', '«', '…', 20) AS snip
+         FROM content_items_fts fts
+         JOIN content_items ci ON ci.id = fts.content_item_id",
+    );
+
+    // Conditional JOINs.
+    if filter.tag_name.is_some() {
+        sql.push_str(
+            " JOIN content_item_tags cit ON cit.content_item_id = ci.id
+              JOIN tags t ON t.id = cit.tag_id",
+        );
+    }
+    if filter.feed_id.is_some() {
+        sql.push_str(" JOIN feed_item_meta fim ON fim.content_item_id = ci.id");
+    }
+
+    sql.push_str(" WHERE content_items_fts MATCH ?1");
+
+    if let Some(ct) = filter.content_type {
+        param_values.push(ct.as_str().to_owned());
+        let _ = write!(sql, " AND ci.content_type = ?{}", param_values.len());
+    }
+    if let Some(st) = filter.status {
+        param_values.push(st.as_str().to_owned());
+        let _ = write!(sql, " AND ci.status = ?{}", param_values.len());
+    }
+    if let Some(ref tag) = filter.tag_name {
+        param_values.push(tag.clone());
+        let _ = write!(sql, " AND t.name = ?{} COLLATE NOCASE", param_values.len());
+    }
+    if let Some(fid) = filter.feed_id {
+        param_values.push(fid.to_string());
+        let _ = write!(sql, " AND fim.feed_id = ?{}", param_values.len());
+    }
+    if let Some(since) = filter.since {
+        param_values.push(fmt_time(since));
+        let _ = write!(sql, " AND ci.created_at >= ?{}", param_values.len());
+    }
+    if let Some(before) = filter.before {
+        param_values.push(fmt_time(before));
+        let _ = write!(sql, " AND ci.created_at < ?{}", param_values.len());
+    }
+
+    // Relevance first, recency as tiebreaker.
+    sql.push_str(" ORDER BY fts.rank, COALESCE(ci.published_at, ci.created_at) DESC");
+
+    if let Some(lim) = limit {
+        let _ = write!(sql, " LIMIT {lim}");
+    }
+
+    (sql, param_values)
 }
 
 // ======================================================================
