@@ -12,11 +12,13 @@
 //! content and passing raw bytes or strings.
 
 pub mod article;
+pub mod canonical;
 pub mod error;
 pub mod metadata;
 pub mod pdf;
 
 pub use article::{ExtractedArticle, extract_article, extract_article_from_html};
+pub use canonical::canonicalize_url;
 pub use error::ExtractError;
 pub use metadata::{Metadata, extract_metadata};
 pub use pdf::{ExtractedPdf, extract_pdf_text};

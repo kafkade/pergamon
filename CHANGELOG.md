@@ -50,3 +50,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Status-colored item rows and unread count in the TUI status bar
 - URL display in the article reader header
 - Filtered content item queries (`ContentItemFilter`) in the storage layer
+- URL canonicalization for deduplication: strips tracking parameters, normalizes scheme/host/port, sorts query params (`pergamon-extract`)
+- Duplicate detection for `pergamon save`: deduplicates against the canonical post-redirect URL
+- `--tag` / `-t` flag for `pergamon save` to tag items on capture (repeatable)
+- `--bookmark` flag for `pergamon save` to save as bookmark without article extraction
+- Pipe support for `pergamon save`: read URL from stdin (`echo "https://..." | pergamon save`)
+- Duplicate saves still apply new tags to the existing item
+- `get_or_create_tag` storage method for race-safe tag creation by name
+- V4 migration: partial unique index on `content_items.url` and case-insensitive unique index on `tags.name`

@@ -6,6 +6,7 @@
 
 mod tui;
 
+use std::io::BufRead;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
@@ -54,8 +55,14 @@ enum Command {
     Sync,
     /// Save a URL as an article (fetch, extract, store).
     Save {
-        /// URL to save.
-        url: String,
+        /// URL to save (reads from stdin if omitted).
+        url: Option<String>,
+        /// Add tags to the saved item (repeatable).
+        #[arg(long = "tag", short = 't')]
+        tags: Vec<String>,
+        /// Save as bookmark without article extraction.
+        #[arg(long)]
+        bookmark: bool,
     },
     /// Open the TUI inbox / reader.
     Read,
@@ -155,7 +162,11 @@ fn main() -> Result<()> {
     match command {
         Command::Feed { action } => handle_feed(&db, action),
         Command::Sync => refresh_feeds(&db, None),
-        Command::Save { url } => save_url(&db, &url),
+        Command::Save {
+            url,
+            tags,
+            bookmark,
+        } => save_url(&db, url.as_deref(), &tags, bookmark),
         Command::Read => run_tui(&db),
         Command::Import { action } => handle_import(&db, action),
         Command::Export { action } => handle_export(&db, action),
@@ -832,11 +843,89 @@ fn feed_to_outline(feed: &Feed) -> pergamon_feed::OpmlOutline {
 // Save command
 // ======================================================================
 
+/// Resolve the URL to save from a CLI argument or stdin pipe.
+fn resolve_url_input(raw_url: Option<&str>) -> Result<String> {
+    use std::io::IsTerminal;
+
+    if let Some(u) = raw_url {
+        return Ok(u.to_owned());
+    }
+
+    let stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        bail!("No URL provided. Usage: pergamon save <url>");
+    }
+    let mut line = String::new();
+    stdin
+        .lock()
+        .read_line(&mut line)
+        .context("failed to read URL from stdin")?;
+    let trimmed = line.trim().to_owned();
+    if trimmed.is_empty() {
+        bail!("No URL provided on stdin");
+    }
+    Ok(trimmed)
+}
+
+/// Extract content from fetched bytes, returning structured fields.
+fn extract_content(
+    bytes: &[u8],
+    final_url: &str,
+    canonical_url: &str,
+    bookmark: bool,
+) -> (
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<OffsetDateTime>,
+    ContentType,
+) {
+    if bookmark {
+        let html = String::from_utf8_lossy(bytes);
+        let meta = pergamon_extract::extract_metadata(&html);
+        (
+            meta.title.unwrap_or_else(|| canonical_url.to_owned()),
+            meta.author,
+            None,
+            meta.description,
+            None,
+            ContentType::Bookmark,
+        )
+    } else if let Ok(article) = pergamon_extract::extract_article(bytes, final_url) {
+        (
+            article.title.unwrap_or_else(|| canonical_url.to_owned()),
+            article.author,
+            Some(article.content_text),
+            article.excerpt,
+            article.published_at,
+            ContentType::Article,
+        )
+    } else {
+        let html = String::from_utf8_lossy(bytes);
+        let meta = pergamon_extract::extract_metadata(&html);
+        (
+            meta.title.unwrap_or_else(|| canonical_url.to_owned()),
+            meta.author,
+            None,
+            meta.description,
+            None,
+            ContentType::Bookmark,
+        )
+    }
+}
+
 /// Save a URL as an article: fetch → extract → store.
-fn save_url(db: &Database, url: &str) -> Result<()> {
+///
+/// Deduplicates against the canonical form of the final (post-redirect)
+/// URL. When a duplicate is found, still applies any requested tags.
+fn save_url(db: &Database, raw_url: Option<&str>, tags: &[String], bookmark: bool) -> Result<()> {
+    let url = resolve_url_input(raw_url)?;
+
+    // Fetch the page (follows redirects).
     let client = http_client()?;
     let response = client
-        .get(url)
+        .get(&url)
         .send()
         .with_context(|| format!("failed to fetch {url}"))?;
 
@@ -850,37 +939,39 @@ fn save_url(db: &Database, url: &str) -> Result<()> {
         .bytes()
         .with_context(|| format!("failed to read response from {url}"))?;
 
-    let now = OffsetDateTime::now_utc();
+    // Canonicalize the final URL for dedup.
+    let canonical_url =
+        pergamon_extract::canonicalize_url(&final_url).unwrap_or_else(|_| final_url.clone());
 
-    // Try full article extraction; fall back to metadata-only.
-    let (title, author, content_text, excerpt, published_at) =
-        if let Ok(article) = pergamon_extract::extract_article(&bytes, &final_url) {
-            (
-                article.title.unwrap_or_else(|| final_url.clone()),
-                article.author,
-                Some(article.content_text),
-                article.excerpt,
-                article.published_at,
-            )
+    // Check for duplicate.
+    if let Some(existing) = db
+        .get_content_item_by_url(&canonical_url)
+        .context("failed to check for duplicate")?
+    {
+        let applied = apply_tags(db, existing.id, tags)?;
+        if applied.is_empty() {
+            println!("Already saved: {} [{}]", existing.title, existing.id);
         } else {
-            // Fall back to metadata extraction only.
-            let html = String::from_utf8_lossy(&bytes);
-            let meta = pergamon_extract::extract_metadata(&html);
-            (
-                meta.title.unwrap_or_else(|| final_url.clone()),
-                meta.author,
-                None,
-                meta.description,
-                None,
-            )
-        };
+            println!(
+                "Already saved: {} [{}] — tags added: {}",
+                existing.title,
+                existing.id,
+                applied.join(", ")
+            );
+        }
+        return Ok(());
+    }
+
+    let now = OffsetDateTime::now_utc();
+    let (title, author, content_text, excerpt, published_at, content_type) =
+        extract_content(&bytes, &final_url, &canonical_url, bookmark);
 
     let item = ContentItem {
         id: Uuid::new_v4(),
-        url: Some(final_url),
+        url: Some(canonical_url),
         title,
         author,
-        content_type: ContentType::Article,
+        content_type,
         status: DocumentStatus::Inbox,
         content_text,
         excerpt,
@@ -890,10 +981,36 @@ fn save_url(db: &Database, url: &str) -> Result<()> {
     };
 
     db.insert_content_item(&item)
-        .context("failed to save article")?;
+        .context("failed to save item")?;
 
-    println!("Saved: {} [{}]", item.title, item.id);
+    let applied = apply_tags(db, item.id, tags)?;
+
+    let type_label = item.content_type.as_str();
+    if applied.is_empty() {
+        println!("Saved {type_label}: {} [{}]", item.title, item.id);
+    } else {
+        println!(
+            "Saved {type_label}: {} [{}] — tags: {}",
+            item.title,
+            item.id,
+            applied.join(", ")
+        );
+    }
     Ok(())
+}
+
+/// Apply tags to a content item, returning the list of tag names applied.
+fn apply_tags(db: &Database, item_id: Uuid, tag_names: &[String]) -> Result<Vec<String>> {
+    let mut applied = Vec::new();
+    for name in tag_names {
+        let tag = db
+            .get_or_create_tag(name)
+            .with_context(|| format!("failed to get or create tag '{name}'"))?;
+        db.tag_content_item(item_id, tag.id)
+            .with_context(|| format!("failed to apply tag '{name}'"))?;
+        applied.push(tag.name);
+    }
+    Ok(applied)
 }
 
 // ======================================================================
