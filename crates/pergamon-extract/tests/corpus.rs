@@ -641,11 +641,7 @@ fn quality_score_summary() {
     eprintln!("║         EXTRACTION QUALITY REPORT                ║");
     eprintln!("╠══════════════════════════════════════════════════╣");
     for s in &scores {
-        let pct = if s.max_points > 0 {
-            (s.points * 100) / s.max_points
-        } else {
-            100
-        };
+        let pct = (s.points * 100).checked_div(s.max_points).unwrap_or(100);
         let status = if pct == 100 { "✓" } else { "△" };
         eprintln!(
             "║ {status} {:<25} {}/{} ({pct}%)",
@@ -667,11 +663,7 @@ fn quality_score_summary() {
             eprintln!("║   ✗ text too short");
         }
     }
-    let overall_pct = if total_max > 0 {
-        (total_points * 100) / total_max
-    } else {
-        100
-    };
+    let overall_pct = (total_points * 100).checked_div(total_max).unwrap_or(100);
     eprintln!("╠══════════════════════════════════════════════════╣");
     eprintln!("║ Overall: {total_points}/{total_max} ({overall_pct}%)");
     eprintln!("╚══════════════════════════════════════════════════╝\n");
