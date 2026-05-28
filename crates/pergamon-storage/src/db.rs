@@ -29,6 +29,7 @@ use crate::error::StorageError;
 ///
 /// Combines multiple optional predicates. All specified predicates are
 /// combined with AND. Feed and folder filters use JOINs through `feed_item_meta`.
+/// Tag and collection filters use `EXISTS` subqueries.
 #[derive(Debug, Clone, Default)]
 pub struct ContentItemFilter {
     /// Filter by content type.
@@ -39,6 +40,12 @@ pub struct ContentItemFilter {
     pub feed_id: Option<Uuid>,
     /// Filter to items belonging to feeds in a specific folder.
     pub folder_id: Option<Uuid>,
+    /// Filter to items with a specific tag.
+    pub tag_id: Option<Uuid>,
+    /// Filter to items in a specific collection.
+    pub collection_id: Option<Uuid>,
+    /// Filter to items not in any collection.
+    pub uncollected: bool,
 }
 
 /// Filter criteria for full-text search queries.
@@ -841,6 +848,141 @@ impl Database {
         Ok(())
     }
 
+    /// Remove a tag from a content item and refresh the FTS index.
+    pub fn untag_content_item(
+        &self,
+        content_item_id: Uuid,
+        tag_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        let count = self.conn.execute(
+            "DELETE FROM content_item_tags
+             WHERE content_item_id = ?1 AND tag_id = ?2",
+            params![content_item_id.to_string(), tag_id.to_string()],
+        )?;
+        if count > 0 {
+            self.refresh_fts_tags(content_item_id)?;
+        }
+        Ok(count > 0)
+    }
+
+    /// Delete a tag and remove it from all items.
+    ///
+    /// Refreshes the FTS index for all previously tagged items.
+    pub fn delete_tag(&self, id: Uuid) -> Result<bool, StorageError> {
+        // Collect affected items before deleting.
+        let affected_items: Vec<Uuid> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT content_item_id FROM content_item_tags WHERE tag_id = ?1")?;
+            let rows = stmt.query_map(params![id.to_string()], |row| {
+                Ok(parse_uuid(&row.get::<_, String>(0)?))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+
+        let count = self
+            .conn
+            .execute("DELETE FROM tags WHERE id = ?1", params![id.to_string()])?;
+
+        // Refresh FTS for affected items.
+        for item_id in &affected_items {
+            self.refresh_fts_tags(*item_id)?;
+        }
+
+        Ok(count > 0)
+    }
+
+    /// Rename a tag and refresh FTS for all tagged items.
+    pub fn rename_tag(&self, id: Uuid, new_name: &str) -> Result<(), StorageError> {
+        let affected = self.conn.execute(
+            "UPDATE tags SET name = ?1 WHERE id = ?2",
+            params![new_name, id.to_string()],
+        )?;
+        if affected == 0 {
+            return Err(StorageError::NotFound {
+                entity: "tag",
+                id: id.to_string(),
+            });
+        }
+
+        // Refresh FTS for all items with this tag.
+        let affected_items: Vec<Uuid> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT content_item_id FROM content_item_tags WHERE tag_id = ?1")?;
+            let rows = stmt.query_map(params![id.to_string()], |row| {
+                Ok(parse_uuid(&row.get::<_, String>(0)?))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        for item_id in &affected_items {
+            self.refresh_fts_tags(*item_id)?;
+        }
+
+        Ok(())
+    }
+
+    /// Find a tag by name (case-insensitive).
+    pub fn get_tag_by_name(&self, name: &str) -> Result<Option<Tag>, StorageError> {
+        self.conn
+            .query_row(
+                "SELECT id, name, created_at FROM tags WHERE name = ?1 COLLATE NOCASE",
+                params![name],
+                |row| {
+                    Ok(Tag {
+                        id: parse_uuid(&row.get::<_, String>(0)?),
+                        name: row.get(1)?,
+                        created_at: parse_time(&row.get::<_, String>(2)?),
+                    })
+                },
+            )
+            .optional()
+            .map_err(StorageError::from)
+    }
+
+    /// List tags for a specific content item.
+    pub fn tags_for_item(&self, content_item_id: Uuid) -> Result<Vec<Tag>, StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT t.id, t.name, t.created_at
+             FROM tags t
+             JOIN content_item_tags ct ON ct.tag_id = t.id
+             WHERE ct.content_item_id = ?1
+             ORDER BY t.name COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map(params![content_item_id.to_string()], |row| {
+            Ok(Tag {
+                id: parse_uuid(&row.get::<_, String>(0)?),
+                name: row.get(1)?,
+                created_at: parse_time(&row.get::<_, String>(2)?),
+            })
+        })?;
+        let mut tags = Vec::new();
+        for row in rows {
+            tags.push(row?);
+        }
+        Ok(tags)
+    }
+
+    /// List content items with a specific tag.
+    pub fn list_items_by_tag(&self, tag_id: Uuid) -> Result<Vec<ContentItem>, StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT ci.id, ci.url, ci.title, ci.author, ci.content_type, ci.status,
+                    ci.content_text, ci.excerpt, ci.published_at, ci.created_at, ci.updated_at
+             FROM content_items ci
+             JOIN content_item_tags ct ON ct.content_item_id = ci.id
+             WHERE ct.tag_id = ?1
+             ORDER BY ci.created_at DESC",
+        )?;
+        let rows = stmt.query_map(params![tag_id.to_string()], |row| {
+            Ok(row_to_content_item(row))
+        })?;
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(row?);
+        }
+        Ok(items)
+    }
+
     // ------------------------------------------------------------------
     // Collections
     // ------------------------------------------------------------------
@@ -904,6 +1046,146 @@ impl Database {
             ],
         )?;
         Ok(())
+    }
+
+    /// Remove a content item from a collection.
+    pub fn remove_from_collection(
+        &self,
+        content_item_id: Uuid,
+        collection_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        let count = self.conn.execute(
+            "DELETE FROM content_item_collections
+             WHERE content_item_id = ?1 AND collection_id = ?2",
+            params![content_item_id.to_string(), collection_id.to_string()],
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Rename a collection.
+    pub fn rename_collection(&self, id: Uuid, new_name: &str) -> Result<(), StorageError> {
+        let affected = self.conn.execute(
+            "UPDATE collections SET name = ?1 WHERE id = ?2",
+            params![new_name, id.to_string()],
+        )?;
+        if affected == 0 {
+            return Err(StorageError::NotFound {
+                entity: "collection",
+                id: id.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Move a collection to a new parent.
+    ///
+    /// Rejects the move if it would create a cycle (moving a collection
+    /// under itself or one of its descendants).
+    pub fn move_collection(
+        &self,
+        id: Uuid,
+        new_parent_id: Option<Uuid>,
+    ) -> Result<(), StorageError> {
+        if let Some(parent) = new_parent_id {
+            if parent == id {
+                return Err(StorageError::Generic(
+                    "cannot move a collection under itself".into(),
+                ));
+            }
+            // Walk ancestors of new_parent_id to detect cycles.
+            let mut cursor = Some(parent);
+            while let Some(cur) = cursor {
+                let ancestor: Option<Option<String>> = self
+                    .conn
+                    .query_row(
+                        "SELECT parent_id FROM collections WHERE id = ?1",
+                        params![cur.to_string()],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                match ancestor {
+                    Some(Some(pid)) => {
+                        let pid = parse_uuid(&pid);
+                        if pid == id {
+                            return Err(StorageError::Generic(
+                                "cannot move a collection under one of its descendants".into(),
+                            ));
+                        }
+                        cursor = Some(pid);
+                    }
+                    _ => cursor = None,
+                }
+            }
+        }
+
+        let affected = self.conn.execute(
+            "UPDATE collections SET parent_id = ?1 WHERE id = ?2",
+            params![new_parent_id.map(|p| p.to_string()), id.to_string()],
+        )?;
+        if affected == 0 {
+            return Err(StorageError::NotFound {
+                entity: "collection",
+                id: id.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Delete a collection. Returns true if the collection existed.
+    ///
+    /// Child collections are promoted (`parent_id` set to NULL) and item
+    /// memberships are removed by the ON DELETE CASCADE foreign key.
+    pub fn delete_collection(&self, id: Uuid) -> Result<bool, StorageError> {
+        let count = self.conn.execute(
+            "DELETE FROM collections WHERE id = ?1",
+            params![id.to_string()],
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Find a collection by name (case-insensitive).
+    pub fn get_collection_by_name(&self, name: &str) -> Result<Option<Collection>, StorageError> {
+        self.conn
+            .query_row(
+                "SELECT id, name, parent_id, sort_order, created_at, updated_at
+                 FROM collections WHERE name = ?1 COLLATE NOCASE",
+                params![name],
+                |row| {
+                    Ok(Collection {
+                        id: parse_uuid(&row.get::<_, String>(0)?),
+                        name: row.get(1)?,
+                        parent_id: row.get::<_, Option<String>>(2)?.map(|s| parse_uuid(&s)),
+                        sort_order: row.get(3)?,
+                        created_at: parse_time(&row.get::<_, String>(4)?),
+                        updated_at: parse_time(&row.get::<_, String>(5)?),
+                    })
+                },
+            )
+            .optional()
+            .map_err(StorageError::from)
+    }
+
+    /// List content items in a specific collection.
+    pub fn list_collection_items(
+        &self,
+        collection_id: Uuid,
+    ) -> Result<Vec<ContentItem>, StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT ci.id, ci.url, ci.title, ci.author, ci.content_type, ci.status,
+                    ci.content_text, ci.excerpt, ci.published_at, ci.created_at, ci.updated_at
+             FROM content_items ci
+             JOIN content_item_collections cic ON cic.content_item_id = ci.id
+             WHERE cic.collection_id = ?1
+             ORDER BY cic.sort_order, ci.created_at DESC",
+        )?;
+        let rows = stmt.query_map(params![collection_id.to_string()], |row| {
+            Ok(row_to_content_item(row))
+        })?;
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(row?);
+        }
+        Ok(items)
     }
 
     // ------------------------------------------------------------------
@@ -1304,6 +1586,166 @@ impl Database {
         Ok(tags)
     }
 
+    /// List tags matching a name prefix (for autocomplete).
+    pub fn list_tags_matching(&self, prefix: &str) -> Result<Vec<Tag>, StorageError> {
+        let pattern = format!("{prefix}%");
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, created_at FROM tags
+             WHERE name LIKE ?1 COLLATE NOCASE
+             ORDER BY name COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map(params![pattern], |row| {
+            Ok(Tag {
+                id: parse_uuid(&row.get::<_, String>(0)?),
+                name: row.get(1)?,
+                created_at: parse_time(&row.get::<_, String>(2)?),
+            })
+        })?;
+        let mut tags = Vec::new();
+        for row in rows {
+            tags.push(row?);
+        }
+        Ok(tags)
+    }
+
+    // ------------------------------------------------------------------
+    // Bulk operations
+    // ------------------------------------------------------------------
+
+    /// Tag multiple content items with the same tag.
+    ///
+    /// Runs inside a transaction. Returns the number of new associations.
+    pub fn bulk_tag(&self, item_ids: &[Uuid], tag_id: Uuid) -> Result<u64, StorageError> {
+        self.conn.execute_batch("BEGIN;")?;
+        let result = (|| {
+            let mut count: u64 = 0;
+            for &item_id in item_ids {
+                let affected = self.conn.execute(
+                    "INSERT OR IGNORE INTO content_item_tags (content_item_id, tag_id)
+                     VALUES (?1, ?2)",
+                    params![item_id.to_string(), tag_id.to_string()],
+                )?;
+                if affected > 0 {
+                    self.refresh_fts_tags(item_id)?;
+                    count += 1;
+                }
+            }
+            Ok(count)
+        })();
+        match result {
+            Ok(count) => {
+                self.conn.execute_batch("COMMIT;")?;
+                Ok(count)
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK;");
+                Err(e)
+            }
+        }
+    }
+
+    /// Add multiple content items to a collection.
+    ///
+    /// Runs inside a transaction. Returns the number of new memberships.
+    pub fn bulk_add_to_collection(
+        &self,
+        item_ids: &[Uuid],
+        collection_id: Uuid,
+    ) -> Result<u64, StorageError> {
+        self.conn.execute_batch("BEGIN;")?;
+        let result = (|| {
+            let mut count: u64 = 0;
+            for &item_id in item_ids {
+                let affected = self.conn.execute(
+                    "INSERT OR IGNORE INTO content_item_collections (content_item_id, collection_id, sort_order)
+                     VALUES (?1, ?2, 0)",
+                    params![item_id.to_string(), collection_id.to_string()],
+                )?;
+                #[allow(clippy::cast_sign_loss)]
+                {
+                    count += affected as u64;
+                }
+            }
+            Ok(count)
+        })();
+        match result {
+            Ok(count) => {
+                self.conn.execute_batch("COMMIT;")?;
+                Ok(count)
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK;");
+                Err(e)
+            }
+        }
+    }
+
+    /// Archive multiple content items (set status to `archived`).
+    ///
+    /// Runs inside a transaction. Returns the number of items updated.
+    pub fn bulk_archive(&self, item_ids: &[Uuid]) -> Result<u64, StorageError> {
+        let now = fmt_time(OffsetDateTime::now_utc());
+        self.conn.execute_batch("BEGIN;")?;
+        let result = (|| {
+            let mut count: u64 = 0;
+            for &item_id in item_ids {
+                let affected = self.conn.execute(
+                    "UPDATE content_items SET status = 'archived', updated_at = ?1 WHERE id = ?2",
+                    params![now, item_id.to_string()],
+                )?;
+                #[allow(clippy::cast_sign_loss)]
+                {
+                    count += affected as u64;
+                }
+            }
+            Ok(count)
+        })();
+        match result {
+            Ok(count) => {
+                self.conn.execute_batch("COMMIT;")?;
+                Ok(count)
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK;");
+                Err(e)
+            }
+        }
+    }
+
+    /// Discard multiple content items (set status to `discarded`).
+    ///
+    /// This is a soft delete — items remain in the database but are
+    /// excluded from active views. Runs inside a transaction.
+    /// Returns the number of items updated.
+    pub fn bulk_discard(&self, item_ids: &[Uuid]) -> Result<u64, StorageError> {
+        let now = fmt_time(OffsetDateTime::now_utc());
+        self.conn.execute_batch("BEGIN;")?;
+        let result = (|| {
+            let mut count: u64 = 0;
+            for &item_id in item_ids {
+                let affected = self.conn.execute(
+                    "UPDATE content_items SET status = 'discarded', updated_at = ?1 WHERE id = ?2",
+                    params![now, item_id.to_string()],
+                )?;
+                #[allow(clippy::cast_sign_loss)]
+                {
+                    count += affected as u64;
+                }
+            }
+            Ok(count)
+        })();
+        match result {
+            Ok(count) => {
+                self.conn.execute_batch("COMMIT;")?;
+                Ok(count)
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK;");
+                Err(e)
+            }
+        }
+    }
+
     // ------------------------------------------------------------------
     // FTS5 helpers (private)
     // ------------------------------------------------------------------
@@ -1414,6 +1856,30 @@ fn build_content_item_query(
     if let Some(fld) = filter.folder_id {
         param_values.push(fld.to_string());
         let _ = write!(sql, " AND f.folder_id = ?{}", param_values.len());
+    }
+    if let Some(tid) = filter.tag_id {
+        param_values.push(tid.to_string());
+        let _ = write!(
+            sql,
+            " AND EXISTS (SELECT 1 FROM content_item_tags cit \
+             WHERE cit.content_item_id = ci.id AND cit.tag_id = ?{})",
+            param_values.len()
+        );
+    }
+    if let Some(cid) = filter.collection_id {
+        param_values.push(cid.to_string());
+        let _ = write!(
+            sql,
+            " AND EXISTS (SELECT 1 FROM content_item_collections cic \
+             WHERE cic.content_item_id = ci.id AND cic.collection_id = ?{})",
+            param_values.len()
+        );
+    }
+    if filter.uncollected {
+        sql.push_str(
+            " AND NOT EXISTS (SELECT 1 FROM content_item_collections cic \
+             WHERE cic.content_item_id = ci.id)",
+        );
     }
 
     sql.push_str(" ORDER BY ci.created_at DESC");

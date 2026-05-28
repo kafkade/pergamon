@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, Parser, Subcommand};
 use pergamon_core::content_type::ContentType;
-use pergamon_core::model::{ContentItem, Feed, FeedFolder, FeedItemMeta};
+use pergamon_core::model::{Collection, ContentItem, Feed, FeedFolder, FeedItemMeta, Tag};
 use pergamon_core::status::DocumentStatus;
 use pergamon_storage::Database;
 use time::OffsetDateTime;
@@ -105,6 +105,21 @@ enum Command {
         #[command(subcommand)]
         action: ExportAction,
     },
+    /// Manage collections (hierarchical folders for organising content).
+    Collection {
+        #[command(subcommand)]
+        action: CollectionAction,
+    },
+    /// Manage tags across all content types.
+    Tag {
+        #[command(subcommand)]
+        action: TagAction,
+    },
+    /// Bulk operations on content items.
+    Bulk {
+        #[command(subcommand)]
+        action: BulkAction,
+    },
     /// Show current configuration.
     Config,
     /// Generate shell completions.
@@ -185,6 +200,164 @@ enum ExportAction {
     },
 }
 
+/// Collection management subcommands.
+#[derive(Debug, Subcommand)]
+enum CollectionAction {
+    /// Create a new collection.
+    Create {
+        /// Name of the collection.
+        name: String,
+        /// Parent collection (name or UUID).
+        #[arg(long)]
+        parent: Option<String>,
+    },
+    /// List all collections.
+    List {
+        /// Show collections in a tree view.
+        #[arg(long)]
+        tree: bool,
+    },
+    /// Rename a collection.
+    Rename {
+        /// Collection to rename (name or UUID).
+        collection: String,
+        /// New name.
+        #[arg(long)]
+        to: String,
+    },
+    /// Move a collection under a new parent.
+    Move {
+        /// Collection to move (name or UUID).
+        collection: String,
+        /// Target parent collection (name or UUID). Use --root to move to top level.
+        #[arg(long, conflicts_with = "root")]
+        parent: Option<String>,
+        /// Move to the top level (no parent).
+        #[arg(long, conflicts_with = "parent")]
+        root: bool,
+    },
+    /// Delete a collection.
+    Delete {
+        /// Collection to delete (name or UUID).
+        collection: String,
+    },
+    /// Add items to a collection.
+    Add {
+        /// Collection (name or UUID).
+        collection: String,
+        /// Content item IDs to add.
+        items: Vec<String>,
+    },
+    /// Remove items from a collection.
+    Remove {
+        /// Collection (name or UUID).
+        collection: String,
+        /// Content item IDs to remove.
+        items: Vec<String>,
+    },
+    /// Show items in a collection.
+    Show {
+        /// Collection (name or UUID).
+        collection: String,
+    },
+}
+
+/// Tag management subcommands.
+#[derive(Debug, Subcommand)]
+enum TagAction {
+    /// Add a tag to one or more items (creates the tag if it doesn't exist).
+    Add {
+        /// Tag name.
+        tag: String,
+        /// Content item IDs to tag.
+        items: Vec<String>,
+    },
+    /// Remove a tag from one or more items.
+    Remove {
+        /// Tag name.
+        tag: String,
+        /// Content item IDs to untag.
+        items: Vec<String>,
+    },
+    /// List all tags.
+    List,
+    /// Rename a tag.
+    Rename {
+        /// Current tag name.
+        tag: String,
+        /// New tag name.
+        #[arg(long)]
+        to: String,
+    },
+    /// Delete a tag entirely.
+    Delete {
+        /// Tag name.
+        tag: String,
+    },
+    /// Show items with a specific tag.
+    Show {
+        /// Tag name.
+        tag: String,
+    },
+}
+
+/// Bulk operation subcommands.
+#[derive(Debug, Subcommand)]
+enum BulkAction {
+    /// Tag all items matching a filter.
+    Tag {
+        /// Tag name to apply.
+        tag: String,
+        /// Filter by status (inbox, later, reading, reference, archived, discarded).
+        #[arg(long)]
+        status: Option<String>,
+        /// Filter by content type.
+        #[arg(long = "type")]
+        content_type: Option<String>,
+        /// Skip confirmation.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Move all matching items to a collection.
+    Move {
+        /// Target collection (name or UUID).
+        collection: String,
+        /// Filter by status.
+        #[arg(long)]
+        status: Option<String>,
+        /// Filter by content type.
+        #[arg(long = "type")]
+        content_type: Option<String>,
+        /// Skip confirmation.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Archive all matching items.
+    Archive {
+        /// Filter by status.
+        #[arg(long)]
+        status: Option<String>,
+        /// Filter by content type.
+        #[arg(long = "type")]
+        content_type: Option<String>,
+        /// Skip confirmation.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Discard all matching items (soft delete).
+    Delete {
+        /// Filter by status.
+        #[arg(long)]
+        status: Option<String>,
+        /// Filter by content type.
+        #[arg(long = "type")]
+        content_type: Option<String>,
+        /// Skip confirmation.
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -250,6 +423,9 @@ fn main() -> Result<()> {
         ),
         Command::Import { action } => handle_import(&db, action),
         Command::Export { action } => handle_export(&db, action),
+        Command::Collection { action } => handle_collection(&db, action),
+        Command::Tag { action } => handle_tag(&db, action),
+        Command::Bulk { action } => handle_bulk(&db, action),
         // Already handled above — unreachable at runtime.
         Command::Config | Command::Completions { .. } => Ok(()),
     }
@@ -1282,6 +1458,478 @@ fn print_search_text(query: &str, hits: &[pergamon_core::model::SearchHit]) {
 
         println!();
     }
+}
+
+// ======================================================================
+// Collection commands
+// ======================================================================
+
+/// Resolve a collection reference (name or UUID) to a `Collection`.
+fn resolve_collection(db: &Database, reference: &str) -> Result<Collection> {
+    if let Ok(id) = Uuid::parse_str(reference) {
+        return db
+            .get_collection(id)
+            .with_context(|| format!("collection not found: {reference}"));
+    }
+    db.get_collection_by_name(reference)
+        .context("failed to look up collection")?
+        .ok_or_else(|| anyhow::anyhow!("collection not found: {reference}"))
+}
+
+/// Dispatch collection subcommand.
+fn handle_collection(db: &Database, action: CollectionAction) -> Result<()> {
+    match action {
+        CollectionAction::Create { name, parent } => {
+            collection_create(db, &name, parent.as_deref())
+        }
+        CollectionAction::List { tree } => {
+            if tree {
+                collection_list_tree(db)
+            } else {
+                collection_list(db)
+            }
+        }
+        CollectionAction::Rename { collection, to } => {
+            let coll = resolve_collection(db, &collection)?;
+            db.rename_collection(coll.id, &to)
+                .context("failed to rename collection")?;
+            println!("Renamed collection '{}' → '{to}'", coll.name);
+            Ok(())
+        }
+        CollectionAction::Move {
+            collection,
+            parent,
+            root,
+        } => {
+            let coll = resolve_collection(db, &collection)?;
+            let new_parent = if root {
+                None
+            } else if let Some(ref p) = parent {
+                Some(resolve_collection(db, p)?.id)
+            } else {
+                bail!("specify --parent <collection> or --root");
+            };
+            db.move_collection(coll.id, new_parent)
+                .context("failed to move collection")?;
+            if let Some(pid) = new_parent {
+                let parent_coll = db.get_collection(pid)?;
+                println!("Moved '{}' under '{}'", coll.name, parent_coll.name);
+            } else {
+                println!("Moved '{}' to top level", coll.name);
+            }
+            Ok(())
+        }
+        CollectionAction::Delete { collection } => {
+            let coll = resolve_collection(db, &collection)?;
+            db.delete_collection(coll.id)
+                .context("failed to delete collection")?;
+            println!("Deleted collection '{}'", coll.name);
+            Ok(())
+        }
+        CollectionAction::Add { collection, items } => {
+            let coll = resolve_collection(db, &collection)?;
+            let mut count = 0u64;
+            for item_ref in &items {
+                let item_id = Uuid::parse_str(item_ref).context("invalid item ID")?;
+                db.add_to_collection(item_id, coll.id, 0)
+                    .with_context(|| format!("failed to add {item_id} to collection"))?;
+                count += 1;
+            }
+            println!("Added {count} item(s) to '{}'", coll.name);
+            Ok(())
+        }
+        CollectionAction::Remove { collection, items } => {
+            let coll = resolve_collection(db, &collection)?;
+            let mut count = 0u64;
+            for item_ref in &items {
+                let item_id = Uuid::parse_str(item_ref).context("invalid item ID")?;
+                if db
+                    .remove_from_collection(item_id, coll.id)
+                    .with_context(|| format!("failed to remove {item_id} from collection"))?
+                {
+                    count += 1;
+                }
+            }
+            println!("Removed {count} item(s) from '{}'", coll.name);
+            Ok(())
+        }
+        CollectionAction::Show { collection } => collection_show(db, &collection),
+    }
+}
+
+/// Create a new collection.
+fn collection_create(db: &Database, name: &str, parent_ref: Option<&str>) -> Result<()> {
+    let parent_id = parent_ref
+        .map(|p| resolve_collection(db, p).map(|c| c.id))
+        .transpose()?;
+    let now = OffsetDateTime::now_utc();
+    let coll = Collection {
+        id: Uuid::new_v4(),
+        name: name.to_owned(),
+        parent_id,
+        sort_order: 0,
+        created_at: now,
+        updated_at: now,
+    };
+    db.insert_collection(&coll)
+        .context("failed to create collection")?;
+    println!("Created collection '{}' ({})", coll.name, coll.id);
+    Ok(())
+}
+
+/// List all collections (flat).
+fn collection_list(db: &Database) -> Result<()> {
+    let colls = db
+        .list_collections()
+        .context("failed to list collections")?;
+    if colls.is_empty() {
+        println!("No collections.");
+        return Ok(());
+    }
+    // Count items per collection.
+    let all_memberships = db
+        .list_all_collection_items()
+        .context("failed to load collection memberships")?;
+    let mut item_counts: std::collections::HashMap<Uuid, usize> = std::collections::HashMap::new();
+    for &(_, coll_id, _) in &all_memberships {
+        *item_counts.entry(coll_id).or_default() += 1;
+    }
+
+    for coll in &colls {
+        let count = item_counts.get(&coll.id).copied().unwrap_or(0);
+        let parent_label = coll
+            .parent_id
+            .and_then(|pid| colls.iter().find(|c| c.id == pid))
+            .map_or(String::new(), |p| format!(" (in {})", p.name));
+        println!(
+            "  {} [{}, {} item(s)]{parent_label}",
+            coll.name, coll.id, count,
+        );
+    }
+    Ok(())
+}
+
+/// List collections in a tree view.
+fn collection_list_tree(db: &Database) -> Result<()> {
+    let colls = db
+        .list_collections()
+        .context("failed to list collections")?;
+    if colls.is_empty() {
+        println!("No collections.");
+        return Ok(());
+    }
+
+    // Build the tree.
+    let roots: Vec<&Collection> = colls.iter().filter(|c| c.parent_id.is_none()).collect();
+    for root in &roots {
+        print_collection_tree(root, &colls, 0);
+    }
+    Ok(())
+}
+
+/// Recursively print a collection tree.
+fn print_collection_tree(coll: &Collection, all: &[Collection], depth: usize) {
+    let indent = "  ".repeat(depth);
+    println!("{indent}{} [{}]", coll.name, coll.id);
+    let children: Vec<&Collection> = all
+        .iter()
+        .filter(|c| c.parent_id == Some(coll.id))
+        .collect();
+    for child in &children {
+        print_collection_tree(child, all, depth + 1);
+    }
+}
+
+/// Show items in a collection.
+fn collection_show(db: &Database, reference: &str) -> Result<()> {
+    let coll = resolve_collection(db, reference)?;
+    let items = db
+        .list_collection_items(coll.id)
+        .context("failed to list collection items")?;
+
+    println!("Collection: {} ({} item(s))", coll.name, items.len());
+    println!();
+    for item in &items {
+        let type_label = item.content_type.as_str();
+        let status_label = item.status.as_str();
+        println!(
+            "  {} [{}, {}/{}]",
+            item.title, item.id, type_label, status_label,
+        );
+        if let Some(ref url) = item.url {
+            println!("    {url}");
+        }
+    }
+    Ok(())
+}
+
+// ======================================================================
+// Tag commands
+// ======================================================================
+
+/// Resolve a tag by name, returning an error if not found.
+fn resolve_tag(db: &Database, name: &str) -> Result<Tag> {
+    db.get_tag_by_name(name)
+        .context("failed to look up tag")?
+        .ok_or_else(|| anyhow::anyhow!("tag not found: {name}"))
+}
+
+/// Dispatch tag subcommand.
+fn handle_tag(db: &Database, action: TagAction) -> Result<()> {
+    match action {
+        TagAction::Add { tag, items } => {
+            let t = db
+                .get_or_create_tag(&tag)
+                .with_context(|| format!("failed to get or create tag '{tag}'"))?;
+            let mut count = 0u64;
+            for item_ref in &items {
+                let item_id = Uuid::parse_str(item_ref).context("invalid item ID")?;
+                db.tag_content_item(item_id, t.id)
+                    .with_context(|| format!("failed to tag item {item_id}"))?;
+                count += 1;
+            }
+            println!("Tagged {count} item(s) with '{}'", t.name);
+            Ok(())
+        }
+        TagAction::Remove { tag, items } => {
+            let t = resolve_tag(db, &tag)?;
+            let mut count = 0u64;
+            for item_ref in &items {
+                let item_id = Uuid::parse_str(item_ref).context("invalid item ID")?;
+                if db
+                    .untag_content_item(item_id, t.id)
+                    .with_context(|| format!("failed to untag item {item_id}"))?
+                {
+                    count += 1;
+                }
+            }
+            println!("Removed tag '{}' from {count} item(s)", t.name);
+            Ok(())
+        }
+        TagAction::List => {
+            let tags = db.list_tags().context("failed to list tags")?;
+            if tags.is_empty() {
+                println!("No tags.");
+                return Ok(());
+            }
+            for t in &tags {
+                let items = db.list_items_by_tag(t.id).unwrap_or_default();
+                println!("  {} [{}, {} item(s)]", t.name, t.id, items.len());
+            }
+            Ok(())
+        }
+        TagAction::Rename { tag, to } => {
+            let t = resolve_tag(db, &tag)?;
+            db.rename_tag(t.id, &to).context("failed to rename tag")?;
+            println!("Renamed tag '{}' → '{to}'", t.name);
+            Ok(())
+        }
+        TagAction::Delete { tag } => {
+            let t = resolve_tag(db, &tag)?;
+            db.delete_tag(t.id).context("failed to delete tag")?;
+            println!("Deleted tag '{}'", t.name);
+            Ok(())
+        }
+        TagAction::Show { tag } => {
+            let t = resolve_tag(db, &tag)?;
+            let items = db
+                .list_items_by_tag(t.id)
+                .context("failed to list items by tag")?;
+            println!("Tag: {} ({} item(s))", t.name, items.len());
+            println!();
+            for item in &items {
+                let type_label = item.content_type.as_str();
+                let status_label = item.status.as_str();
+                println!(
+                    "  {} [{}, {}/{}]",
+                    item.title, item.id, type_label, status_label,
+                );
+                if let Some(ref url) = item.url {
+                    println!("    {url}");
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+// ======================================================================
+// Bulk commands
+// ======================================================================
+
+/// Build a `ContentItemFilter` from CLI arguments.
+fn build_bulk_filter(
+    status: Option<&str>,
+    content_type: Option<&str>,
+) -> Result<pergamon_storage::ContentItemFilter> {
+    let mut filter = pergamon_storage::ContentItemFilter::default();
+    if let Some(s) = status {
+        filter.status = Some(
+            s.parse::<DocumentStatus>()
+                .map_err(|_| anyhow::anyhow!("unknown status: {s}"))?,
+        );
+    }
+    if let Some(ct) = content_type {
+        filter.content_type = Some(
+            ct.parse::<ContentType>()
+                .map_err(|_| anyhow::anyhow!("unknown content type: {ct}"))?,
+        );
+    }
+    Ok(filter)
+}
+
+/// Ask for confirmation on a bulk operation.
+fn confirm_bulk(action: &str, count: u64, yes: bool) -> Result<bool> {
+    if yes || count == 0 {
+        return Ok(true);
+    }
+    print!("{action} {count} item(s)? [y/N] ");
+    std::io::stdout().flush()?;
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    Ok(input.trim().eq_ignore_ascii_case("y"))
+}
+
+/// Dispatch bulk subcommand.
+fn handle_bulk(db: &Database, action: BulkAction) -> Result<()> {
+    match action {
+        BulkAction::Tag {
+            tag,
+            status,
+            content_type,
+            yes,
+        } => bulk_tag(db, &tag, status.as_deref(), content_type.as_deref(), yes),
+        BulkAction::Move {
+            collection,
+            status,
+            content_type,
+            yes,
+        } => bulk_move(
+            db,
+            &collection,
+            status.as_deref(),
+            content_type.as_deref(),
+            yes,
+        ),
+        BulkAction::Archive {
+            status,
+            content_type,
+            yes,
+        } => bulk_archive(db, status.as_deref(), content_type.as_deref(), yes),
+        BulkAction::Delete {
+            status,
+            content_type,
+            yes,
+        } => bulk_delete(db, status.as_deref(), content_type.as_deref(), yes),
+    }
+}
+
+/// Bulk tag items matching a filter.
+fn bulk_tag(
+    db: &Database,
+    tag: &str,
+    status: Option<&str>,
+    content_type: Option<&str>,
+    yes: bool,
+) -> Result<()> {
+    let filter = build_bulk_filter(status, content_type)?;
+    let items = db
+        .list_content_items_filtered(&filter, None, None)
+        .context("failed to list matching items")?;
+    if items.is_empty() {
+        println!("No items match the filter.");
+        return Ok(());
+    }
+    if !confirm_bulk(&format!("Tag with '{tag}'"), items.len() as u64, yes)? {
+        println!("Cancelled.");
+        return Ok(());
+    }
+    let t = db
+        .get_or_create_tag(tag)
+        .with_context(|| format!("failed to get or create tag '{tag}'"))?;
+    let ids: Vec<Uuid> = items.iter().map(|i| i.id).collect();
+    let count = db.bulk_tag(&ids, t.id).context("failed to bulk tag")?;
+    println!("Tagged {count} item(s) with '{}'", t.name);
+    Ok(())
+}
+
+/// Bulk move items to a collection.
+fn bulk_move(
+    db: &Database,
+    collection: &str,
+    status: Option<&str>,
+    content_type: Option<&str>,
+    yes: bool,
+) -> Result<()> {
+    let filter = build_bulk_filter(status, content_type)?;
+    let items = db
+        .list_content_items_filtered(&filter, None, None)
+        .context("failed to list matching items")?;
+    if items.is_empty() {
+        println!("No items match the filter.");
+        return Ok(());
+    }
+    let coll = resolve_collection(db, collection)?;
+    if !confirm_bulk(&format!("Move to '{}'", coll.name), items.len() as u64, yes)? {
+        println!("Cancelled.");
+        return Ok(());
+    }
+    let ids: Vec<Uuid> = items.iter().map(|i| i.id).collect();
+    let count = db
+        .bulk_add_to_collection(&ids, coll.id)
+        .context("failed to bulk move")?;
+    println!("Added {count} item(s) to '{}'", coll.name);
+    Ok(())
+}
+
+/// Bulk archive items matching a filter.
+fn bulk_archive(
+    db: &Database,
+    status: Option<&str>,
+    content_type: Option<&str>,
+    yes: bool,
+) -> Result<()> {
+    let filter = build_bulk_filter(status, content_type)?;
+    let items = db
+        .list_content_items_filtered(&filter, None, None)
+        .context("failed to list matching items")?;
+    if items.is_empty() {
+        println!("No items match the filter.");
+        return Ok(());
+    }
+    if !confirm_bulk("Archive", items.len() as u64, yes)? {
+        println!("Cancelled.");
+        return Ok(());
+    }
+    let ids: Vec<Uuid> = items.iter().map(|i| i.id).collect();
+    let count = db.bulk_archive(&ids).context("failed to bulk archive")?;
+    println!("Archived {count} item(s).");
+    Ok(())
+}
+
+/// Bulk discard items matching a filter (soft delete).
+fn bulk_delete(
+    db: &Database,
+    status: Option<&str>,
+    content_type: Option<&str>,
+    yes: bool,
+) -> Result<()> {
+    let filter = build_bulk_filter(status, content_type)?;
+    let items = db
+        .list_content_items_filtered(&filter, None, None)
+        .context("failed to list matching items")?;
+    if items.is_empty() {
+        println!("No items match the filter.");
+        return Ok(());
+    }
+    if !confirm_bulk("Discard", items.len() as u64, yes)? {
+        println!("Cancelled.");
+        return Ok(());
+    }
+    let ids: Vec<Uuid> = items.iter().map(|i| i.id).collect();
+    let count = db.bulk_discard(&ids).context("failed to bulk discard")?;
+    println!("Discarded {count} item(s).");
+    Ok(())
 }
 
 // ======================================================================

@@ -1241,3 +1241,457 @@ fn is_empty_on_fresh_database() {
         .unwrap_or_else(|e| unreachable!("is_empty: {e}"));
     assert!(empty);
 }
+
+#[allow(clippy::unwrap_used)]
+mod collection_tag_bulk {
+    use super::*;
+
+    // ======================================================================
+    // Collection management tests
+    // ======================================================================
+
+    fn make_item(db: &Database, title: &str) -> ContentItem {
+        let item = ContentItem {
+            id: Uuid::new_v4(),
+            url: Some(format!("https://example.com/{}", Uuid::new_v4())),
+            title: title.to_owned(),
+            author: None,
+            content_type: ContentType::Article,
+            status: DocumentStatus::Inbox,
+            content_text: Some(format!("Content of {title}")),
+            excerpt: None,
+            published_at: None,
+            created_at: now(),
+            updated_at: now(),
+        };
+        db.insert_content_item(&item).unwrap();
+        item
+    }
+
+    fn make_collection(db: &Database, name: &str, parent_id: Option<Uuid>) -> Collection {
+        let coll = Collection {
+            id: Uuid::new_v4(),
+            name: name.to_owned(),
+            parent_id,
+            sort_order: 0,
+            created_at: now(),
+            updated_at: now(),
+        };
+        db.insert_collection(&coll).unwrap();
+        coll
+    }
+
+    #[test]
+    fn collection_rename() {
+        let db = test_db();
+        let coll = make_collection(&db, "Original", None);
+
+        db.rename_collection(coll.id, "Renamed").unwrap();
+        let got = db.get_collection(coll.id).unwrap();
+        assert_eq!(got.name, "Renamed");
+    }
+
+    #[test]
+    fn collection_delete() {
+        let db = test_db();
+        let coll = make_collection(&db, "ToDelete", None);
+        assert!(db.delete_collection(coll.id).unwrap());
+        assert!(db.get_collection(coll.id).is_err());
+    }
+
+    #[test]
+    fn collection_delete_nonexistent() {
+        let db = test_db();
+        assert!(!db.delete_collection(Uuid::new_v4()).unwrap());
+    }
+
+    #[test]
+    fn collection_move_basic() {
+        let db = test_db();
+        let parent = make_collection(&db, "Parent", None);
+        let child = make_collection(&db, "Child", None);
+
+        db.move_collection(child.id, Some(parent.id)).unwrap();
+        let got = db.get_collection(child.id).unwrap();
+        assert_eq!(got.parent_id, Some(parent.id));
+    }
+
+    #[test]
+    fn collection_move_to_root() {
+        let db = test_db();
+        let parent = make_collection(&db, "Parent", None);
+        let child = make_collection(&db, "Child", Some(parent.id));
+
+        db.move_collection(child.id, None).unwrap();
+        let got = db.get_collection(child.id).unwrap();
+        assert_eq!(got.parent_id, None);
+    }
+
+    #[test]
+    fn collection_move_cycle_self() {
+        let db = test_db();
+        let coll = make_collection(&db, "Self", None);
+        let result = db.move_collection(coll.id, Some(coll.id));
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("under itself"));
+    }
+
+    #[test]
+    fn collection_move_cycle_descendant() {
+        let db = test_db();
+        let grandparent = make_collection(&db, "Grandparent", None);
+        let parent = make_collection(&db, "Parent", Some(grandparent.id));
+        let child = make_collection(&db, "Child", Some(parent.id));
+
+        // Try to move grandparent under child — should fail.
+        let result = db.move_collection(grandparent.id, Some(child.id));
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("descendants"));
+    }
+
+    #[test]
+    fn collection_get_by_name() {
+        let db = test_db();
+        make_collection(&db, "MyCollection", None);
+
+        let found = db.get_collection_by_name("mycollection").unwrap();
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().name, "MyCollection");
+
+        let not_found = db.get_collection_by_name("nonexistent").unwrap();
+        assert!(not_found.is_none());
+    }
+
+    #[test]
+    fn collection_add_remove_items() {
+        let db = test_db();
+        let coll = make_collection(&db, "Reading", None);
+        let item1 = make_item(&db, "Item 1");
+        let item2 = make_item(&db, "Item 2");
+
+        db.add_to_collection(item1.id, coll.id, 0).unwrap();
+        db.add_to_collection(item2.id, coll.id, 1).unwrap();
+
+        let items = db.list_collection_items(coll.id).unwrap();
+        assert_eq!(items.len(), 2);
+
+        // Remove one.
+        assert!(db.remove_from_collection(item1.id, coll.id).unwrap());
+        let items = db.list_collection_items(coll.id).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, item2.id);
+
+        // Remove non-member returns false.
+        assert!(!db.remove_from_collection(item1.id, coll.id).unwrap());
+    }
+
+    #[test]
+    fn collection_delete_promotes_children() {
+        let db = test_db();
+        let parent = make_collection(&db, "Parent", None);
+        let child = make_collection(&db, "Child", Some(parent.id));
+
+        db.delete_collection(parent.id).unwrap();
+
+        // Child should now have no parent (promoted).
+        let got = db.get_collection(child.id).unwrap();
+        assert_eq!(got.parent_id, None);
+    }
+
+    // ======================================================================
+    // Tag management tests
+    // ======================================================================
+
+    #[test]
+    fn tag_get_by_name() {
+        let db = test_db();
+        db.get_or_create_tag("rust").unwrap();
+
+        let found = db.get_tag_by_name("Rust").unwrap(); // case-insensitive
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().name, "rust");
+
+        let not_found = db.get_tag_by_name("nonexistent").unwrap();
+        assert!(not_found.is_none());
+    }
+
+    #[test]
+    fn untag_content_item() {
+        let db = test_db();
+        let item = make_item(&db, "Tagged Article");
+        let tag = db.get_or_create_tag("rust").unwrap();
+
+        db.tag_content_item(item.id, tag.id).unwrap();
+        let tags = db.tags_for_item(item.id).unwrap();
+        assert_eq!(tags.len(), 1);
+
+        assert!(db.untag_content_item(item.id, tag.id).unwrap());
+        let tags = db.tags_for_item(item.id).unwrap();
+        assert!(tags.is_empty());
+
+        // Second untag returns false.
+        assert!(!db.untag_content_item(item.id, tag.id).unwrap());
+    }
+
+    #[test]
+    fn untag_refreshes_fts() {
+        let db = test_db();
+        let item = make_item(&db, "FTS Tag Test");
+        let tag = db.get_or_create_tag("searchable").unwrap();
+
+        db.tag_content_item(item.id, tag.id).unwrap();
+        let results = db.search("searchable").unwrap();
+        assert!(!results.is_empty());
+
+        db.untag_content_item(item.id, tag.id).unwrap();
+        let results = db.search("searchable").unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn delete_tag() {
+        let db = test_db();
+        let item = make_item(&db, "Will Lose Tag");
+        let tag = db.get_or_create_tag("ephemeral").unwrap();
+        db.tag_content_item(item.id, tag.id).unwrap();
+
+        assert!(db.delete_tag(tag.id).unwrap());
+        let tags = db.tags_for_item(item.id).unwrap();
+        assert!(tags.is_empty());
+        assert!(db.get_tag_by_name("ephemeral").unwrap().is_none());
+    }
+
+    #[test]
+    fn delete_tag_refreshes_fts() {
+        let db = test_db();
+        let item = make_item(&db, "Delete Tag FTS");
+        let tag = db.get_or_create_tag("removeme").unwrap();
+        db.tag_content_item(item.id, tag.id).unwrap();
+
+        let results = db.search("removeme").unwrap();
+        assert!(!results.is_empty());
+
+        db.delete_tag(tag.id).unwrap();
+        let results = db.search("removeme").unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn rename_tag() {
+        let db = test_db();
+        let tag = db.get_or_create_tag("oldname").unwrap();
+        let item = make_item(&db, "Rename Tag Test");
+        db.tag_content_item(item.id, tag.id).unwrap();
+
+        db.rename_tag(tag.id, "newname").unwrap();
+        let got = db.get_tag(tag.id).unwrap();
+        assert_eq!(got.name, "newname");
+    }
+
+    #[test]
+    fn rename_tag_refreshes_fts() {
+        let db = test_db();
+        let tag = db.get_or_create_tag("original").unwrap();
+        let item = make_item(&db, "Rename FTS Test");
+        db.tag_content_item(item.id, tag.id).unwrap();
+
+        // Search by old name should match.
+        let results = db.search("original").unwrap();
+        assert!(!results.is_empty());
+
+        db.rename_tag(tag.id, "renamed").unwrap();
+
+        // Search by new name should match.
+        let results = db.search("renamed").unwrap();
+        assert!(!results.is_empty());
+
+        // Old name should no longer match.
+        let results = db.search("original").unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn list_items_by_tag() {
+        let db = test_db();
+        let tag = db.get_or_create_tag("tagged").unwrap();
+        let item1 = make_item(&db, "Tagged 1");
+        let item2 = make_item(&db, "Tagged 2");
+        let _untagged = make_item(&db, "Untagged");
+
+        db.tag_content_item(item1.id, tag.id).unwrap();
+        db.tag_content_item(item2.id, tag.id).unwrap();
+
+        let items = db.list_items_by_tag(tag.id).unwrap();
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn tags_for_item() {
+        let db = test_db();
+        let item = make_item(&db, "Multi Tag");
+        let t1 = db.get_or_create_tag("alpha").unwrap();
+        let t2 = db.get_or_create_tag("beta").unwrap();
+        db.tag_content_item(item.id, t1.id).unwrap();
+        db.tag_content_item(item.id, t2.id).unwrap();
+
+        let tags = db.tags_for_item(item.id).unwrap();
+        assert_eq!(tags.len(), 2);
+        let names: Vec<&str> = tags.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"alpha"));
+        assert!(names.contains(&"beta"));
+    }
+
+    #[test]
+    fn list_tags_matching_prefix() {
+        let db = test_db();
+        db.get_or_create_tag("rust").unwrap();
+        db.get_or_create_tag("rust-async").unwrap();
+        db.get_or_create_tag("python").unwrap();
+
+        let matches = db.list_tags_matching("rust").unwrap();
+        assert_eq!(matches.len(), 2);
+
+        let matches = db.list_tags_matching("py").unwrap();
+        assert_eq!(matches.len(), 1);
+    }
+
+    // ======================================================================
+    // Filter tests (tag_id, collection_id, uncollected)
+    // ======================================================================
+
+    #[test]
+    fn filter_by_tag_id() {
+        let db = test_db();
+        let tag = db.get_or_create_tag("filterme").unwrap();
+        let tagged = make_item(&db, "Has Tag");
+        let _untagged = make_item(&db, "No Tag");
+        db.tag_content_item(tagged.id, tag.id).unwrap();
+
+        let filter = pergamon_storage::ContentItemFilter {
+            tag_id: Some(tag.id),
+            ..Default::default()
+        };
+        let items = db.list_content_items_filtered(&filter, None, None).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, tagged.id);
+    }
+
+    #[test]
+    fn filter_by_collection_id() {
+        let db = test_db();
+        let coll = make_collection(&db, "FilterColl", None);
+        let in_coll = make_item(&db, "In Collection");
+        let _outside = make_item(&db, "Outside");
+        db.add_to_collection(in_coll.id, coll.id, 0).unwrap();
+
+        let filter = pergamon_storage::ContentItemFilter {
+            collection_id: Some(coll.id),
+            ..Default::default()
+        };
+        let items = db.list_content_items_filtered(&filter, None, None).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, in_coll.id);
+    }
+
+    #[test]
+    fn filter_uncollected() {
+        let db = test_db();
+        let coll = make_collection(&db, "SomeColl", None);
+        let in_coll = make_item(&db, "In Collection");
+        let uncollected = make_item(&db, "Uncollected");
+        db.add_to_collection(in_coll.id, coll.id, 0).unwrap();
+
+        let filter = pergamon_storage::ContentItemFilter {
+            uncollected: true,
+            ..Default::default()
+        };
+        let items = db.list_content_items_filtered(&filter, None, None).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, uncollected.id);
+    }
+
+    // ======================================================================
+    // Bulk operation tests
+    // ======================================================================
+
+    #[test]
+    fn bulk_tag_items() {
+        let db = test_db();
+        let tag = db.get_or_create_tag("bulk").unwrap();
+        let item1 = make_item(&db, "Bulk 1");
+        let item2 = make_item(&db, "Bulk 2");
+        let item3 = make_item(&db, "Bulk 3");
+
+        let ids = vec![item1.id, item2.id, item3.id];
+        let count = db.bulk_tag(&ids, tag.id).unwrap();
+        assert_eq!(count, 3);
+
+        // All should have the tag.
+        for id in &ids {
+            let tags = db.tags_for_item(*id).unwrap();
+            assert_eq!(tags.len(), 1);
+        }
+
+        // Re-tagging should return 0 (no new associations).
+        let count = db.bulk_tag(&ids, tag.id).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn bulk_add_to_collection() {
+        let db = test_db();
+        let coll = make_collection(&db, "Bulk Coll", None);
+        let item1 = make_item(&db, "BC 1");
+        let item2 = make_item(&db, "BC 2");
+
+        let ids = vec![item1.id, item2.id];
+        let count = db.bulk_add_to_collection(&ids, coll.id).unwrap();
+        assert_eq!(count, 2);
+
+        let items = db.list_collection_items(coll.id).unwrap();
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn bulk_archive() {
+        let db = test_db();
+        let item1 = make_item(&db, "Archive 1");
+        let item2 = make_item(&db, "Archive 2");
+
+        let count = db.bulk_archive(&[item1.id, item2.id]).unwrap();
+        assert_eq!(count, 2);
+
+        let got1 = db.get_content_item(item1.id).unwrap();
+        let got2 = db.get_content_item(item2.id).unwrap();
+        assert_eq!(got1.status, DocumentStatus::Archived);
+        assert_eq!(got2.status, DocumentStatus::Archived);
+    }
+
+    #[test]
+    fn bulk_discard() {
+        let db = test_db();
+        let item1 = make_item(&db, "Discard 1");
+        let item2 = make_item(&db, "Discard 2");
+
+        let count = db.bulk_discard(&[item1.id, item2.id]).unwrap();
+        assert_eq!(count, 2);
+
+        let got1 = db.get_content_item(item1.id).unwrap();
+        let got2 = db.get_content_item(item2.id).unwrap();
+        assert_eq!(got1.status, DocumentStatus::Discarded);
+        assert_eq!(got2.status, DocumentStatus::Discarded);
+    }
+
+    #[test]
+    fn bulk_tag_updates_fts() {
+        let db = test_db();
+        let tag = db.get_or_create_tag("bulkfts").unwrap();
+        let item = make_item(&db, "Bulk FTS Item");
+
+        db.bulk_tag(&[item.id], tag.id).unwrap();
+        let results = db.search("bulkfts").unwrap();
+        assert!(!results.is_empty());
+    }
+} // mod collection_tag_bulk

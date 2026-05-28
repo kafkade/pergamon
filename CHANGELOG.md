@@ -74,3 +74,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `pergamon completions <shell>` command: generate shell completions for bash, zsh, fish, and PowerShell
 - Bulk listing methods in storage layer for backup export (all content items, collections, extension metadata, junction tables)
 - `schema_version()` and `is_empty()` database introspection methods
+- `pergamon collection` commands: `create`, `list` (flat and `--tree`), `rename`, `move` (with `--parent` or `--root`), `delete`, `add`, `remove`, `show`
+- `pergamon tag` commands: `add`, `remove`, `list`, `rename`, `delete`, `show`
+- `pergamon bulk` commands: `tag`, `move`, `archive`, `delete` with `--status`/`--type` filters and `--yes` confirmation skip
+- Collections and tags can be referenced by name or UUID in all commands
+- Nested collection hierarchy with cycle detection on moves
+- "Unsorted" filter: `--uncollected` flag to find items not in any collection
+- Bulk operations use transactions for atomicity and require confirmation before executing
