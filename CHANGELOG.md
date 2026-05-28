@@ -21,3 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SQLite schema with FTS5 full-text search, extension tables for type-specific metadata, and automatic `updated_at` triggers (`pergamon-storage`)
 - CRUD operations for all content entities with filtered listing and full-text search
 - Custom embedded migration runner for schema versioning
+- Feed subscription commands: `feed add`, `feed list`, `feed refresh`, `feed remove`, and `sync`
+- RSS/Atom/JSON Feed parsing via feed-rs with normalization to pergamon domain types
+- Conditional GET support with ETag and Last-Modified headers for efficient feed polling
+- Feed health tracking: error count, last error message, and last successful fetch timestamp
+- Duplicate entry detection using GUID with URL fallback during feed ingestion
