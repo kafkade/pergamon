@@ -125,17 +125,51 @@ Use conventional commits: `feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `chore
 - Repository scaffolding: GitHub templates, CI workflow, copilot instructions, contribution guide, and licensing
 - Architecture Decision Records (`docs/adr/ADR-001` through `ADR-010`)
 - Product roadmap (`docs/roadmap.md`)
+- Cargo workspace with five crates: `pergamon-core`, `pergamon-storage`, `pergamon-feed`, `pergamon-extract`, `pergamon-cli`
+- Unified content model: domain types for content items, feeds, feed folders, tags, collections, highlights, and bookmarks (`pergamon-core`)
+- SQLite schema with FTS5 full-text search (4 migrations), extension tables, `updated_at` triggers (`pergamon-storage`)
+- Custom embedded migration runner for schema versioning
+- CRUD operations for all content entities with filtered listing and full-text search
+- Feed subscription and sync engine: `feed add/list/refresh/remove`, `sync` commands
+- RSS/Atom/JSON Feed parsing via feed-rs, conditional GET (ETag/Last-Modified), feed health tracking
+- OPML import/export with folder hierarchy, dry-run mode, and idempotent re-import
+- Feed folder management: `feed move`, `feed list --tree`
+- Article extraction pipeline: readability + ammonia HTML sanitization (`pergamon-extract`)
+- Metadata extraction from Open Graph, Twitter Card, and standard meta tags
+- PDF text-layer extraction via lopdf
+- URL canonicalization for deduplication (`pergamon-extract`)
+- `save <url>` command with `--tag`, `--bookmark`, pipe support, and duplicate detection
+- `read` command: TUI inbox and article reader (ratatui) with vim-style keybindings
+- TUI triage workflow: filter by status/feed/folder, quick filters (0-5), bulk mark-as-read, browser open
+- `search <query>` command: FTS5 search with faceted filters (`--type/--tag/--status/--source/--since/--before`), JSON output
+- TUI search: `/` key, search input bar, `FilterMode::Search`
+- Full backup export/restore: `export backup` (ZIP with JSON) and `import backup` with transactional restore
+- Configuration file support: `config` command, TOML config at platform config dir
+- Shell completions: `completions <shell>` for bash/zsh/fish/powershell
+- Test fixture corpus: 25 feed fixtures, 29 extraction HTML fixtures, corpus integration tests
 
 ### What's NOT yet implemented
 
-- Cargo workspace scaffold
-- Any Rust code
-- Any domain model, storage, or CLI functionality
-- Obsidian plugin
-- iOS/web clients
-- Sync server
+- Collections, tags, and bulk organization UI (#13)
+- Raindrop.io and Pocket import (#14)
+- Metadata enrichment, duplicate detection, link health checking (#15-#17)
+- Highlights, notes, and spaced repetition (#18-#22)
+- Obsidian plugin (#23)
+- Stable export contracts (#24)
+- Smart collections, content rules, analytics (#25-#27)
+- WASM/UniFFI spikes (#28-#29)
+- iOS/web clients (#33-#34)
+- Sync server (#35)
 
 ### Key files
+
+**Crates:**
+
+- `crates/pergamon-core/` — Domain model, content types, status enum (zero I/O)
+- `crates/pergamon-storage/` — SQLite + FTS5, migrations, CRUD operations
+- `crates/pergamon-feed/` — RSS/Atom/JSON Feed parsing, OPML import/export
+- `crates/pergamon-extract/` — Article extraction, HTML sanitization, URL canonicalization
+- `crates/pergamon-cli/` — CLI binary (clap), TUI (ratatui), HTTP (reqwest)
 
 **Documentation:**
 

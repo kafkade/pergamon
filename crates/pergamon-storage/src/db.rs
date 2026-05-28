@@ -907,6 +907,299 @@ impl Database {
     }
 
     // ------------------------------------------------------------------
+    // Bulk listing (backup / export)
+    // ------------------------------------------------------------------
+
+    /// List all content items (no filter, no limit).
+    #[allow(clippy::missing_errors_doc)]
+    pub fn list_all_content_items(&self) -> Result<Vec<ContentItem>, StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, url, title, author, content_type, status,
+                    content_text, excerpt, published_at, created_at, updated_at
+             FROM content_items ORDER BY created_at",
+        )?;
+        let rows = stmt.query_map([], |row| Ok(row_to_content_item(row)))?;
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(row?);
+        }
+        Ok(items)
+    }
+
+    /// List all collections.
+    #[allow(clippy::missing_errors_doc)]
+    pub fn list_collections(&self) -> Result<Vec<Collection>, StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, parent_id, sort_order, created_at, updated_at
+             FROM collections ORDER BY sort_order, name",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(Collection {
+                id: parse_uuid(&row.get::<_, String>(0)?),
+                name: row.get(1)?,
+                parent_id: row.get::<_, Option<String>>(2)?.map(|s| parse_uuid(&s)),
+                sort_order: row.get(3)?,
+                created_at: parse_time(&row.get::<_, String>(4)?),
+                updated_at: parse_time(&row.get::<_, String>(5)?),
+            })
+        })?;
+        let mut colls = Vec::new();
+        for row in rows {
+            colls.push(row?);
+        }
+        Ok(colls)
+    }
+
+    /// List all feed item metadata rows.
+    #[allow(clippy::missing_errors_doc)]
+    pub fn list_all_feed_item_meta(&self) -> Result<Vec<FeedItemMeta>, StorageError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT content_item_id, feed_id, guid, summary FROM feed_item_meta")?;
+        let rows = stmt.query_map([], |row| {
+            Ok(FeedItemMeta {
+                content_item_id: parse_uuid(&row.get::<_, String>(0)?),
+                feed_id: parse_uuid(&row.get::<_, String>(1)?),
+                guid: row.get(2)?,
+                summary: row.get(3)?,
+            })
+        })?;
+        let mut metas = Vec::new();
+        for row in rows {
+            metas.push(row?);
+        }
+        Ok(metas)
+    }
+
+    /// List all bookmark metadata rows.
+    #[allow(clippy::missing_errors_doc)]
+    pub fn list_all_bookmark_meta(&self) -> Result<Vec<BookmarkMeta>, StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT content_item_id, original_url, saved_from, thumbnail_url, description
+             FROM bookmark_meta",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(BookmarkMeta {
+                content_item_id: parse_uuid(&row.get::<_, String>(0)?),
+                original_url: row.get(1)?,
+                saved_from: row.get(2)?,
+                thumbnail_url: row.get(3)?,
+                description: row.get(4)?,
+            })
+        })?;
+        let mut metas = Vec::new();
+        for row in rows {
+            metas.push(row?);
+        }
+        Ok(metas)
+    }
+
+    /// List all highlight metadata rows.
+    #[allow(clippy::missing_errors_doc)]
+    pub fn list_all_highlight_meta(&self) -> Result<Vec<HighlightMeta>, StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT content_item_id, source_item_id, quote_text, note,
+                    position_start, position_end, color
+             FROM highlight_meta",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(HighlightMeta {
+                content_item_id: parse_uuid(&row.get::<_, String>(0)?),
+                source_item_id: row.get::<_, Option<String>>(1)?.map(|s| parse_uuid(&s)),
+                quote_text: row.get(2)?,
+                note: row.get(3)?,
+                position_start: row.get(4)?,
+                position_end: row.get(5)?,
+                color: row.get(6)?,
+            })
+        })?;
+        let mut metas = Vec::new();
+        for row in rows {
+            metas.push(row?);
+        }
+        Ok(metas)
+    }
+
+    /// List all content-item↔tag associations.
+    #[allow(clippy::missing_errors_doc)]
+    pub fn list_all_content_item_tags(&self) -> Result<Vec<(Uuid, Uuid)>, StorageError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT content_item_id, tag_id FROM content_item_tags")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                parse_uuid(&row.get::<_, String>(0)?),
+                parse_uuid(&row.get::<_, String>(1)?),
+            ))
+        })?;
+        let mut pairs = Vec::new();
+        for row in rows {
+            pairs.push(row?);
+        }
+        Ok(pairs)
+    }
+
+    /// List all content-item↔collection associations (with sort order).
+    #[allow(clippy::missing_errors_doc)]
+    pub fn list_all_collection_items(&self) -> Result<Vec<(Uuid, Uuid, i32)>, StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT content_item_id, collection_id, sort_order FROM content_item_collections",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                parse_uuid(&row.get::<_, String>(0)?),
+                parse_uuid(&row.get::<_, String>(1)?),
+                row.get(2)?,
+            ))
+        })?;
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(row?);
+        }
+        Ok(items)
+    }
+
+    /// Return the current migration version.
+    #[allow(clippy::missing_errors_doc)]
+    pub fn schema_version(&self) -> Result<i64, StorageError> {
+        let version: i64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM __schema_migrations",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(version)
+    }
+
+    /// Check whether the database has any user data.
+    #[allow(clippy::missing_errors_doc)]
+    pub fn is_empty(&self) -> Result<bool, StorageError> {
+        let count: i64 = self.conn.query_row(
+            "SELECT (SELECT COUNT(*) FROM feeds) +
+                    (SELECT COUNT(*) FROM content_items) +
+                    (SELECT COUNT(*) FROM tags) +
+                    (SELECT COUNT(*) FROM collections)",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count == 0)
+    }
+
+    /// Restore a full backup into this database.
+    ///
+    /// The database must be empty. All inserts run inside a single
+    /// transaction with foreign keys temporarily disabled.
+    #[allow(clippy::missing_errors_doc, clippy::too_many_arguments)]
+    pub fn restore_backup(
+        &self,
+        feed_folders: &[FeedFolder],
+        feeds: &[Feed],
+        content_items: &[ContentItem],
+        tags: &[Tag],
+        collections: &[Collection],
+        feed_item_metas: &[FeedItemMeta],
+        bookmark_metas: &[BookmarkMeta],
+        highlight_metas: &[HighlightMeta],
+        content_item_tags: &[(Uuid, Uuid)],
+        collection_items: &[(Uuid, Uuid, i32)],
+    ) -> Result<(), StorageError> {
+        if !self.is_empty()? {
+            return Err(StorageError::Generic(
+                "database is not empty — restore only works on a fresh database".into(),
+            ));
+        }
+
+        // Disable FK checks for the import so we don't need topological ordering.
+        self.conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
+        let result = self.restore_backup_inner(
+            feed_folders,
+            feeds,
+            content_items,
+            tags,
+            collections,
+            feed_item_metas,
+            bookmark_metas,
+            highlight_metas,
+            content_item_tags,
+            collection_items,
+        );
+        // Re-enable FK checks regardless of success.
+        self.conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+        result
+    }
+
+    /// Inner restore implementation running inside a transaction.
+    #[allow(clippy::too_many_arguments)]
+    fn restore_backup_inner(
+        &self,
+        feed_folders: &[FeedFolder],
+        feeds: &[Feed],
+        content_items: &[ContentItem],
+        tags: &[Tag],
+        collections: &[Collection],
+        feed_item_metas: &[FeedItemMeta],
+        bookmark_metas: &[BookmarkMeta],
+        highlight_metas: &[HighlightMeta],
+        content_item_tags: &[(Uuid, Uuid)],
+        collection_items: &[(Uuid, Uuid, i32)],
+    ) -> Result<(), StorageError> {
+        self.conn.execute_batch("BEGIN;")?;
+
+        let commit_or_rollback = |result: Result<(), StorageError>, conn: &Connection| {
+            if result.is_ok() {
+                conn.execute_batch("COMMIT;").map_err(StorageError::from)
+            } else {
+                let _ = conn.execute_batch("ROLLBACK;");
+                result
+            }
+        };
+
+        let result = (|| {
+            for folder in feed_folders {
+                self.insert_feed_folder(folder)?;
+            }
+            for feed in feeds {
+                self.insert_feed(feed)?;
+            }
+            for item in content_items {
+                self.insert_content_item(item)?;
+            }
+            for tag in tags {
+                self.insert_tag(tag)?;
+            }
+            for coll in collections {
+                self.insert_collection(coll)?;
+            }
+            for meta in feed_item_metas {
+                self.insert_feed_item_meta(meta)?;
+            }
+            for meta in bookmark_metas {
+                self.insert_bookmark_meta(meta)?;
+            }
+            for meta in highlight_metas {
+                self.insert_highlight_meta(meta)?;
+            }
+            for &(item_id, tag_id) in content_item_tags {
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO content_item_tags (content_item_id, tag_id)
+                     VALUES (?1, ?2)",
+                    params![item_id.to_string(), tag_id.to_string()],
+                )?;
+            }
+            for &(item_id, coll_id, sort) in collection_items {
+                self.add_to_collection(item_id, coll_id, sort)?;
+            }
+            // Refresh FTS tags for items that have tag associations.
+            // (insert_content_item already inserts the base FTS row.)
+            for &(item_id, _) in content_item_tags {
+                self.refresh_fts_tags(item_id)?;
+            }
+            Ok(())
+        })();
+
+        commit_or_rollback(result, &self.conn)
+    }
+
+    // ------------------------------------------------------------------
     // FTS5 search
     // ------------------------------------------------------------------
 

@@ -1008,3 +1008,236 @@ fn list_tags_round_trip() {
     assert!(names.contains(&"rust"));
     assert!(names.contains(&"python"));
 }
+
+// ======================================================================
+// Backup round-trip
+// ======================================================================
+
+use pergamon_core::model::FeedFolder;
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn backup_round_trip() {
+    let src = test_db();
+
+    // Populate source database with sample data across all tables.
+    let folder = FeedFolder {
+        id: Uuid::new_v4(),
+        name: "Tech".to_owned(),
+        parent_id: None,
+        created_at: now(),
+        updated_at: now(),
+    };
+    src.insert_feed_folder(&folder)
+        .unwrap_or_else(|e| unreachable!("insert folder failed: {e}"));
+
+    let feed = Feed {
+        id: Uuid::new_v4(),
+        url: "https://example.com/feed.xml".to_owned(),
+        title: "Example Feed".to_owned(),
+        site_url: Some("https://example.com".to_owned()),
+        description: Some("An example feed".to_owned()),
+        folder_id: Some(folder.id),
+        last_fetched_at: None,
+        created_at: now(),
+        updated_at: now(),
+        etag: Some("W/\"abc\"".to_owned()),
+        last_modified_header: None,
+        error_count: 0,
+        last_error: None,
+    };
+    src.insert_feed(&feed)
+        .unwrap_or_else(|e| unreachable!("insert feed failed: {e}"));
+
+    let item = ContentItem {
+        id: Uuid::new_v4(),
+        url: Some("https://example.com/post".to_owned()),
+        title: "Test Post".to_owned(),
+        author: Some("Author".to_owned()),
+        content_type: ContentType::Article,
+        status: DocumentStatus::Inbox,
+        content_text: Some("Post body".to_owned()),
+        excerpt: Some("Post excerpt".to_owned()),
+        published_at: Some(now()),
+        created_at: now(),
+        updated_at: now(),
+    };
+    src.insert_content_item(&item)
+        .unwrap_or_else(|e| unreachable!("insert item failed: {e}"));
+
+    let meta = FeedItemMeta {
+        content_item_id: item.id,
+        feed_id: feed.id,
+        guid: Some("guid-123".to_owned()),
+        summary: Some("Summary".to_owned()),
+    };
+    src.insert_feed_item_meta(&meta)
+        .unwrap_or_else(|e| unreachable!("insert meta failed: {e}"));
+
+    let bm = BookmarkMeta {
+        content_item_id: item.id,
+        original_url: Some("https://example.com/original".to_owned()),
+        saved_from: Some("cli".to_owned()),
+        thumbnail_url: None,
+        description: Some("A bookmark".to_owned()),
+    };
+    src.insert_bookmark_meta(&bm)
+        .unwrap_or_else(|e| unreachable!("insert bookmark meta failed: {e}"));
+
+    let hl = HighlightMeta {
+        content_item_id: item.id,
+        source_item_id: None,
+        quote_text: "highlighted text".to_owned(),
+        note: Some("my note".to_owned()),
+        position_start: Some(10),
+        position_end: Some(25),
+        color: Some("yellow".to_owned()),
+    };
+    src.insert_highlight_meta(&hl)
+        .unwrap_or_else(|e| unreachable!("insert highlight meta failed: {e}"));
+
+    let tag = Tag {
+        id: Uuid::new_v4(),
+        name: "testing".to_owned(),
+        created_at: now(),
+    };
+    src.insert_tag(&tag)
+        .unwrap_or_else(|e| unreachable!("insert tag failed: {e}"));
+    src.tag_content_item(item.id, tag.id)
+        .unwrap_or_else(|e| unreachable!("tag item failed: {e}"));
+
+    let coll = Collection {
+        id: Uuid::new_v4(),
+        name: "Reading List".to_owned(),
+        parent_id: None,
+        sort_order: 1,
+        created_at: now(),
+        updated_at: now(),
+    };
+    src.insert_collection(&coll)
+        .unwrap_or_else(|e| unreachable!("insert collection failed: {e}"));
+    src.add_to_collection(item.id, coll.id, 0)
+        .unwrap_or_else(|e| unreachable!("add to collection failed: {e}"));
+
+    // Export everything from source.
+    let folders = src
+        .list_feed_folders()
+        .unwrap_or_else(|e| unreachable!("list folders: {e}"));
+    let feeds = src
+        .list_feeds()
+        .unwrap_or_else(|e| unreachable!("list feeds: {e}"));
+    let items = src
+        .list_all_content_items()
+        .unwrap_or_else(|e| unreachable!("list items: {e}"));
+    let tags_out = src
+        .list_tags()
+        .unwrap_or_else(|e| unreachable!("list tags: {e}"));
+    let colls = src
+        .list_collections()
+        .unwrap_or_else(|e| unreachable!("list collections: {e}"));
+    let fim = src
+        .list_all_feed_item_meta()
+        .unwrap_or_else(|e| unreachable!("list fim: {e}"));
+    let bms = src
+        .list_all_bookmark_meta()
+        .unwrap_or_else(|e| unreachable!("list bm: {e}"));
+    let hls = src
+        .list_all_highlight_meta()
+        .unwrap_or_else(|e| unreachable!("list hl: {e}"));
+    let cit = src
+        .list_all_content_item_tags()
+        .unwrap_or_else(|e| unreachable!("list cit: {e}"));
+    let ci = src
+        .list_all_collection_items()
+        .unwrap_or_else(|e| unreachable!("list ci: {e}"));
+
+    // Restore into a fresh database.
+    let dst = test_db();
+    dst.restore_backup(
+        &folders, &feeds, &items, &tags_out, &colls, &fim, &bms, &hls, &cit, &ci,
+    )
+    .unwrap_or_else(|e| unreachable!("restore failed: {e}"));
+
+    // Verify all records are present.
+    let dst_feeds = dst
+        .list_feeds()
+        .unwrap_or_else(|e| unreachable!("dst feeds: {e}"));
+    assert_eq!(dst_feeds.len(), 1);
+    assert_eq!(dst_feeds[0].title, "Example Feed");
+
+    let dst_items = dst
+        .list_all_content_items()
+        .unwrap_or_else(|e| unreachable!("dst items: {e}"));
+    assert_eq!(dst_items.len(), 1);
+    assert_eq!(dst_items[0].title, "Test Post");
+
+    let dst_tags = dst
+        .list_tags()
+        .unwrap_or_else(|e| unreachable!("dst tags: {e}"));
+    assert_eq!(dst_tags.len(), 1);
+    assert_eq!(dst_tags[0].name, "testing");
+
+    let dst_cit = dst
+        .list_all_content_item_tags()
+        .unwrap_or_else(|e| unreachable!("dst cit: {e}"));
+    assert_eq!(dst_cit.len(), 1);
+
+    let dst_colls = dst
+        .list_collections()
+        .unwrap_or_else(|e| unreachable!("dst colls: {e}"));
+    assert_eq!(dst_colls.len(), 1);
+    assert_eq!(dst_colls[0].name, "Reading List");
+
+    let dst_ci = dst
+        .list_all_collection_items()
+        .unwrap_or_else(|e| unreachable!("dst ci: {e}"));
+    assert_eq!(dst_ci.len(), 1);
+
+    // Verify FTS was rebuilt — search should find the restored item.
+    let results = dst
+        .search("Test Post")
+        .unwrap_or_else(|e| unreachable!("search: {e}"));
+    assert_eq!(results.len(), 1);
+}
+
+#[test]
+fn restore_rejects_nonempty_database() {
+    let db = test_db();
+
+    // Insert a tag to make the database non-empty.
+    let tag = Tag {
+        id: Uuid::new_v4(),
+        name: "existing".to_owned(),
+        created_at: now(),
+    };
+    db.insert_tag(&tag)
+        .unwrap_or_else(|e| unreachable!("insert: {e}"));
+
+    let result = db.restore_backup(&[], &[], &[], &[], &[], &[], &[], &[], &[], &[]);
+    match result {
+        Ok(()) => unreachable!("expected restore to fail on non-empty DB"),
+        Err(e) => {
+            let msg = format!("{e}");
+            assert!(msg.contains("not empty"), "unexpected error message: {msg}");
+        }
+    }
+}
+
+#[test]
+fn schema_version_returns_latest() {
+    let db = test_db();
+    let version = db
+        .schema_version()
+        .unwrap_or_else(|e| unreachable!("version: {e}"));
+    // We have 4 migrations (V1–V4).
+    assert_eq!(version, 4);
+}
+
+#[test]
+fn is_empty_on_fresh_database() {
+    let db = test_db();
+    let empty = db
+        .is_empty()
+        .unwrap_or_else(|e| unreachable!("is_empty: {e}"));
+    assert!(empty);
+}

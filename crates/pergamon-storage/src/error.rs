@@ -21,4 +21,8 @@ pub enum StorageError {
         /// The ID that was looked up.
         id: String,
     },
+
+    /// A generic storage-layer error.
+    #[error("{0}")]
+    Generic(String),
 }

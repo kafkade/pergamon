@@ -6,11 +6,11 @@
 
 mod tui;
 
-use std::io::BufRead;
+use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use pergamon_core::content_type::ContentType;
 use pergamon_core::model::{ContentItem, Feed, FeedFolder, FeedItemMeta};
 use pergamon_core::status::DocumentStatus;
@@ -105,6 +105,14 @@ enum Command {
         #[command(subcommand)]
         action: ExportAction,
     },
+    /// Show current configuration.
+    Config,
+    /// Generate shell completions.
+    Completions {
+        /// Shell to generate completions for.
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
 }
 
 /// Feed management subcommands.
@@ -153,6 +161,11 @@ enum ImportAction {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Restore from a full backup archive.
+    Backup {
+        /// Path to the backup ZIP file.
+        file: PathBuf,
+    },
 }
 
 /// Export subcommands.
@@ -163,6 +176,12 @@ enum ExportAction {
         /// Output file path (default: stdout).
         #[arg(long, short)]
         output: Option<PathBuf>,
+    },
+    /// Create a full backup archive.
+    Backup {
+        /// Output file path.
+        #[arg(long, short)]
+        output: PathBuf,
     },
 }
 
@@ -179,6 +198,16 @@ fn main() -> Result<()> {
         println!("Run `pergamon --help` for usage.");
         return Ok(());
     };
+
+    // Commands that do not need a database.
+    match &command {
+        Command::Config => return show_config(),
+        Command::Completions { shell } => {
+            generate_completions(*shell);
+            return Ok(());
+        }
+        _ => {}
+    }
 
     let db_path = cli.db.unwrap_or_else(default_db_path);
     if let Some(parent) = db_path.parent() {
@@ -221,6 +250,8 @@ fn main() -> Result<()> {
         ),
         Command::Import { action } => handle_import(&db, action),
         Command::Export { action } => handle_export(&db, action),
+        // Already handled above — unreachable at runtime.
+        Command::Config | Command::Completions { .. } => Ok(()),
     }
 }
 
@@ -606,6 +637,7 @@ fn feed_status_label(feed: &Feed) -> String {
 fn handle_import(db: &Database, action: ImportAction) -> Result<()> {
     match action {
         ImportAction::Opml { file, dry_run } => import_opml(db, &file, dry_run),
+        ImportAction::Backup { file } => restore_backup(db, &file),
     }
 }
 
@@ -613,6 +645,7 @@ fn handle_import(db: &Database, action: ImportAction) -> Result<()> {
 fn handle_export(db: &Database, action: ExportAction) -> Result<()> {
     match action {
         ExportAction::Opml { output } => export_opml(db, output.as_deref()),
+        ExportAction::Backup { output } => export_backup(db, &output),
     }
 }
 
@@ -1380,4 +1413,305 @@ fn fmt_relative(t: OffsetDateTime) -> String {
     } else {
         format!("{}d ago", delta.whole_days())
     }
+}
+
+// ------------------------------------------------------------------
+// Backup export
+// ------------------------------------------------------------------
+
+/// Manifest embedded in every backup archive.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct BackupManifest {
+    /// Application name (always "pergamon").
+    app: String,
+    /// Schema version at the time of the backup.
+    schema_version: i64,
+    /// ISO-8601 timestamp of when the backup was created.
+    created_at: String,
+}
+
+/// Create a full backup archive (ZIP with JSON files).
+fn export_backup(db: &Database, output: &std::path::Path) -> Result<()> {
+    use zip::ZipWriter;
+    use zip::write::SimpleFileOptions;
+
+    let file = std::fs::File::create(output)
+        .with_context(|| format!("failed to create backup file: {}", output.display()))?;
+    let mut zip = ZipWriter::new(file);
+    let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+
+    // Gather all data.
+    let feed_folders = db.list_feed_folders().context("listing feed folders")?;
+    let feeds = db.list_feeds().context("listing feeds")?;
+    let content_items = db
+        .list_all_content_items()
+        .context("listing content items")?;
+    let tags = db.list_tags().context("listing tags")?;
+    let collections = db.list_collections().context("listing collections")?;
+    let feed_item_meta = db
+        .list_all_feed_item_meta()
+        .context("listing feed item meta")?;
+    let bookmark_meta = db
+        .list_all_bookmark_meta()
+        .context("listing bookmark meta")?;
+    let highlight_meta = db
+        .list_all_highlight_meta()
+        .context("listing highlight meta")?;
+    let content_item_tags = db
+        .list_all_content_item_tags()
+        .context("listing content item tags")?;
+    let collection_items = db
+        .list_all_collection_items()
+        .context("listing collection items")?;
+
+    let manifest = BackupManifest {
+        app: "pergamon".to_owned(),
+        schema_version: db.schema_version().context("reading schema version")?,
+        created_at: OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default(),
+    };
+
+    // Write files in deterministic order.
+    write_json_entry(&mut zip, &opts, "manifest.json", &manifest)?;
+    write_json_entry(&mut zip, &opts, "feed_folders.json", &feed_folders)?;
+    write_json_entry(&mut zip, &opts, "feeds.json", &feeds)?;
+    write_json_entry(&mut zip, &opts, "content_items.json", &content_items)?;
+    write_json_entry(&mut zip, &opts, "tags.json", &tags)?;
+    write_json_entry(&mut zip, &opts, "collections.json", &collections)?;
+    write_json_entry(&mut zip, &opts, "feed_item_meta.json", &feed_item_meta)?;
+    write_json_entry(&mut zip, &opts, "bookmark_meta.json", &bookmark_meta)?;
+    write_json_entry(&mut zip, &opts, "highlight_meta.json", &highlight_meta)?;
+    write_json_entry(
+        &mut zip,
+        &opts,
+        "content_item_tags.json",
+        &content_item_tags,
+    )?;
+    write_json_entry(&mut zip, &opts, "collection_items.json", &collection_items)?;
+
+    zip.finish().context("failed to finalize backup archive")?;
+
+    let total = feed_folders.len()
+        + feeds.len()
+        + content_items.len()
+        + tags.len()
+        + collections.len()
+        + feed_item_meta.len()
+        + bookmark_meta.len()
+        + highlight_meta.len()
+        + content_item_tags.len()
+        + collection_items.len();
+
+    println!("Backup written to {}", output.display());
+    println!(
+        "  {} feeds, {} items, {} tags, {} collections ({total} records total)",
+        feeds.len(),
+        content_items.len(),
+        tags.len(),
+        collections.len(),
+    );
+
+    Ok(())
+}
+
+/// Write a single JSON entry to the ZIP archive.
+fn write_json_entry<W: Write + std::io::Seek, T: serde::Serialize>(
+    zip: &mut zip::ZipWriter<W>,
+    opts: &zip::write::SimpleFileOptions,
+    name: &str,
+    data: &T,
+) -> Result<()> {
+    zip.start_file(name, *opts)
+        .with_context(|| format!("failed to start ZIP entry: {name}"))?;
+    serde_json::to_writer_pretty(&mut *zip, data)
+        .with_context(|| format!("failed to write JSON entry: {name}"))?;
+    Ok(())
+}
+
+// ------------------------------------------------------------------
+// Backup restore
+// ------------------------------------------------------------------
+
+/// Restore from a full backup archive.
+fn restore_backup(db: &Database, path: &std::path::Path) -> Result<()> {
+    use pergamon_core::model::{BookmarkMeta, Collection, HighlightMeta, Tag};
+    use zip::ZipArchive;
+
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("failed to open backup file: {}", path.display()))?;
+    let mut archive =
+        ZipArchive::new(file).with_context(|| "failed to read backup archive as ZIP")?;
+
+    // Read and validate manifest.
+    let manifest: BackupManifest = read_json_entry(&mut archive, "manifest.json")?;
+    if manifest.app != "pergamon" {
+        bail!("not a pergamon backup (manifest.app = {:?})", manifest.app);
+    }
+
+    let current_version = db
+        .schema_version()
+        .context("reading current schema version")?;
+    if manifest.schema_version > current_version {
+        bail!(
+            "backup schema version {} is newer than current {} — upgrade pergamon first",
+            manifest.schema_version,
+            current_version
+        );
+    }
+
+    // Deserialize all tables.
+    let feed_folders: Vec<FeedFolder> = read_json_entry(&mut archive, "feed_folders.json")?;
+    let feeds: Vec<Feed> = read_json_entry(&mut archive, "feeds.json")?;
+    let content_items: Vec<ContentItem> = read_json_entry(&mut archive, "content_items.json")?;
+    let tags: Vec<Tag> = read_json_entry(&mut archive, "tags.json")?;
+    let collections: Vec<Collection> = read_json_entry(&mut archive, "collections.json")?;
+    let feed_item_meta: Vec<FeedItemMeta> = read_json_entry(&mut archive, "feed_item_meta.json")?;
+    let bookmark_meta: Vec<BookmarkMeta> = read_json_entry(&mut archive, "bookmark_meta.json")?;
+    let highlight_meta: Vec<HighlightMeta> = read_json_entry(&mut archive, "highlight_meta.json")?;
+    let content_item_tags: Vec<(Uuid, Uuid)> =
+        read_json_entry(&mut archive, "content_item_tags.json")?;
+    let collection_items: Vec<(Uuid, Uuid, i32)> =
+        read_json_entry(&mut archive, "collection_items.json")?;
+
+    db.restore_backup(
+        &feed_folders,
+        &feeds,
+        &content_items,
+        &tags,
+        &collections,
+        &feed_item_meta,
+        &bookmark_meta,
+        &highlight_meta,
+        &content_item_tags,
+        &collection_items,
+    )
+    .context("failed to restore backup into database")?;
+
+    let total = feed_folders.len()
+        + feeds.len()
+        + content_items.len()
+        + tags.len()
+        + collections.len()
+        + feed_item_meta.len()
+        + bookmark_meta.len()
+        + highlight_meta.len()
+        + content_item_tags.len()
+        + collection_items.len();
+
+    println!("Backup restored from {}", path.display());
+    println!(
+        "  {} feeds, {} items, {} tags, {} collections ({total} records total)",
+        feeds.len(),
+        content_items.len(),
+        tags.len(),
+        collections.len(),
+    );
+
+    Ok(())
+}
+
+/// Read a JSON entry from a ZIP archive.
+fn read_json_entry<T: serde::de::DeserializeOwned>(
+    archive: &mut zip::ZipArchive<std::fs::File>,
+    name: &str,
+) -> Result<T> {
+    let entry = archive
+        .by_name(name)
+        .with_context(|| format!("missing backup entry: {name}"))?;
+    serde_json::from_reader(entry).with_context(|| format!("failed to parse backup entry: {name}"))
+}
+
+// ------------------------------------------------------------------
+// Configuration
+// ------------------------------------------------------------------
+
+/// Configuration loaded from `config.toml`.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct Config {
+    /// Default output format.
+    #[serde(default = "Config::default_format")]
+    default_format: String,
+    /// Whether to use color output (respects `NO_COLOR` env var).
+    #[serde(default = "Config::default_color")]
+    color: bool,
+    /// Strftime-style date format.
+    #[serde(default = "Config::default_date_format")]
+    date_format: String,
+    /// Feed refresh interval in minutes.
+    #[serde(default = "Config::default_refresh_interval")]
+    feed_refresh_interval_minutes: u32,
+}
+
+impl Config {
+    fn default_format() -> String {
+        "table".to_owned()
+    }
+
+    const fn default_color() -> bool {
+        true
+    }
+
+    fn default_date_format() -> String {
+        "%Y-%m-%d %H:%M".to_owned()
+    }
+
+    const fn default_refresh_interval() -> u32 {
+        60
+    }
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            default_format: Self::default_format(),
+            color: Self::default_color(),
+            date_format: Self::default_date_format(),
+            feed_refresh_interval_minutes: Self::default_refresh_interval(),
+        }
+    }
+}
+
+/// Platform-standard config file path.
+fn config_path() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("pergamon")
+        .join("config.toml")
+}
+
+/// Load configuration from disk, falling back to defaults.
+fn load_config() -> Config {
+    let path = config_path();
+    std::fs::read_to_string(&path).map_or_else(
+        |_| Config::default(),
+        |contents| toml::from_str(&contents).unwrap_or_default(),
+    )
+}
+
+/// Show current configuration.
+fn show_config() -> Result<()> {
+    let path = config_path();
+    let config = load_config();
+
+    println!("Config file: {}", path.display());
+    if path.exists() {
+        println!("Status: loaded");
+    } else {
+        println!("Status: using defaults (file not found)");
+    }
+    println!();
+    let toml_str = toml::to_string_pretty(&config).context("failed to serialize default config")?;
+    print!("{toml_str}");
+    Ok(())
+}
+
+// ------------------------------------------------------------------
+// Shell completions
+// ------------------------------------------------------------------
+
+/// Generate shell completions and write to stdout.
+fn generate_completions(shell: clap_complete::Shell) {
+    let mut cmd = Cli::command();
+    clap_complete::generate(shell, &mut cmd, "pergamon", &mut std::io::stdout());
 }

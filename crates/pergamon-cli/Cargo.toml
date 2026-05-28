@@ -31,3 +31,7 @@ crossterm = { workspace = true }
 open = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+zip = { workspace = true }
+dirs = { workspace = true }
+toml = { workspace = true }
+clap_complete = { workspace = true }
