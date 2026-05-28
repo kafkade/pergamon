@@ -22,3 +22,18 @@ pub use canonical::canonicalize_url;
 pub use error::ExtractError;
 pub use metadata::{Metadata, extract_metadata};
 pub use pdf::{ExtractedPdf, extract_pdf_text};
+
+/// Resolve a possibly-relative favicon URL against a base page URL.
+///
+/// Returns `None` if the favicon href is absent or the base URL is
+/// unparseable. Falls back to the raw href if resolution fails.
+#[must_use]
+pub fn resolve_favicon_url(favicon_href: &str, base_url: &str) -> Option<String> {
+    if favicon_href.starts_with("http://") || favicon_href.starts_with("https://") {
+        return Some(favicon_href.to_owned());
+    }
+    url::Url::parse(base_url)
+        .ok()
+        .and_then(|base| base.join(favicon_href).ok())
+        .map(|u| u.to_string())
+}

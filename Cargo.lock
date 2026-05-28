@@ -1586,6 +1586,7 @@ dependencies = [
  "pergamon-core",
  "readabilityrs",
  "scraper 0.22.0",
+ "serde_json",
  "thiserror 2.0.18",
  "time",
  "url",

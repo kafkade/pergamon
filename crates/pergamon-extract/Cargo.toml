@@ -20,4 +20,5 @@ ammonia = { workspace = true }
 scraper = { workspace = true }
 url = { workspace = true }
 lopdf = { workspace = true }
+serde_json = { workspace = true }
 time = { workspace = true }
