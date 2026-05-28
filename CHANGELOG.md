@@ -35,3 +35,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Help overlay in the TUI (press `?` to toggle)
 - Pagination support (limit/offset) for content item listing
 - Status update and count queries for content items in storage layer
+- OPML import: parse OPML files and create feed subscriptions with folder hierarchy (`import opml`)
+- OPML export: generate OPML from subscribed feeds grouped by folder (`export opml`)
+- Feed folder management: organize feeds into folders with `feed move` and `feed list --tree`
+- Dry-run mode for OPML import to preview changes without modifying the database
+- Idempotent re-import: existing subscriptions are detected by URL and folders reused by name

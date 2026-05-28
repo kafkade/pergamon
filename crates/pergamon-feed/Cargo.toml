@@ -16,4 +16,6 @@ workspace = true
 pergamon-core = { workspace = true }
 thiserror = { workspace = true }
 feed-rs = { workspace = true }
+quick-xml = { workspace = true }
 time = { workspace = true }
+uuid = { workspace = true }

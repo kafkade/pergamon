@@ -40,6 +40,7 @@ fn feed_insert_and_get() {
         error_count: 0,
         last_error: None,
         last_fetched_at: Some(now()),
+        folder_id: None,
         created_at: now(),
         updated_at: now(),
     };
@@ -212,6 +213,7 @@ fn feed_item_meta_round_trip() {
         error_count: 0,
         last_error: None,
         last_fetched_at: None,
+        folder_id: None,
         created_at: now(),
         updated_at: now(),
     };

@@ -65,9 +65,26 @@ pub struct Feed {
     pub last_error: Option<String>,
     /// When the feed was last successfully fetched (content changed or 304).
     pub last_fetched_at: Option<OffsetDateTime>,
+    /// Folder this feed belongs to (for OPML categories).
+    pub folder_id: Option<Uuid>,
     /// When this feed was added to pergamon.
     pub created_at: OffsetDateTime,
     /// When this feed record was last updated.
+    pub updated_at: OffsetDateTime,
+}
+
+/// A folder for organising feed subscriptions (OPML categories).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeedFolder {
+    /// Stable unique identifier.
+    pub id: Uuid,
+    /// Display name of the folder.
+    pub name: String,
+    /// Parent folder ID (for nested hierarchies).
+    pub parent_id: Option<Uuid>,
+    /// When this folder was created.
+    pub created_at: OffsetDateTime,
+    /// When this folder was last updated.
     pub updated_at: OffsetDateTime,
 }
 

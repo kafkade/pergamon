@@ -1467,8 +1467,10 @@ version = "0.1.0"
 dependencies = [
  "feed-rs",
  "pergamon-core",
+ "quick-xml",
  "thiserror 2.0.18",
  "time",
+ "uuid",
 ]
 
 [[package]]
