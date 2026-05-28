@@ -17,3 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CLI binary with `--info` flag (`pergamon --info`)
 - Workspace-wide lint configuration (forbid unsafe, deny unwrap/expect/panic, clippy pedantic + nursery)
 - Rust CI pipeline: check, test (Linux/macOS/Windows), clippy, fmt
+- Unified content model: domain types for content items, feeds, tags, collections, highlights, and bookmarks (`pergamon-core`)
+- SQLite schema with FTS5 full-text search, extension tables for type-specific metadata, and automatic `updated_at` triggers (`pergamon-storage`)
+- CRUD operations for all content entities with filtered listing and full-text search
+- Custom embedded migration runner for schema versioning

@@ -4,6 +4,12 @@
 //! traits defined in `pergamon-core` using `rusqlite` with bundled `SQLite`.
 //!
 //! Responsibilities:
-//! - Schema migrations
-//! - Content-addressed blob store for raw HTML / PDF / email
+//! - Schema migrations (via `refinery`)
+//! - CRUD operations for the unified content model
 //! - Full-text search via FTS5 virtual tables
+
+pub mod db;
+pub mod error;
+
+pub use db::Database;
+pub use error::StorageError;

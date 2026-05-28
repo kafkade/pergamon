@@ -27,9 +27,9 @@ pergamon-extract = { path = "crates/pergamon-extract", version = "0.1.0" }
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-uuid = { version = "1", features = ["v4", "v7"] }
-time = { version = "0.3", default-features = false, features = ["std", "macros", "formatting", "parsing"] }
-rusqlite = { version = "0.40", features = ["bundled"] }
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+time = { version = "0.3", default-features = false, features = ["std", "macros", "formatting", "parsing", "serde"] }
+rusqlite = { version = "0.34", features = ["bundled"] }
 clap = { version = "4", features = ["derive", "env"] }
 anyhow = "1"
 

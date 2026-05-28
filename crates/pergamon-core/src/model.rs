@@ -1,0 +1,148 @@
+//! Domain model types for the unified content system.
+//!
+//! These structs represent the canonical entities in pergamon's data model.
+//! They are pure data — no I/O, no database coupling. The storage layer
+//! maps these to/from `SQLite` rows.
+
+use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
+use uuid::Uuid;
+
+use crate::content_type::ContentType;
+use crate::status::DocumentStatus;
+
+/// A unified content item — the canonical unit of saved content.
+///
+/// Every saved item (feed entry, article, bookmark, highlight, PDF, podcast
+/// episode) shares this common shape. Type-specific metadata lives in
+/// extension structs ([`FeedItemMeta`], [`BookmarkMeta`], [`HighlightMeta`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContentItem {
+    /// Stable unique identifier.
+    pub id: Uuid,
+    /// URL of the content (if applicable).
+    pub url: Option<String>,
+    /// Title of the content item.
+    pub title: String,
+    /// Author or creator.
+    pub author: Option<String>,
+    /// Discriminator for the content type.
+    pub content_type: ContentType,
+    /// Lifecycle status in the triage workflow.
+    pub status: DocumentStatus,
+    /// Normalized extracted text (for FTS and reading).
+    pub content_text: Option<String>,
+    /// Short excerpt or summary.
+    pub excerpt: Option<String>,
+    /// Publication timestamp (if known).
+    pub published_at: Option<OffsetDateTime>,
+    /// When this item was created in pergamon.
+    pub created_at: OffsetDateTime,
+    /// When this item was last updated.
+    pub updated_at: OffsetDateTime,
+}
+
+/// An RSS/Atom feed subscription.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Feed {
+    /// Stable unique identifier.
+    pub id: Uuid,
+    /// Display title of the feed.
+    pub title: String,
+    /// Feed URL (RSS/Atom endpoint).
+    pub url: String,
+    /// Website URL of the feed source.
+    pub site_url: Option<String>,
+    /// Feed description.
+    pub description: Option<String>,
+    /// When the feed was last successfully fetched.
+    pub last_fetched_at: Option<OffsetDateTime>,
+    /// When this feed was added to pergamon.
+    pub created_at: OffsetDateTime,
+    /// When this feed record was last updated.
+    pub updated_at: OffsetDateTime,
+}
+
+/// Extension metadata for feed items.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeedItemMeta {
+    /// ID of the associated content item.
+    pub content_item_id: Uuid,
+    /// ID of the source feed.
+    pub feed_id: Uuid,
+    /// Feed-level GUID or entry ID.
+    pub guid: Option<String>,
+    /// Feed-provided summary or description.
+    pub summary: Option<String>,
+}
+
+/// Extension metadata for bookmarks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BookmarkMeta {
+    /// ID of the associated content item.
+    pub content_item_id: Uuid,
+    /// The original URL as captured (before normalization).
+    pub original_url: Option<String>,
+    /// Where the bookmark was saved from (e.g., "browser", "share sheet").
+    pub saved_from: Option<String>,
+    /// Thumbnail / preview image URL.
+    pub thumbnail_url: Option<String>,
+    /// User-provided or auto-generated description.
+    pub description: Option<String>,
+}
+
+/// Extension metadata for highlights / annotations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HighlightMeta {
+    /// ID of the associated content item.
+    pub content_item_id: Uuid,
+    /// ID of the source document this highlight was taken from.
+    pub source_item_id: Option<Uuid>,
+    /// The highlighted text.
+    pub quote_text: String,
+    /// User note attached to the highlight.
+    pub note: Option<String>,
+    /// Start offset of the highlight in the source text.
+    pub position_start: Option<i64>,
+    /// End offset of the highlight in the source text.
+    pub position_end: Option<i64>,
+    /// Highlight color label.
+    pub color: Option<String>,
+}
+
+/// A user-defined tag.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tag {
+    /// Stable unique identifier.
+    pub id: Uuid,
+    /// Tag name (case-normalized).
+    pub name: String,
+    /// When this tag was created.
+    pub created_at: OffsetDateTime,
+}
+
+/// A hierarchical collection (folder).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Collection {
+    /// Stable unique identifier.
+    pub id: Uuid,
+    /// Display name.
+    pub name: String,
+    /// Parent collection ID (for nesting).
+    pub parent_id: Option<Uuid>,
+    /// Sort order within the parent.
+    pub sort_order: i32,
+    /// When this collection was created.
+    pub created_at: OffsetDateTime,
+    /// When this collection was last updated.
+    pub updated_at: OffsetDateTime,
+}
+
+/// A search result from the FTS5 index.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SearchResult {
+    /// ID of the matching content item.
+    pub content_item_id: Uuid,
+    /// BM25 relevance rank (lower is more relevant).
+    pub rank: f64,
+}
