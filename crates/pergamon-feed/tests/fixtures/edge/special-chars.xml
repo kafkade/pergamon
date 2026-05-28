@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Special &amp; "Characters" &lt;Feed&gt;</title>
+    <link>https://specialchars.example.com</link>
+    <description>Testing XML special characters &amp; edge cases</description>
+    <item>
+      <title>Ampersands &amp; Angles: A &lt;Story&gt;</title>
+      <link>https://specialchars.example.com/ampersands</link>
+      <guid>sc-001</guid>
+      <description>Testing &amp; (ampersand), &lt; (less than), &gt; (greater than), &quot; (quote), and &apos; (apostrophe) in various fields.</description>
+      <pubDate>Mon, 15 Jan 2024 10:00:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Em Dash — En Dash – and Ellipsis…</title>
+      <link>https://specialchars.example.com/dashes</link>
+      <guid>sc-002</guid>
+      <description>Typography: "curly quotes", 'single curly', em dash—here, en dash 2–3, ellipsis…</description>
+    </item>
+    <item>
+      <title>Math Symbols: ∑ ∏ ∫ √ ∞ ≈ ≠ ≤ ≥</title>
+      <link>https://specialchars.example.com/math</link>
+      <guid>sc-003</guid>
+      <description>Mathematical symbols in a feed: π ≈ 3.14159, e ≈ 2.71828, √2 ≈ 1.41421</description>
+    </item>
+    <item>
+      <title>Null bytes and control chars</title>
+      <link>https://specialchars.example.com/control</link>
+      <guid>sc-004</guid>
+      <description>Tab:	between words. Newline in description:
+second line here.</description>
+    </item>
+  </channel>
+</rss>

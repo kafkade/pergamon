@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Relative URL Blog</title>
+    <link>https://relative.example.com</link>
+    <description>A feed where item links are relative paths</description>
+    <item>
+      <title>About Our Team</title>
+      <link>/about/team</link>
+      <guid>rel-001</guid>
+      <description>Meet the people behind the project.</description>
+      <pubDate>Mon, 15 Jan 2024 10:00:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Getting Started Guide</title>
+      <link>docs/getting-started</link>
+      <guid>rel-002</guid>
+      <description>How to set up and configure the tool.</description>
+    </item>
+    <item>
+      <title>External Reference</title>
+      <link>https://other.example.com/ref</link>
+      <guid>rel-003</guid>
+      <description>Some items have absolute URLs.</description>
+    </item>
+  </channel>
+</rss>

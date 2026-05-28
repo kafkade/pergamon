@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Concurrency (computer science) - Encyclopedia</title>
+</head>
+<body>
+  <div id="content">
+    <h1 id="firstHeading">Concurrency (computer science)</h1>
+    <div id="bodyContent">
+      <div id="mw-content-text">
+        <p><b>Concurrency</b> in <a href="/wiki/Computer_science">computer science</a> refers to the ability of different parts or units of a program, algorithm, or problem to be executed out-of-order or in partial order, without affecting the outcome. This allows for <a href="/wiki/Parallel_computing">parallel execution</a> of concurrent units, which can significantly improve overall speed in multi-processor and multi-core systems.</p>
+
+        <div id="toc">
+          <h2>Contents</h2>
+          <ul>
+            <li><a href="#History">1 History</a></li>
+            <li><a href="#Models">2 Models of concurrency</a></li>
+            <li><a href="#Issues">3 Issues</a></li>
+            <li><a href="#See_also">4 See also</a></li>
+            <li><a href="#References">5 References</a></li>
+          </ul>
+        </div>
+
+        <h2 id="History">History</h2>
+        <p>The concept of concurrency has evolved significantly since the early days of computing. <a href="/wiki/Edsger_Dijkstra">Edsger Dijkstra</a>'s 1965 paper on the <a href="/wiki/Dining_philosophers_problem">dining philosophers problem</a> and the introduction of <a href="/wiki/Semaphore_(programming)">semaphores</a> laid foundational concepts for concurrent programming.</p>
+        <p>In 1973, <a href="/wiki/Carl_Hewitt">Carl Hewitt</a> introduced the <a href="/wiki/Actor_model">actor model</a>, which treats "actors" as the universal primitives of concurrent computation. <a href="/wiki/Tony_Hoare">Tony Hoare</a>'s 1978 paper on <a href="/wiki/Communicating_sequential_processes">Communicating Sequential Processes</a> (CSP) presented an alternative model based on message passing.</p>
+
+        <h2 id="Models">Models of concurrency</h2>
+        <p>Several models exist for understanding and implementing concurrency:</p>
+        <ul>
+          <li><b><a href="/wiki/Thread_(computing)">Threads</a></b> — lightweight units of execution within a process that share memory space</li>
+          <li><b><a href="/wiki/Actor_model">Actor model</a></b> — independent entities that communicate through asynchronous message passing</li>
+          <li><b><a href="/wiki/Communicating_sequential_processes">CSP</a></b> — processes communicate through channels using synchronous message passing</li>
+          <li><b><a href="/wiki/Software_transactional_memory">Software Transactional Memory</a></b> — memory access is organized into atomic transactions</li>
+          <li><b><a href="/wiki/Coroutine">Coroutines</a></b> — cooperative multitasking where routines voluntarily yield control</li>
+        </ul>
+
+        <h2 id="Issues">Issues</h2>
+        <p>Concurrent programming introduces several challenges:</p>
+        <ul>
+          <li><b><a href="/wiki/Race_condition">Race conditions</a></b> — when the system's behavior depends on the sequence or timing of uncontrollable events</li>
+          <li><b><a href="/wiki/Deadlock">Deadlocks</a></b> — when two or more processes are each waiting for the other to release a resource</li>
+          <li><b><a href="/wiki/Starvation_(computer_science)">Starvation</a></b> — when a process is perpetually denied necessary resources</li>
+          <li><b><a href="/wiki/Priority_inversion">Priority inversion</a></b> — when a low-priority task holds a resource needed by a high-priority task</li>
+        </ul>
+
+        <h2 id="See_also">See also</h2>
+        <ul>
+          <li><a href="/wiki/Parallel_computing">Parallel computing</a></li>
+          <li><a href="/wiki/Distributed_computing">Distributed computing</a></li>
+          <li><a href="/wiki/Mutex">Mutex</a></li>
+        </ul>
+
+        <h2 id="References">References</h2>
+        <ol>
+          <li>Dijkstra, E. W. (1965). "Solution of a problem in concurrent programming control". <i>Communications of the ACM</i>. 8 (9): 569.</li>
+          <li>Hewitt, Carl (1973). "A Universal Modular ACTOR Formalism for Artificial Intelligence". <i>IJCAI</i>.</li>
+          <li>Hoare, C. A. R. (1978). "Communicating sequential processes". <i>Communications of the ACM</i>. 21 (8): 666–677.</li>
+        </ol>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

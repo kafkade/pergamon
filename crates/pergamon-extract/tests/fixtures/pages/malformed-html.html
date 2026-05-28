@@ -1,0 +1,21 @@
+<html>
+<head><title>Malformed HTML Page</title></head>
+<body>
+<h1>This Page Has Bad HTML</h2>
+<p>This paragraph is never closed.
+<p>Neither is this one.
+<div>
+  <p>This div is never closed either.
+  <ul>
+    <li>List item without closing tag
+    <li>Another one
+    <li>And <b>bold that crosses <i>into italic</b> territory</i>
+  </ul>
+<p>Back to normal-ish content. <br> <br> <br>
+<p>Some content with <a href="broken link with spaces">a broken link</a> and an <img src="missing.jpg"> unclosed image tag.
+<p>Final paragraph with &amp; entity and &#x27; numeric entity and &hearts; named entity.
+<table>
+<tr><td>Cell 1<td>Cell 2
+<tr><td>Cell 3<td>Cell 4
+</table>
+</body>

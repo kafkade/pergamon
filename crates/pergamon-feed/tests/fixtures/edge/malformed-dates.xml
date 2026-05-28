@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Malformed Dates Feed</title>
+    <link>https://baddates.example.com</link>
+    <description>Items with non-standard or broken date formats</description>
+    <item>
+      <title>ISO 8601 Date</title>
+      <link>https://baddates.example.com/iso</link>
+      <guid>bd-001</guid>
+      <pubDate>2024-01-15T10:00:00Z</pubDate>
+      <description>Uses ISO 8601 instead of RFC 822.</description>
+    </item>
+    <item>
+      <title>Truncated Date</title>
+      <link>https://baddates.example.com/truncated</link>
+      <guid>bd-002</guid>
+      <pubDate>Jan 10, 2024</pubDate>
+      <description>Non-standard abbreviated date.</description>
+    </item>
+    <item>
+      <title>Completely Wrong Date</title>
+      <link>https://baddates.example.com/wrong</link>
+      <guid>bd-003</guid>
+      <pubDate>not-a-date-at-all</pubDate>
+      <description>This date cannot be parsed by any means.</description>
+    </item>
+    <item>
+      <title>Unix Timestamp Date</title>
+      <link>https://baddates.example.com/unix</link>
+      <guid>bd-004</guid>
+      <pubDate>1705312000</pubDate>
+      <description>A raw Unix timestamp where a date string is expected.</description>
+    </item>
+    <item>
+      <title>No Date At All</title>
+      <link>https://baddates.example.com/nodate</link>
+      <guid>bd-005</guid>
+      <description>This item simply has no pubDate element.</description>
+    </item>
+  </channel>
+</rss>

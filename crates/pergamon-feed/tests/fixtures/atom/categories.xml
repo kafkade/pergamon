@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Tagged Feed</title>
+  <link href="https://tagged.example.com" rel="alternate"/>
+  <link href="https://tagged.example.com/feed.xml" rel="self"/>
+  <id>urn:uuid:tagged-feed</id>
+  <updated>2024-01-15T10:00:00Z</updated>
+  <entry>
+    <title>Heavily Categorized Entry</title>
+    <link href="https://tagged.example.com/categorized"/>
+    <id>tagged-001</id>
+    <updated>2024-01-15T10:00:00Z</updated>
+    <category term="rust" label="Rust" scheme="https://tagged.example.com/categories"/>
+    <category term="programming" label="Programming"/>
+    <category term="systems" label="Systems Programming"/>
+    <category term="performance" label="Performance"/>
+    <summary>An entry with many categories to test tag extraction.</summary>
+  </entry>
+  <entry>
+    <title>Uncategorized Entry</title>
+    <link href="https://tagged.example.com/uncategorized"/>
+    <id>tagged-002</id>
+    <updated>2024-01-10T10:00:00Z</updated>
+    <summary>This entry has no categories at all.</summary>
+  </entry>
+</feed>

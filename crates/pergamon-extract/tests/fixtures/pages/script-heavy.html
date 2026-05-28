@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Tracking and Scripts Page</title>
+</head>
+<body>
+  <script>
+    // Google Analytics
+    (function(i,s,o,g,r,a,m){i['GoogleAnalyticsObject']=r;i[r]=i[r]||function(){
+    (i[r].q=i[r].q||[]).push(arguments)},i[r].l=1*new Date();a=s.createElement(o),
+    m=s.getElementsByTagName(o)[0];a.async=1;a.src=g;m.parentNode.insertBefore(a,m)
+    })(window,document,'script','//www.google-analytics.com/analytics.js','ga');
+    ga('create', 'UA-XXXXX-Y', 'auto');
+    ga('send', 'pageview');
+  </script>
+  <script>
+    // Facebook Pixel
+    !function(f,b,e,v,n,t,s){if(f.fbq)return;n=f.fbq=function(){n.callMethod?
+    n.callMethod.apply(n,arguments):n.queue.push(arguments)};if(!f._fbq)f._fbq=n;
+    n.push=n;n.loaded=!0;n.version='2.0';n.queue=[];t=b.createElement(e);t.async=!0;
+    t.src=v;s=b.getElementsByTagName(e)[0];s.parentNode.insertBefore(t,s)}(window,
+    document,'script','https://connect.facebook.net/en_US/fbevents.js');
+    fbq('init', '1234567890');
+    fbq('track', 'PageView');
+  </script>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "Article",
+    "headline": "Script-Heavy Page Content",
+    "author": {"@type": "Person", "name": "Tech Writer"},
+    "datePublished": "2024-01-15"
+  }
+  </script>
+  <article>
+    <h1>The Actual Article Content</h1>
+    <p>Despite all the tracking scripts, ad tags, and JSON-LD structured data on this page, the actual article content is quite brief.</p>
+    <p>A good content extractor should strip all the script elements and focus on the textual content within the article tag.</p>
+    <p>This tests whether the extractor properly handles pages where script content vastly outweighs article content in terms of bytes.</p>
+  </article>
+  <script>
+    // More tracking
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+    gtag('config', 'G-XXXXXXXXXX');
+  </script>
+  <script src="https://ads.example.com/ad-loader.js" async></script>
+  <script src="https://cdn.example.com/vendor.bundle.js"></script>
+  <script src="https://cdn.example.com/app.bundle.js"></script>
+</body>
+</html>

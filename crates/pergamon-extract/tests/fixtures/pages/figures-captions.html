@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Understanding Container Orchestration - Visual Guide</title>
+  <meta name="author" content="DevOps Illustrated">
+</head>
+<body>
+  <article>
+    <h1>Understanding Container Orchestration: A Visual Guide</h1>
+    <p>Container orchestration manages the lifecycle of containers across a cluster. Here's how the key concepts fit together.</p>
+
+    <figure>
+      <img src="/images/architecture-overview.svg" alt="Container orchestration architecture showing nodes, pods, and services">
+      <figcaption>Figure 1: High-level architecture of a container orchestration platform. Nodes host pods, which contain one or more containers. Services provide stable networking endpoints.</figcaption>
+    </figure>
+
+    <h2>Scheduling</h2>
+    <p>The scheduler decides which node should run each pod. It considers resource requirements, affinity rules, and current cluster utilization.</p>
+
+    <figure>
+      <img src="/images/scheduling-flow.svg" alt="Flowchart showing the scheduling decision process">
+      <figcaption>Figure 2: The scheduling decision flow. The scheduler evaluates constraints, scores candidate nodes, and binds the pod to the best match.</figcaption>
+    </figure>
+
+    <h2>Service Discovery</h2>
+    <p>Services provide a stable DNS name and IP address for a set of pods. This decouples service consumers from the specific pods that implement the service.</p>
+
+    <figure>
+      <img src="/images/service-discovery.svg" alt="Diagram showing service discovery with DNS and load balancing">
+      <figcaption>Figure 3: Service discovery via DNS. The kube-dns service resolves service names to ClusterIP addresses, which are load-balanced across healthy pod endpoints.</figcaption>
+    </figure>
+
+    <h2>Self-Healing</h2>
+    <p>When a pod crashes or a node goes down, the orchestrator automatically reschedules affected workloads. This self-healing behavior is one of the key benefits of container orchestration.</p>
+
+    <p>Understanding these concepts is the foundation for designing resilient, scalable containerized applications.</p>
+  </article>
+</body>
+</html>

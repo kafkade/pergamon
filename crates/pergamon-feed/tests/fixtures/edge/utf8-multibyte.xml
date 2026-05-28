@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>多言語テクノロジーブログ</title>
+    <link>https://multilang.example.com</link>
+    <description>テクノロジーに関する多言語ブログ — A multilingual technology blog</description>
+    <item>
+      <title>Rustで書く日本語テキスト処理 🦀</title>
+      <link>https://multilang.example.com/rust-japanese</link>
+      <guid>utf8-001</guid>
+      <description>Rustの文字列処理は、UTF-8をネイティブにサポートしているため、日本語テキストの処理に最適です。絵文字も問題なく扱えます: 🎉🚀✨</description>
+      <pubDate>Mon, 15 Jan 2024 10:00:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Ñandú: programación en español con caracteres especiales</title>
+      <link>https://multilang.example.com/spanish</link>
+      <guid>utf8-002</guid>
+      <description>¡Hola! Este artículo prueba acentos (é, ü, ñ), signos de interrogación invertidos (¿?), y más.</description>
+    </item>
+    <item>
+      <title>Обработка текста на кириллице</title>
+      <link>https://multilang.example.com/cyrillic</link>
+      <guid>utf8-003</guid>
+      <description>Тестирование кириллических символов в RSS-ленте. Привет, мир!</description>
+    </item>
+    <item>
+      <title>中文内容测试</title>
+      <link>https://multilang.example.com/chinese</link>
+      <guid>utf8-004</guid>
+      <description>这是一个中文RSS内容测试。包含简体中文字符。</description>
+    </item>
+    <item>
+      <title>مقال باللغة العربية</title>
+      <link>https://multilang.example.com/arabic</link>
+      <guid>utf8-005</guid>
+      <description>هذا مقال تجريبي باللغة العربية لاختبار دعم النص من اليمين إلى اليسار.</description>
+    </item>
+  </channel>
+</rss>

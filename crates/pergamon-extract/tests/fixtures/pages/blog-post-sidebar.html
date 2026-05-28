@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Understanding Async Rust - Tech Insights</title>
+  <meta name="author" content="Marcus Wei">
+  <meta name="description" content="A deep dive into async/await in Rust and how the executor model differs from other languages.">
+  <meta property="og:title" content="Understanding Async Rust">
+  <meta property="og:site_name" content="Tech Insights">
+</head>
+<body>
+  <div id="page">
+    <header id="site-header">
+      <h1 class="site-title"><a href="/">Tech Insights</a></h1>
+      <nav class="main-nav">
+        <ul>
+          <li><a href="/">Home</a></li>
+          <li><a href="/topics">Topics</a></li>
+          <li><a href="/about">About</a></li>
+          <li><a href="/contact">Contact</a></li>
+        </ul>
+      </nav>
+    </header>
+    <div id="content-wrapper">
+      <main id="main-content">
+        <article class="post">
+          <h1 class="post-title">Understanding Async Rust</h1>
+          <div class="post-meta">
+            <span class="author">Marcus Wei</span>
+            <time datetime="2024-01-12">January 12, 2024</time>
+            <span class="reading-time">8 min read</span>
+          </div>
+          <div class="post-body">
+            <p>Rust's async/await syntax looks familiar if you've used JavaScript or Python, but the underlying model is fundamentally different. Understanding these differences is key to writing efficient async Rust code.</p>
+            <h2>Futures Are Lazy</h2>
+            <p>In JavaScript, calling an async function immediately starts execution. In Rust, creating a future does nothing until you <code>.await</code> it or hand it to an executor. This is the lazy evaluation model.</p>
+            <pre><code>async fn fetch_data() -> Result&lt;Data, Error&gt; {
+    // This doesn't run until awaited
+    let response = client.get(url).send().await?;
+    response.json().await
+}</code></pre>
+            <h2>Executors Are External</h2>
+            <p>Rust doesn't ship with a built-in async runtime. You choose your executor: Tokio, async-std, smol, or even write your own. This gives you control over scheduling, but means you need to make a choice.</p>
+            <h2>Pin and Unpin</h2>
+            <p>Async functions in Rust are compiled to state machines that may contain self-references. The <code>Pin</code> type ensures these self-referential futures can't be moved in memory, which would invalidate internal pointers.</p>
+            <p>Most of the time, you don't need to think about <code>Pin</code> directly — <code>.await</code> handles it for you. But when writing combinators or manual futures, it becomes important.</p>
+            <h2>Conclusion</h2>
+            <p>Async Rust is powerful but has a steeper learning curve than other languages. The payoff is zero-cost abstractions and predictable performance without garbage collection pauses.</p>
+          </div>
+        </article>
+      </main>
+      <aside id="sidebar">
+        <div class="widget">
+          <h3>Popular Posts</h3>
+          <ul>
+            <li><a href="/post1">Getting Started with Rust</a></li>
+            <li><a href="/post2">Rust vs Go: A Comparison</a></li>
+            <li><a href="/post3">Building CLIs in Rust</a></li>
+          </ul>
+        </div>
+        <div class="widget">
+          <h3>Categories</h3>
+          <ul>
+            <li><a href="/cat/rust">Rust (42)</a></li>
+            <li><a href="/cat/go">Go (28)</a></li>
+            <li><a href="/cat/typescript">TypeScript (35)</a></li>
+          </ul>
+        </div>
+        <div class="widget ad">
+          <p>Advertisement: Learn Rust in 30 days!</p>
+        </div>
+      </aside>
+    </div>
+    <footer id="site-footer">
+      <p>&copy; 2024 Tech Insights. All rights reserved.</p>
+      <nav class="footer-nav">
+        <a href="/privacy">Privacy</a> | <a href="/terms">Terms</a>
+      </nav>
+    </footer>
+  </div>
+</body>
+</html>

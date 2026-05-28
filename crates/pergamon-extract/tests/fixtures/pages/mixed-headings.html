@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Mixed Headings Article</title>
+  <meta name="author" content="Style Mixer">
+</head>
+<body>
+  <article>
+    <h1>The Main Title</h1>
+    <p>Introduction paragraph setting the stage.</p>
+
+    <h3>Skipping H2 Entirely</h3>
+    <p>This section jumps from H1 to H3, which is technically invalid but extremely common in real-world HTML.</p>
+
+    <h2>Back to H2</h2>
+    <p>Now we're at a proper H2.</p>
+
+    <h4>And Straight to H4</h4>
+    <p>Another skip in heading hierarchy.</p>
+
+    <h2>Another H2 Section</h2>
+    <h2>Two H2s in a Row</h2>
+    <p>The previous two headings were consecutive H2 elements with no content between them.</p>
+
+    <h3>A Subsection</h3>
+    <p>Content under the subsection.</p>
+
+    <h6>All the Way to H6</h6>
+    <p>Testing the deepest heading level.</p>
+
+    <h1>A Second H1?!</h1>
+    <p>Some pages have multiple H1 elements. This is poor HTML but the extractor should handle it gracefully.</p>
+    <p>The article should still be extractable despite the chaotic heading structure.</p>
+  </article>
+</body>
+</html>

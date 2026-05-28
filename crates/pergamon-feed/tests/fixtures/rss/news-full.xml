@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+  <channel>
+    <title>Global Tech Report</title>
+    <link>https://globaltechreport.com</link>
+    <description>Breaking technology news and analysis</description>
+    <language>en</language>
+    <item>
+      <title>AI Regulation Frameworks Compared: EU vs US vs China</title>
+      <link>https://globaltechreport.com/ai-regulation-2024</link>
+      <guid>gtr-ai-reg-2024</guid>
+      <dc:creator>Maria Santos</dc:creator>
+      <pubDate>Sat, 20 Jan 2024 06:00:00 GMT</pubDate>
+      <description>A comprehensive comparison of how three major powers approach AI governance.</description>
+      <content:encoded><![CDATA[<article><h2>AI Regulation Frameworks Compared</h2><p>The European Union's AI Act, America's executive orders, and China's algorithmic regulations represent fundamentally different philosophies on governing artificial intelligence.</p><p>This analysis examines each approach through the lenses of innovation, safety, and civil liberties.</p><h3>EU: Risk-Based Classification</h3><p>The EU AI Act classifies AI systems by risk level, from minimal to unacceptable. High-risk systems face stringent requirements including transparency, human oversight, and data governance.</p></article>]]></content:encoded>
+      <category>AI</category>
+      <category>Regulation</category>
+      <category>Policy</category>
+    </item>
+    <item>
+      <title>Quantum Computing Milestone: 1000 Logical Qubits</title>
+      <link>https://globaltechreport.com/quantum-1000</link>
+      <guid>gtr-quantum-1000</guid>
+      <dc:creator>James Wright</dc:creator>
+      <pubDate>Fri, 19 Jan 2024 12:00:00 GMT</pubDate>
+      <description>Researchers achieve a new record in error-corrected quantum computing.</description>
+      <content:encoded><![CDATA[<p>In a breakthrough published in Nature, a team of physicists demonstrated a quantum processor with 1000 logical qubits, surpassing previous records by an order of magnitude.</p>]]></content:encoded>
+      <category>Quantum Computing</category>
+    </item>
+    <item>
+      <title>The Browser Wars Are Back: A New Challenger Appears</title>
+      <link>https://globaltechreport.com/browser-wars-2024</link>
+      <guid>gtr-browser-2024</guid>
+      <dc:creator>Kenji Tanaka</dc:creator>
+      <pubDate>Thu, 18 Jan 2024 09:00:00 GMT</pubDate>
+      <description>A privacy-focused browser built on a completely new rendering engine gains traction.</description>
+      <category>Browsers</category>
+      <category>Privacy</category>
+    </item>
+    <item>
+      <title>Open Source Funding Crisis: Maintainer Burnout Reaches Record Levels</title>
+      <link>https://globaltechreport.com/oss-funding</link>
+      <guid>gtr-oss-2024</guid>
+      <dc:creator>Priya Sharma</dc:creator>
+      <pubDate>Wed, 17 Jan 2024 15:30:00 GMT</pubDate>
+      <description>A survey of 5,000 open source maintainers reveals widespread burnout and financial strain.</description>
+      <category>Open Source</category>
+    </item>
+    <item>
+      <title>5G Coverage Map: Where We Stand in 2024</title>
+      <link>https://globaltechreport.com/5g-map-2024</link>
+      <guid>gtr-5g-2024</guid>
+      <dc:creator>Carlos Rivera</dc:creator>
+      <pubDate>Tue, 16 Jan 2024 11:00:00 GMT</pubDate>
+      <description>An interactive analysis of global 5G deployment progress and gaps.</description>
+      <category>5G</category>
+      <category>Telecommunications</category>
+    </item>
+  </channel>
+</rss>

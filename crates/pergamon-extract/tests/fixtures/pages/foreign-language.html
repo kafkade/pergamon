@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>Rustプログラミング入門 - 日本語ブログ</title>
+  <meta name="author" content="田中太郎">
+  <meta name="description" content="Rustプログラミング言語の基本を日本語で解説します。">
+  <meta property="og:title" content="Rustプログラミング入門">
+  <meta property="og:site_name" content="日本語ブログ">
+</head>
+<body>
+  <article>
+    <h1>Rustプログラミング入門</h1>
+    <p class="author">著者: 田中太郎 · 2024年1月15日</p>
+
+    <h2>なぜRustなのか？</h2>
+    <p>Rustは安全性とパフォーマンスを両立するプログラミング言語です。メモリ安全性をコンパイル時に保証しながら、C++に匹敵する実行速度を実現します。</p>
+
+    <h2>所有権システム</h2>
+    <p>Rustの最も特徴的な機能は所有権（ownership）システムです。各値には「所有者」と呼ばれる変数があり、所有者がスコープを外れると値は自動的に破棄されます。</p>
+
+    <pre><code>fn main() {
+    let s1 = String::from("こんにちは");
+    let s2 = s1; // s1の所有権がs2に移動
+    // println!("{}", s1); // エラー: s1はもう使えない
+    println!("{}", s2); // OK: s2が所有者
+}</code></pre>
+
+    <h2>借用と参照</h2>
+    <p>所有権を移動せずに値を使いたい場合は、参照（&amp;）を使います。これを「借用」と呼びます。</p>
+
+    <h2>まとめ</h2>
+    <p>Rustの学習曲線は急ですが、一度身につければ安全で高速なプログラムを書けるようになります。ぜひ挑戦してみてください！🦀</p>
+  </article>
+</body>
+</html>

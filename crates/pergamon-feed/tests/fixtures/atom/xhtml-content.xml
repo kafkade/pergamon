@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>XHTML Content Feed</title>
+  <link href="https://xhtml.example.com" rel="alternate"/>
+  <link href="https://xhtml.example.com/feed.xml" rel="self"/>
+  <id>urn:uuid:xhtml-feed</id>
+  <updated>2024-01-15T10:00:00Z</updated>
+  <entry>
+    <title>Structured Content Test</title>
+    <link href="https://xhtml.example.com/structured"/>
+    <id>xhtml-001</id>
+    <updated>2024-01-15T10:00:00Z</updated>
+    <content type="xhtml">
+      <div xmlns="http://www.w3.org/1999/xhtml">
+        <h2>Inline XHTML Content</h2>
+        <p>This entry uses <code>type="xhtml"</code> to embed structured HTML directly in the feed, rather than escaping it.</p>
+        <ul>
+          <li>Item one with <strong>bold</strong></li>
+          <li>Item two with <em>emphasis</em></li>
+          <li>Item three with a <a href="https://example.com">link</a></li>
+        </ul>
+      </div>
+    </content>
+  </entry>
+</feed>

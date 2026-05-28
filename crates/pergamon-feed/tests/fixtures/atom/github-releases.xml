@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>example-lib releases</title>
+  <link href="https://github.com/example-org/example-lib/releases" rel="alternate"/>
+  <link href="https://github.com/example-org/example-lib/releases.atom" rel="self"/>
+  <id>tag:github.com,2008:https://github.com/example-org/example-lib/releases</id>
+  <updated>2024-01-20T16:00:00Z</updated>
+  <entry>
+    <title>v2.1.0</title>
+    <link href="https://github.com/example-org/example-lib/releases/tag/v2.1.0" rel="alternate"/>
+    <id>tag:github.com,2008:Repository/12345/v2.1.0</id>
+    <updated>2024-01-20T16:00:00Z</updated>
+    <author><name>releasebot</name></author>
+    <content type="html">&lt;h2&gt;What's Changed&lt;/h2&gt;&lt;ul&gt;&lt;li&gt;Added async iterator support&lt;/li&gt;&lt;li&gt;Fixed memory leak in connection pool&lt;/li&gt;&lt;li&gt;Upgraded minimum Rust version to 1.75&lt;/li&gt;&lt;/ul&gt;&lt;p&gt;&lt;strong&gt;Full Changelog&lt;/strong&gt;: &lt;a href="https://github.com/example-org/example-lib/compare/v2.0.0...v2.1.0"&gt;v2.0.0...v2.1.0&lt;/a&gt;&lt;/p&gt;</content>
+  </entry>
+  <entry>
+    <title>v2.0.0</title>
+    <link href="https://github.com/example-org/example-lib/releases/tag/v2.0.0" rel="alternate"/>
+    <id>tag:github.com,2008:Repository/12345/v2.0.0</id>
+    <updated>2024-01-05T10:00:00Z</updated>
+    <author><name>releasebot</name></author>
+    <content type="html">&lt;h2&gt;Breaking Changes&lt;/h2&gt;&lt;ul&gt;&lt;li&gt;Removed deprecated API methods&lt;/li&gt;&lt;li&gt;Changed default timeout from 30s to 10s&lt;/li&gt;&lt;/ul&gt;&lt;h2&gt;New Features&lt;/h2&gt;&lt;ul&gt;&lt;li&gt;Connection pooling&lt;/li&gt;&lt;li&gt;Retry middleware&lt;/li&gt;&lt;/ul&gt;</content>
+  </entry>
+  <entry>
+    <title>v1.9.3</title>
+    <link href="https://github.com/example-org/example-lib/releases/tag/v1.9.3" rel="alternate"/>
+    <id>tag:github.com,2008:Repository/12345/v1.9.3</id>
+    <updated>2023-12-20T08:00:00Z</updated>
+    <author><name>releasebot</name></author>
+    <content type="html">&lt;p&gt;Patch release: fixed TLS certificate validation on Windows.&lt;/p&gt;</content>
+  </entry>
+</feed>

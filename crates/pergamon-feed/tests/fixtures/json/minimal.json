@@ -1,0 +1,10 @@
+{
+  "version": "https://jsonfeed.org/version/1.1",
+  "title": "Minimal JSON Feed",
+  "items": [
+    {
+      "id": "min-001",
+      "content_text": "A single item with only required fields."
+    }
+  ]
+}

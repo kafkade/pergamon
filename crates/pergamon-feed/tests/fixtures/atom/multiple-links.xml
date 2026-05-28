@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Multi-Link Feed</title>
+  <link href="https://multilink.example.com" rel="alternate" type="text/html"/>
+  <link href="https://multilink.example.com/feed.xml" rel="self" type="application/atom+xml"/>
+  <link href="https://multilink.example.com/hub" rel="hub"/>
+  <id>urn:uuid:multilink-feed</id>
+  <updated>2024-01-15T10:00:00Z</updated>
+  <entry>
+    <title>Entry With Multiple Links</title>
+    <link href="https://multilink.example.com/post" rel="alternate" type="text/html"/>
+    <link href="https://multilink.example.com/post.json" rel="alternate" type="application/json"/>
+    <link href="https://multilink.example.com/post/replies" rel="replies"/>
+    <link href="https://multilink.example.com/post/edit" rel="edit"/>
+    <id>multilink-001</id>
+    <updated>2024-01-15T10:00:00Z</updated>
+    <summary>This entry has multiple link elements with different rel attributes.</summary>
+  </entry>
+</feed>

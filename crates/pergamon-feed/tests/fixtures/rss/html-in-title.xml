@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>HTML &amp; Entity Test</title>
+    <link>https://entities.example.com</link>
+    <description>Feed with HTML entities and special characters in titles</description>
+    <item>
+      <title>C++ Templates: A &quot;Modern&quot; Approach</title>
+      <link>https://entities.example.com/cpp-templates</link>
+      <guid>ent-001</guid>
+      <description>Exploring &lt;template&gt; metaprogramming &amp; SFINAE tricks.</description>
+      <pubDate>Sun, 14 Jan 2024 10:00:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>10 Tips for Writing Better SQL — #5 Will Surprise You!</title>
+      <link>https://entities.example.com/sql-tips</link>
+      <guid>ent-002</guid>
+      <description>From JOINs to CTEs, improve your query game.</description>
+    </item>
+    <item>
+      <title>Understanding the ≠ and ≤ Operators</title>
+      <link>https://entities.example.com/operators</link>
+      <guid>ent-003</guid>
+      <description>Unicode operators in programming languages: ≠, ≤, ≥, ∈, ∉</description>
+    </item>
+  </channel>
+</rss>

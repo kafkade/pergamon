@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Enterprise Solutions Corp</title>
+</head>
+<body>
+  <nav id="top-nav">
+    <div class="nav-container">
+      <a href="/" class="logo">ESC</a>
+      <ul class="main-menu">
+        <li><a href="/products">Products</a>
+          <ul class="submenu">
+            <li><a href="/products/cloud">Cloud Platform</a></li>
+            <li><a href="/products/analytics">Analytics Suite</a></li>
+            <li><a href="/products/security">Security Center</a></li>
+            <li><a href="/products/devops">DevOps Tools</a></li>
+          </ul>
+        </li>
+        <li><a href="/solutions">Solutions</a>
+          <ul class="submenu">
+            <li><a href="/solutions/enterprise">Enterprise</a></li>
+            <li><a href="/solutions/startup">Startups</a></li>
+            <li><a href="/solutions/government">Government</a></li>
+          </ul>
+        </li>
+        <li><a href="/resources">Resources</a>
+          <ul class="submenu">
+            <li><a href="/blog">Blog</a></li>
+            <li><a href="/docs">Documentation</a></li>
+            <li><a href="/tutorials">Tutorials</a></li>
+            <li><a href="/webinars">Webinars</a></li>
+            <li><a href="/case-studies">Case Studies</a></li>
+          </ul>
+        </li>
+        <li><a href="/pricing">Pricing</a></li>
+        <li><a href="/company">Company</a>
+          <ul class="submenu">
+            <li><a href="/about">About</a></li>
+            <li><a href="/careers">Careers</a></li>
+            <li><a href="/press">Press</a></li>
+            <li><a href="/contact">Contact</a></li>
+          </ul>
+        </li>
+      </ul>
+      <div class="nav-actions">
+        <a href="/login">Log In</a>
+        <a href="/signup" class="btn-primary">Start Free Trial</a>
+      </div>
+    </div>
+  </nav>
+  <div class="breadcrumb">
+    <a href="/">Home</a> &gt; <a href="/blog">Blog</a> &gt; <a href="/blog/engineering">Engineering</a> &gt; <span>Scaling Our Infrastructure</span>
+  </div>
+  <main>
+    <article>
+      <h1>How We Scaled Our Infrastructure to Handle 10 Million Requests Per Second</h1>
+      <p>By the Engineering Team · January 15, 2024</p>
+      <p>When we hit our first million requests per second, we thought we had it figured out. We were wrong. Here's the story of scaling from 1M to 10M RPS.</p>
+      <p>The key insight was that our bottleneck wasn't CPU or memory — it was coordination. Every request that required cross-service communication added latency that compounded under load.</p>
+      <p>By redesigning our service mesh to use event-driven communication and aggressive caching at the edge, we reduced inter-service calls by 80% and achieved our 10M RPS target.</p>
+    </article>
+  </main>
+  <footer>
+    <div class="footer-columns">
+      <div class="footer-col">
+        <h4>Products</h4>
+        <ul>
+          <li><a href="/products/cloud">Cloud Platform</a></li>
+          <li><a href="/products/analytics">Analytics</a></li>
+          <li><a href="/products/security">Security</a></li>
+        </ul>
+      </div>
+      <div class="footer-col">
+        <h4>Resources</h4>
+        <ul>
+          <li><a href="/docs">Documentation</a></li>
+          <li><a href="/api">API Reference</a></li>
+          <li><a href="/status">Status Page</a></li>
+        </ul>
+      </div>
+      <div class="footer-col">
+        <h4>Company</h4>
+        <ul>
+          <li><a href="/about">About</a></li>
+          <li><a href="/careers">Careers</a></li>
+          <li><a href="/press">Press Kit</a></li>
+        </ul>
+      </div>
+      <div class="footer-col">
+        <h4>Legal</h4>
+        <ul>
+          <li><a href="/terms">Terms of Service</a></li>
+          <li><a href="/privacy">Privacy Policy</a></li>
+          <li><a href="/cookies">Cookie Policy</a></li>
+          <li><a href="/gdpr">GDPR</a></li>
+        </ul>
+      </div>
+    </div>
+    <div class="footer-bottom">
+      <p>&copy; 2024 Enterprise Solutions Corp. All rights reserved.</p>
+    </div>
+  </footer>
+</body>
+</html>

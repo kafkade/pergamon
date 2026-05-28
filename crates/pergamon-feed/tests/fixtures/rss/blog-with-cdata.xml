@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Dev Notes</title>
+    <link>https://devnotes.example.com</link>
+    <description>Short technical notes with CDATA</description>
+    <item>
+      <title><![CDATA[Using <em>Generics</em> in TypeScript]]></title>
+      <link>https://devnotes.example.com/ts-generics</link>
+      <guid>ts-generics-2024</guid>
+      <description><![CDATA[<p>TypeScript generics let you write <strong>type-safe</strong> reusable code. Here's a quick primer with examples using <code>Array&lt;T&gt;</code> and custom constraints.</p>]]></description>
+      <pubDate>Wed, 10 Jan 2024 08:30:00 GMT</pubDate>
+    </item>
+    <item>
+      <title><![CDATA[Why I Prefer &&-chaining Over if/else]]></title>
+      <link>https://devnotes.example.com/and-chaining</link>
+      <guid>and-chaining-2024</guid>
+      <description><![CDATA[<p>A controversial take on control flow. The <code>&amp;&amp;</code> operator can make scripts more readable — sometimes.</p>]]></description>
+      <pubDate>Mon, 08 Jan 2024 14:00:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>

@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+  <channel>
+    <title>Systems &amp; Signals</title>
+    <link>https://systemsandsignals.fm</link>
+    <description>A podcast about distributed systems, infrastructure, and the people who build them.</description>
+    <language>en-us</language>
+    <itunes:author>Systems &amp; Signals Team</itunes:author>
+    <itunes:category text="Technology"/>
+    <itunes:image href="https://systemsandsignals.fm/artwork.jpg"/>
+    <item>
+      <title>Episode 42: CRDTs in Production</title>
+      <link>https://systemsandsignals.fm/ep42</link>
+      <guid>ss-ep42</guid>
+      <description>We talk to the team behind a production CRDT database about the real challenges of conflict-free replication.</description>
+      <pubDate>Fri, 12 Jan 2024 06:00:00 GMT</pubDate>
+      <enclosure url="https://cdn.systemsandsignals.fm/ep42.mp3" length="45000000" type="audio/mpeg"/>
+      <itunes:duration>3600</itunes:duration>
+      <itunes:episode>42</itunes:episode>
+      <itunes:season>3</itunes:season>
+    </item>
+    <item>
+      <title>Episode 41: The Scheduler Is a Lie</title>
+      <link>https://systemsandsignals.fm/ep41</link>
+      <guid>ss-ep41</guid>
+      <description>Linux scheduling, cgroups, and why your latency numbers are probably wrong.</description>
+      <pubDate>Fri, 05 Jan 2024 06:00:00 GMT</pubDate>
+      <enclosure url="https://cdn.systemsandsignals.fm/ep41.mp3" length="38000000" type="audio/mpeg"/>
+      <itunes:duration>2700</itunes:duration>
+      <itunes:episode>41</itunes:episode>
+      <itunes:season>3</itunes:season>
+    </item>
+    <item>
+      <title>Episode 40: Consensus Without Paxos</title>
+      <link>https://systemsandsignals.fm/ep40</link>
+      <guid>ss-ep40</guid>
+      <description>Exploring Raft, EPaxos, and newer consensus algorithms that aim to be more understandable than classic Paxos.</description>
+      <pubDate>Fri, 29 Dec 2023 06:00:00 GMT</pubDate>
+      <enclosure url="https://cdn.systemsandsignals.fm/ep40.mp3" length="52000000" type="audio/mpeg"/>
+      <itunes:duration>4200</itunes:duration>
+      <itunes:episode>40</itunes:episode>
+      <itunes:season>3</itunes:season>
+    </item>
+  </channel>
+</rss>
