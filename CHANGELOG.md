@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-28
+
 ### Added
 
 - `highlight add` command: create highlights from any content item with optional `--note`, `--color`, and `--tag` flags
