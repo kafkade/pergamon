@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+  <channel>
+    <title>Long Content Feed</title>
+    <link>https://longcontent.example.com</link>
+    <description>A feed with a very long article body to test content handling</description>
+    <item>
+      <title>The Comprehensive Guide to Everything</title>
+      <link>https://longcontent.example.com/everything</link>
+      <guid>long-001</guid>
+      <pubDate>Mon, 15 Jan 2024 10:00:00 GMT</pubDate>
+      <description>An extremely detailed guide covering many topics.</description>
+      <content:encoded><![CDATA[
+<article>
+<h1>The Comprehensive Guide to Everything</h1>
+
+<h2>Chapter 1: Introduction</h2>
+<p>This guide aims to cover a broad range of topics in software engineering. From data structures to system design, from testing strategies to deployment practices, we will explore each topic in depth.</p>
+<p>The journey of a thousand miles begins with a single step. In software engineering, that step is usually "Hello, World!" — but what comes after is far more interesting.</p>
+<p>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.</p>
+
+<h2>Chapter 2: Data Structures</h2>
+<p>Data structures are the foundation of efficient algorithms. Choosing the right data structure can mean the difference between an algorithm that runs in milliseconds and one that takes hours.</p>
+<p>Arrays provide O(1) random access but O(n) insertion. Linked lists offer O(1) insertion at known positions but O(n) traversal. Hash maps give average O(1) lookup but worst-case O(n). Trees balance these trade-offs with O(log n) for most operations.</p>
+<p>Understanding when to use each structure is a skill that develops with practice. Profile your code, measure your data, and choose accordingly.</p>
+
+<h2>Chapter 3: System Design</h2>
+<p>Designing systems at scale requires thinking about consistency, availability, and partition tolerance. The CAP theorem tells us we can only have two of three, but in practice the trade-offs are more nuanced.</p>
+<p>Consider a social media timeline: eventual consistency is acceptable because users tolerate seeing posts a few seconds late. But for a banking transaction, strong consistency is non-negotiable.</p>
+<p>Load balancing, caching, database sharding, message queues, and service discovery are all tools in the system designer's toolkit. Each adds complexity but solves specific scaling challenges.</p>
+
+<h2>Chapter 4: Testing</h2>
+<p>Testing is not about finding bugs — it's about building confidence. Unit tests verify individual functions. Integration tests verify component interactions. End-to-end tests verify user workflows.</p>
+<p>The testing pyramid suggests many unit tests, fewer integration tests, and even fewer E2E tests. But some teams find a testing diamond or trophy shape works better for their domain.</p>
+
+<h2>Chapter 5: Deployment</h2>
+<p>Modern deployment practices include continuous integration, continuous deployment, blue-green deployments, canary releases, and feature flags. Each strategy manages risk in different ways.</p>
+<p>Infrastructure as code, container orchestration, and observability platforms have transformed how we deploy and operate software. The days of SSH-ing into production servers should be behind us.</p>
+
+<h2>Conclusion</h2>
+<p>Software engineering is a discipline that rewards both depth and breadth. Master the fundamentals, stay curious about new developments, and never stop learning.</p>
+</article>
+]]></content:encoded>
+    </item>
+  </channel>
+</rss>

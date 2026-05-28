@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Dateless Blog</title>
+    <link>https://dateless.example.com</link>
+    <description>A feed where items have no publication dates</description>
+    <item>
+      <title>Timeless Thoughts on Architecture</title>
+      <link>https://dateless.example.com/architecture</link>
+      <guid>dateless-001</guid>
+      <description>Architecture decisions should be made with care, not haste.</description>
+    </item>
+    <item>
+      <title>Why Documentation Matters</title>
+      <link>https://dateless.example.com/docs</link>
+      <guid>dateless-002</guid>
+      <description>Good documentation is the most undervalued engineering practice.</description>
+    </item>
+  </channel>
+</rss>

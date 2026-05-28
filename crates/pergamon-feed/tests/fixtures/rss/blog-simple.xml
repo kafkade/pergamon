@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Thoughtful Engineering</title>
+    <link>https://thoughtful.engineering</link>
+    <description>A blog about software craftsmanship and engineering culture</description>
+    <language>en-us</language>
+    <lastBuildDate>Mon, 15 Jan 2024 10:00:00 GMT</lastBuildDate>
+    <item>
+      <title>Why We Chose Rust for Our Backend</title>
+      <link>https://thoughtful.engineering/rust-backend</link>
+      <guid isPermaLink="false">post-001</guid>
+      <description>After years of Go, we switched our core services to Rust. Here's what we learned.</description>
+      <pubDate>Mon, 15 Jan 2024 10:00:00 GMT</pubDate>
+      <author>alice@thoughtful.engineering (Alice Chen)</author>
+    </item>
+    <item>
+      <title>The Art of Code Review</title>
+      <link>https://thoughtful.engineering/code-review</link>
+      <guid isPermaLink="false">post-002</guid>
+      <description>Code review is not about finding bugs. It's about sharing knowledge.</description>
+      <pubDate>Mon, 08 Jan 2024 10:00:00 GMT</pubDate>
+      <author>bob@thoughtful.engineering (Bob Park)</author>
+    </item>
+    <item>
+      <title>Observability Beyond Metrics</title>
+      <link>https://thoughtful.engineering/observability</link>
+      <guid isPermaLink="false">post-003</guid>
+      <description>Metrics, logs, and traces are just the beginning. True observability requires a cultural shift.</description>
+      <pubDate>Mon, 01 Jan 2024 10:00:00 GMT</pubDate>
+      <author>alice@thoughtful.engineering (Alice Chen)</author>
+    </item>
+  </channel>
+</rss>

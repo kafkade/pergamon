@@ -1,0 +1,44 @@
+{
+  "version": "https://jsonfeed.org/version/1.1",
+  "title": "Podcast with Attachments",
+  "home_page_url": "https://podcast-json.example.com",
+  "feed_url": "https://podcast-json.example.com/feed.json",
+  "items": [
+    {
+      "id": "pod-json-001",
+      "url": "https://podcast-json.example.com/ep1",
+      "title": "Episode 1: Getting Started",
+      "content_text": "In this first episode, we discuss the basics.",
+      "date_published": "2024-01-15T06:00:00Z",
+      "attachments": [
+        {
+          "url": "https://cdn.podcast-json.example.com/ep1.mp3",
+          "mime_type": "audio/mpeg",
+          "title": "Episode 1 Audio",
+          "size_in_bytes": 25000000,
+          "duration_in_seconds": 1800
+        },
+        {
+          "url": "https://cdn.podcast-json.example.com/ep1-transcript.txt",
+          "mime_type": "text/plain",
+          "title": "Transcript"
+        }
+      ]
+    },
+    {
+      "id": "pod-json-002",
+      "url": "https://podcast-json.example.com/ep2",
+      "title": "Episode 2: Deep Dive",
+      "content_text": "We go deeper into the topic.",
+      "date_published": "2024-01-22T06:00:00Z",
+      "attachments": [
+        {
+          "url": "https://cdn.podcast-json.example.com/ep2.mp3",
+          "mime_type": "audio/mpeg",
+          "size_in_bytes": 35000000,
+          "duration_in_seconds": 2400
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Functional Programming Weekly</title>
+  <subtitle>Exploring pure functions, monads, and type theory</subtitle>
+  <link href="https://fpweekly.example.com" rel="alternate"/>
+  <link href="https://fpweekly.example.com/feed.xml" rel="self"/>
+  <id>urn:uuid:fpweekly-feed-id</id>
+  <updated>2024-01-18T12:00:00Z</updated>
+  <author>
+    <name>Haskell Curry Jr.</name>
+    <email>editor@fpweekly.example.com</email>
+  </author>
+  <entry>
+    <title>Algebraic Effects: Beyond Monads</title>
+    <link href="https://fpweekly.example.com/algebraic-effects" rel="alternate"/>
+    <id>fpw-algebraic-effects</id>
+    <published>2024-01-18T12:00:00Z</published>
+    <updated>2024-01-18T12:00:00Z</updated>
+    <author>
+      <name>Dr. Eugenio Moggi</name>
+    </author>
+    <summary>Algebraic effects offer a composable alternative to monad transformers for managing side effects in functional programs.</summary>
+    <content type="html">&lt;p&gt;Algebraic effects have emerged as a promising approach to managing computational effects. Unlike monads, which require explicit transformer stacking, algebraic effects allow handlers to be composed freely.&lt;/p&gt;&lt;p&gt;Languages like Koka, Eff, and OCaml 5 have adopted effect systems, showing that the idea scales to real-world use.&lt;/p&gt;</content>
+    <category term="effects" label="Effects"/>
+    <category term="type-theory" label="Type Theory"/>
+  </entry>
+  <entry>
+    <title>Dependent Types for Everyday Programming</title>
+    <link href="https://fpweekly.example.com/dependent-types"/>
+    <id>fpw-dependent-types</id>
+    <published>2024-01-11T08:00:00Z</published>
+    <updated>2024-01-12T10:00:00Z</updated>
+    <summary>Can dependent types move from academic curiosity to practical tool?</summary>
+    <content type="html">&lt;p&gt;Dependent types allow types to depend on values, enabling proofs at the type level. Idris 2 makes this practical.&lt;/p&gt;</content>
+  </entry>
+  <entry>
+    <title>The Monad Tutorial Fallacy</title>
+    <link href="https://fpweekly.example.com/monad-fallacy"/>
+    <id>fpw-monad-fallacy</id>
+    <published>2024-01-04T14:00:00Z</published>
+    <updated>2024-01-04T14:00:00Z</updated>
+    <summary>Why yet another monad tutorial probably won't help beginners.</summary>
+  </entry>
+</feed>

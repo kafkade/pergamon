@@ -1,0 +1,43 @@
+{
+  "version": "https://jsonfeed.org/version/1.1",
+  "title": "Indie Web Notes",
+  "home_page_url": "https://indieweb.example.com",
+  "feed_url": "https://indieweb.example.com/feed.json",
+  "description": "Short notes on the independent web",
+  "authors": [
+    {
+      "name": "Ada Lovelace",
+      "url": "https://indieweb.example.com/about"
+    }
+  ],
+  "language": "en-US",
+  "items": [
+    {
+      "id": "indie-001",
+      "url": "https://indieweb.example.com/webmentions-guide",
+      "title": "A Practical Guide to Webmentions",
+      "content_html": "<p>Webmentions are the indie web's answer to social media interactions. Here's how to implement them on your own site.</p><p>Step 1: Add a <code>&lt;link rel=\"webmention\"&gt;</code> to your HTML head.</p>",
+      "content_text": "Webmentions are the indie web's answer to social media interactions. Here's how to implement them on your own site.\n\nStep 1: Add a <link rel=\"webmention\"> to your HTML head.",
+      "summary": "A practical guide to implementing Webmentions on your personal site.",
+      "date_published": "2024-01-18T10:00:00-05:00",
+      "date_modified": "2024-01-19T08:00:00-05:00",
+      "authors": [{ "name": "Ada Lovelace" }],
+      "tags": ["webmentions", "indieweb", "protocols"]
+    },
+    {
+      "id": "indie-002",
+      "url": "https://indieweb.example.com/own-your-data",
+      "title": "Own Your Data",
+      "content_html": "<p>Every post you write on social media is a gift to a corporation. Build your own site instead.</p>",
+      "date_published": "2024-01-10T14:00:00-05:00",
+      "tags": ["data-ownership", "indieweb"]
+    },
+    {
+      "id": "indie-003",
+      "url": "https://indieweb.example.com/rss-is-not-dead",
+      "title": "RSS Is Not Dead",
+      "content_text": "RSS is thriving in the shadows. Newsletters are just RSS with extra steps and a middleman.",
+      "date_published": "2024-01-05T09:00:00-05:00"
+    }
+  ]
+}

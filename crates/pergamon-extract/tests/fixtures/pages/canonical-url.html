@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Canonical URL Test Page</title>
+  <link rel="canonical" href="https://canonical.example.com/the-real-url">
+  <meta property="og:url" content="https://canonical.example.com/og-url-different">
+</head>
+<body>
+  <article>
+    <h1>Testing Canonical URL Extraction</h1>
+    <p>This page has both a <code>link rel="canonical"</code> and an <code>og:url</code> that point to different URLs. The extractor should prefer the canonical link.</p>
+    <p>The page URL, the canonical URL, and the OG URL are all different, which tests the precedence logic in the metadata extractor.</p>
+  </article>
+</body>
+</html>

@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Encoded Entities Test</title>
+</head>
+<body>
+  <article>
+    <h1>HTML Entities &amp; Encoded Characters</h1>
+    <p>This page tests various HTML entity encodings:</p>
+    <ul>
+      <li>Named entities: &amp; &lt; &gt; &quot; &apos; &copy; &reg; &trade; &mdash; &ndash; &hellip; &laquo; &raquo;</li>
+      <li>Decimal entities: &#169; &#174; &#8212; &#8211; &#8230;</li>
+      <li>Hex entities: &#x00A9; &#x00AE; &#x2014; &#x2013; &#x2026;</li>
+      <li>Accented: caf&#233;, na&#239;ve, r&#233;sum&#233;, &#252;ber</li>
+      <li>Symbols: &#x2605; &#x2606; &#x2764; &#x2603; &#x2602;</li>
+    </ul>
+    <p>The extractor should decode all of these into their proper Unicode characters in the output text.</p>
+    <p>Here&apos;s a sentence with &ldquo;smart quotes&rdquo; and an em&mdash;dash and an en&ndash;dash.</p>
+  </article>
+</body>
+</html>

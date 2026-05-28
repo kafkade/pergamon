@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Sparse Feed</title>
+    <link>https://sparse.example.com</link>
+    <description></description>
+    <item>
+      <title>Post With All Optional Fields Missing</title>
+      <guid>sparse-001</guid>
+    </item>
+    <item>
+      <title></title>
+      <link>https://sparse.example.com/empty-title</link>
+      <guid>sparse-002</guid>
+    </item>
+    <item>
+      <title>Post With Empty Description</title>
+      <link>https://sparse.example.com/empty-desc</link>
+      <guid>sparse-003</guid>
+      <description></description>
+    </item>
+  </channel>
+</rss>

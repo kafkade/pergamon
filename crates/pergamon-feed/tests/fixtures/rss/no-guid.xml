@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>No GUID Feed</title>
+    <link>https://noguid.example.com</link>
+    <description>Items without GUIDs — dedup must use URL fallback</description>
+    <item>
+      <title>First Post Without GUID</title>
+      <link>https://noguid.example.com/first</link>
+      <description>This item has no guid element at all.</description>
+      <pubDate>Wed, 10 Jan 2024 12:00:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Second Post Without GUID</title>
+      <link>https://noguid.example.com/second</link>
+      <description>Another item without a guid.</description>
+      <pubDate>Tue, 09 Jan 2024 12:00:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Post With No Link or GUID</title>
+      <description>This item has neither a guid nor a link. It can only be identified by title.</description>
+    </item>
+  </channel>
+</rss>

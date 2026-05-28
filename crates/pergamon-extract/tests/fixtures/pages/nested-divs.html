@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Deeply Nested Content Test</title>
+  <meta name="author" content="Nesting Expert">
+</head>
+<body>
+  <div class="page-wrapper">
+    <div class="content-area">
+      <div class="container">
+        <div class="row">
+          <div class="col-md-8">
+            <div class="post-wrapper">
+              <div class="post-inner">
+                <div class="post-content-wrapper">
+                  <article>
+                    <div class="entry-header">
+                      <h1 class="entry-title">Finding Content in Deeply Nested HTML</h1>
+                    </div>
+                    <div class="entry-content">
+                      <div class="content-block">
+                        <p>Some websites wrap their content in many layers of div elements. This is common in CMS-generated HTML, WordPress themes, and React-rendered pages.</p>
+                      </div>
+                      <div class="content-block">
+                        <p>A good content extractor should be able to find the article text regardless of how deeply nested it is. The nesting depth should not affect extraction quality.</p>
+                      </div>
+                      <div class="content-block">
+                        <div class="inner-block">
+                          <p>Even content nested inside additional wrappers within the article should be captured. This paragraph is inside a div.inner-block inside a div.content-block.</p>
+                        </div>
+                      </div>
+                    </div>
+                  </article>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Database Performance Benchmarks 2024 - DB Review</title>
+  <meta name="author" content="Benchmark Team">
+</head>
+<body>
+  <article>
+    <h1>Database Performance Benchmarks 2024</h1>
+    <p>We tested five popular databases under realistic workloads. Here are the results.</p>
+
+    <h2>Test Configuration</h2>
+    <table>
+      <thead>
+        <tr><th>Parameter</th><th>Value</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>CPU</td><td>AMD EPYC 7763 (64 cores)</td></tr>
+        <tr><td>RAM</td><td>256 GB DDR4-3200</td></tr>
+        <tr><td>Storage</td><td>NVMe SSD (7 GB/s seq read)</td></tr>
+        <tr><td>OS</td><td>Ubuntu 22.04 LTS</td></tr>
+        <tr><td>Dataset</td><td>100M rows, 50 GB</td></tr>
+      </tbody>
+    </table>
+
+    <h2>OLTP Results (transactions/sec)</h2>
+    <table>
+      <thead>
+        <tr><th>Database</th><th>Read</th><th>Write</th><th>Mixed</th><th>P99 Latency</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>PostgreSQL 16</td><td>45,000</td><td>12,000</td><td>28,000</td><td>8.2ms</td></tr>
+        <tr><td>MySQL 8.2</td><td>42,000</td><td>10,500</td><td>25,000</td><td>9.1ms</td></tr>
+        <tr><td>SQLite 3.44</td><td>38,000</td><td>4,200</td><td>15,000</td><td>12.5ms</td></tr>
+        <tr><td>CockroachDB 23.2</td><td>35,000</td><td>8,000</td><td>20,000</td><td>15.3ms</td></tr>
+        <tr><td>TiDB 7.5</td><td>33,000</td><td>9,500</td><td>22,000</td><td>11.7ms</td></tr>
+      </tbody>
+    </table>
+
+    <h2>OLAP Results (query time in seconds)</h2>
+    <table>
+      <thead>
+        <tr><th>Database</th><th>Q1 (scan)</th><th>Q2 (join)</th><th>Q3 (aggregate)</th><th>Q4 (complex)</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>PostgreSQL 16</td><td>2.1</td><td>4.5</td><td>1.8</td><td>12.3</td></tr>
+        <tr><td>MySQL 8.2</td><td>3.2</td><td>6.1</td><td>2.4</td><td>18.7</td></tr>
+        <tr><td>SQLite 3.44</td><td>5.8</td><td>15.2</td><td>3.1</td><td>45.6</td></tr>
+        <tr><td>CockroachDB 23.2</td><td>1.9</td><td>3.8</td><td>1.5</td><td>9.8</td></tr>
+        <tr><td>TiDB 7.5</td><td>1.7</td><td>3.2</td><td>1.3</td><td>8.5</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Methodology Notes</h2>
+    <p>All tests were run with default configurations and no manual tuning. Results represent the median of five runs with warmup. The workload is based on a modified TPC-C benchmark with realistic data distributions.</p>
+
+    <h2>Conclusion</h2>
+    <p>PostgreSQL continues to offer the best balance of OLTP performance and ecosystem maturity. For analytics-heavy workloads, TiDB and CockroachDB show impressive results. SQLite remains unbeatable for single-process embedded use cases despite lower absolute throughput.</p>
+  </article>
+</body>
+</html>
