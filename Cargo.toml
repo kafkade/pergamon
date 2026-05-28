@@ -31,6 +31,7 @@ uuid = { version = "1", features = ["v4", "v7", "serde"] }
 time = { version = "0.3", default-features = false, features = ["std", "macros", "formatting", "parsing", "serde"] }
 rusqlite = { version = "0.34", features = ["bundled"] }
 clap = { version = "4", features = ["derive", "env"] }
+clap_complete = "4"
 anyhow = "1"
 feed-rs = "2"
 quick-xml = "0.37"
@@ -43,6 +44,9 @@ lopdf = "0.34"
 ratatui = "0.29"
 crossterm = "0.28"
 open = "5"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+dirs = "6"
+toml = "0.8"
 
 # Mandatory lint set. Members opt in with `[lints] workspace = true`.
 [workspace.lints.rust]

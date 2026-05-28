@@ -66,3 +66,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TUI search: press `/` in list or reader view to search all content
 - Search input bar with live typing, Enter to submit, Esc to cancel
 - Help overlay updated with `/` search keybinding
+- Full backup export: `pergamon export backup -o file.zip` creates a ZIP archive with all tables as JSON files plus a schema manifest
+- Backup restore: `pergamon import backup file.zip` restores a full backup into an empty database with transactional safety
+- Backup format validation: schema version check, manifest verification, non-empty database rejection
+- `pergamon config` command: display current configuration with file path and load status
+- Configuration file support: TOML config at platform-standard config directory with sensible defaults
+- `pergamon completions <shell>` command: generate shell completions for bash, zsh, fish, and PowerShell
+- Bulk listing methods in storage layer for backup export (all content items, collections, extension metadata, junction tables)
+- `schema_version()` and `is_empty()` database introspection methods
