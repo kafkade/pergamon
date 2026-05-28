@@ -5,6 +5,7 @@ members = [
     "crates/pergamon-storage",
     "crates/pergamon-feed",
     "crates/pergamon-extract",
+    "crates/pergamon-import",
     "crates/pergamon-cli",
 ]
 
@@ -23,6 +24,7 @@ pergamon-core = { path = "crates/pergamon-core", version = "0.1.0" }
 pergamon-storage = { path = "crates/pergamon-storage", version = "0.1.0" }
 pergamon-feed = { path = "crates/pergamon-feed", version = "0.1.0" }
 pergamon-extract = { path = "crates/pergamon-extract", version = "0.1.0" }
+pergamon-import = { path = "crates/pergamon-import", version = "0.1.0" }
 
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
@@ -39,6 +41,7 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 readabilityrs = "0.1"
 ammonia = "4"
 scraper = "0.22"
+csv = "1"
 url = "2"
 lopdf = "0.34"
 ratatui = "0.29"

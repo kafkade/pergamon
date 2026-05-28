@@ -176,6 +176,22 @@ enum ImportAction {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Import bookmarks from a Raindrop.io CSV export.
+    Raindrop {
+        /// Path to the Raindrop CSV file.
+        file: PathBuf,
+        /// Show what would be imported without making changes.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Import bookmarks from a Pocket HTML export.
+    Pocket {
+        /// Path to the Pocket HTML file.
+        file: PathBuf,
+        /// Show what would be imported without making changes.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Restore from a full backup archive.
     Backup {
         /// Path to the backup ZIP file.
@@ -813,6 +829,8 @@ fn feed_status_label(feed: &Feed) -> String {
 fn handle_import(db: &Database, action: ImportAction) -> Result<()> {
     match action {
         ImportAction::Opml { file, dry_run } => import_opml(db, &file, dry_run),
+        ImportAction::Raindrop { file, dry_run } => import_raindrop(db, &file, dry_run),
+        ImportAction::Pocket { file, dry_run } => import_pocket(db, &file, dry_run),
         ImportAction::Backup { file } => restore_backup(db, &file),
     }
 }
@@ -1001,6 +1019,243 @@ fn get_or_create_folder(db: &Database, name: &str, parent_id: Option<Uuid>) -> R
     db.insert_feed_folder(&folder)
         .context("failed to create folder")?;
     Ok(folder)
+}
+
+// ======================================================================
+// Raindrop.io import
+// ======================================================================
+
+/// Import bookmarks from a Raindrop.io CSV export.
+fn import_raindrop(db: &Database, path: &std::path::Path, dry_run: bool) -> Result<()> {
+    use pergamon_core::model::BookmarkMeta;
+
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("failed to read Raindrop CSV: {}", path.display()))?;
+
+    let items = pergamon_import::parse_raindrop_csv(&bytes)
+        .with_context(|| format!("failed to parse Raindrop CSV: {}", path.display()))?;
+
+    if dry_run {
+        println!("Dry run — no changes will be made.\n");
+    }
+    println!(
+        "Raindrop.io: {} bookmark(s) in {}",
+        items.len(),
+        path.display()
+    );
+
+    let mut stats = BookmarkImportStats::default();
+    let now = OffsetDateTime::now_utc();
+
+    for item in &items {
+        let canonical_url =
+            pergamon_extract::canonicalize_url(&item.url).unwrap_or_else(|_| item.url.clone());
+
+        // Dedup by canonical URL.
+        if let Some(existing) = db
+            .get_content_item_by_url(&canonical_url)
+            .context("failed to check for duplicate")?
+        {
+            if !dry_run {
+                apply_tags(db, existing.id, &item.tags)?;
+                if let Some(ref folder) = item.folder {
+                    apply_collection(db, existing.id, folder)?;
+                }
+            }
+            println!("  ✓ {} (exists, updated tags/collections)", item.title);
+            stats.existing += 1;
+            continue;
+        }
+
+        if dry_run {
+            println!("  + {} (would create)", item.title);
+            stats.created += 1;
+            continue;
+        }
+
+        let created_at = item.created.unwrap_or(now);
+        let content_item = ContentItem {
+            id: Uuid::new_v4(),
+            url: Some(canonical_url),
+            title: item.title.clone(),
+            author: None,
+            content_type: ContentType::Bookmark,
+            status: DocumentStatus::Inbox,
+            content_text: None,
+            excerpt: item.excerpt.clone(),
+            published_at: None,
+            created_at,
+            updated_at: now,
+        };
+
+        db.insert_content_item(&content_item)
+            .with_context(|| format!("failed to insert: {}", item.url))?;
+
+        // Combine note + highlights into description for BookmarkMeta.
+        let description = build_raindrop_description(item.note.as_ref(), &item.highlights);
+        let bookmark_meta = BookmarkMeta {
+            content_item_id: content_item.id,
+            original_url: Some(item.url.clone()),
+            saved_from: Some(format!("raindrop:{}", item.id)),
+            thumbnail_url: item.cover.clone(),
+            description,
+        };
+        db.insert_bookmark_meta(&bookmark_meta)
+            .with_context(|| format!("failed to insert bookmark meta: {}", item.url))?;
+
+        apply_tags(db, content_item.id, &item.tags)?;
+        if let Some(ref folder) = item.folder {
+            apply_collection(db, content_item.id, folder)?;
+        }
+
+        println!("  + {}", item.title);
+        stats.created += 1;
+    }
+
+    println!(
+        "\n{}: {} created, {} existing (updated)",
+        if dry_run { "Would import" } else { "Imported" },
+        stats.created,
+        stats.existing,
+    );
+    Ok(())
+}
+
+/// Combine note and highlights into a description string.
+fn build_raindrop_description(note: Option<&String>, highlights: &[String]) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(n) = note {
+        parts.push(n.clone());
+    }
+    if !highlights.is_empty() {
+        parts.push(format!("Highlights:\n{}", highlights.join("\n")));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n\n"))
+    }
+}
+
+// ======================================================================
+// Pocket import
+// ======================================================================
+
+/// Import bookmarks from a Pocket HTML export.
+fn import_pocket(db: &Database, path: &std::path::Path, dry_run: bool) -> Result<()> {
+    use pergamon_core::model::BookmarkMeta;
+
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("failed to read Pocket HTML: {}", path.display()))?;
+
+    let items = pergamon_import::parse_pocket_html(&bytes)
+        .with_context(|| format!("failed to parse Pocket HTML: {}", path.display()))?;
+
+    if dry_run {
+        println!("Dry run — no changes will be made.\n");
+    }
+    println!("Pocket: {} bookmark(s) in {}", items.len(), path.display());
+
+    let mut stats = BookmarkImportStats::default();
+    let now = OffsetDateTime::now_utc();
+
+    for item in &items {
+        let canonical_url =
+            pergamon_extract::canonicalize_url(&item.url).unwrap_or_else(|_| item.url.clone());
+
+        // Dedup by canonical URL.
+        if let Some(existing) = db
+            .get_content_item_by_url(&canonical_url)
+            .context("failed to check for duplicate")?
+        {
+            if !dry_run {
+                apply_tags(db, existing.id, &item.tags)?;
+            }
+            println!("  ✓ {} (exists, updated tags)", item.title);
+            stats.existing += 1;
+            continue;
+        }
+
+        if dry_run {
+            println!("  + {} (would create)", item.title);
+            stats.created += 1;
+            continue;
+        }
+
+        let created_at = item.add_date.unwrap_or(now);
+        let content_item = ContentItem {
+            id: Uuid::new_v4(),
+            url: Some(canonical_url),
+            title: item.title.clone(),
+            author: None,
+            content_type: ContentType::Bookmark,
+            status: DocumentStatus::Inbox,
+            content_text: None,
+            excerpt: None,
+            published_at: None,
+            created_at,
+            updated_at: now,
+        };
+
+        db.insert_content_item(&content_item)
+            .with_context(|| format!("failed to insert: {}", item.url))?;
+
+        let bookmark_meta = BookmarkMeta {
+            content_item_id: content_item.id,
+            original_url: Some(item.url.clone()),
+            saved_from: Some("pocket".to_owned()),
+            thumbnail_url: None,
+            description: None,
+        };
+        db.insert_bookmark_meta(&bookmark_meta)
+            .with_context(|| format!("failed to insert bookmark meta: {}", item.url))?;
+
+        apply_tags(db, content_item.id, &item.tags)?;
+
+        println!("  + {}", item.title);
+        stats.created += 1;
+    }
+
+    println!(
+        "\n{}: {} created, {} existing (updated)",
+        if dry_run { "Would import" } else { "Imported" },
+        stats.created,
+        stats.existing,
+    );
+    Ok(())
+}
+
+/// Statistics for bookmark imports (Raindrop, Pocket).
+#[derive(Default)]
+struct BookmarkImportStats {
+    created: u64,
+    existing: u64,
+}
+
+/// Apply a folder/collection to a content item, creating the collection if needed.
+fn apply_collection(db: &Database, item_id: Uuid, folder_name: &str) -> Result<()> {
+    let coll = if let Some(existing) = db
+        .get_collection_by_name(folder_name)
+        .context("failed to look up collection")?
+    {
+        existing
+    } else {
+        let now = OffsetDateTime::now_utc();
+        let coll = Collection {
+            id: Uuid::new_v4(),
+            name: folder_name.to_owned(),
+            parent_id: None,
+            sort_order: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        db.insert_collection(&coll)
+            .with_context(|| format!("failed to create collection '{folder_name}'"))?;
+        coll
+    };
+    // Idempotent: ignore if already in collection.
+    let _ = db.add_to_collection(item_id, coll.id, 0);
+    Ok(())
 }
 
 /// Export all feed subscriptions as OPML.

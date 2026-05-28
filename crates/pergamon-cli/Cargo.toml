@@ -20,6 +20,7 @@ workspace = true
 pergamon-core = { workspace = true }
 pergamon-extract = { workspace = true }
 pergamon-feed = { workspace = true }
+pergamon-import = { workspace = true }
 pergamon-storage = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
