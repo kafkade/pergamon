@@ -11,5 +11,6 @@
 pub mod db;
 pub mod error;
 
+pub use db::ContentItemFilter;
 pub use db::Database;
 pub use error::StorageError;

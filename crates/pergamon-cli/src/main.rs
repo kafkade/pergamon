@@ -916,13 +916,11 @@ impl Drop for TerminalGuard {
 /// Launch the TUI inbox and article reader.
 fn run_tui(db: &Database) -> Result<()> {
     use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
+    use pergamon_storage::ContentItemFilter;
     use ratatui::Terminal;
     use ratatui::backend::CrosstermBackend;
 
-    // Load inbox items (all statuses shown initially).
-    let items = db
-        .list_content_items(None, None, Some(200), None)
-        .context("failed to load content items")?;
+    const ITEM_LIMIT: u32 = 1000;
 
     // Set up terminal.
     enable_raw_mode().context("failed to enable raw mode")?;
@@ -934,7 +932,19 @@ fn run_tui(db: &Database) -> Result<()> {
     let backend = CrosstermBackend::new(std::io::stdout());
     let mut terminal = Terminal::new(backend).context("failed to initialize terminal")?;
 
+    // Initial load: inbox items.
+    let initial_filter = ContentItemFilter {
+        status: Some(DocumentStatus::Inbox),
+        ..ContentItemFilter::default()
+    };
+    let items = db
+        .list_content_items_filtered(&initial_filter, Some(ITEM_LIMIT), None)
+        .context("failed to load content items")?;
+
     let mut app = tui::app::App::new(items);
+
+    // Load metadata for the status bar and pickers.
+    reload_metadata(&mut app, db)?;
 
     // Main loop.
     while !app.should_quit {
@@ -944,17 +954,42 @@ fn run_tui(db: &Database) -> Result<()> {
 
         match tui::event::handle_events(&mut app, db)? {
             tui::event::Action::Reload => {
+                let filter = tui::event::build_filter(&app.filter);
                 app.items = db
-                    .list_content_items(None, None, Some(200), None)
+                    .list_content_items_filtered(&filter, Some(ITEM_LIMIT), None)
                     .context("failed to reload content items")?;
-                // Keep selection in bounds.
-                if app.selected >= app.items.len() && !app.items.is_empty() {
-                    app.selected = app.items.len() - 1;
-                }
+                app.clamp_selection();
+                reload_metadata(&mut app, db)?;
             }
             tui::event::Action::None => {}
         }
     }
+
+    Ok(())
+}
+
+/// Reload counts and picker data from the database.
+fn reload_metadata(app: &mut tui::app::App, db: &Database) -> Result<()> {
+    use pergamon_storage::ContentItemFilter;
+
+    // Unread count (always inbox).
+    let inbox_filter = ContentItemFilter {
+        status: Some(DocumentStatus::Inbox),
+        ..ContentItemFilter::default()
+    };
+    app.unread_count = db
+        .count_content_items_filtered(&inbox_filter)
+        .context("failed to count unread items")?;
+
+    // Total items matching current filter.
+    let current_filter = tui::event::build_filter(&app.filter);
+    app.total_count = db
+        .count_content_items_filtered(&current_filter)
+        .context("failed to count items")?;
+
+    // Feeds and folders for the picker.
+    app.feeds = db.list_feeds().context("failed to load feeds")?;
+    app.folders = db.list_feed_folders().context("failed to load folders")?;
 
     Ok(())
 }
