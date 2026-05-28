@@ -19,6 +19,10 @@ pub fn render(app: &App, frame: &mut Frame<'_>) {
         render_search_input(app, frame);
     }
 
+    if app.show_highlight_input {
+        render_highlight_input(app, frame);
+    }
+
     if app.show_picker {
         render_picker(app, frame);
     }
@@ -314,13 +318,28 @@ fn render_search_input(app: &App, frame: &mut Frame<'_>) {
     frame.render_widget(paragraph, input_area);
 }
 
+/// Render the highlight text input bar at the bottom of the screen.
+fn render_highlight_input(app: &App, frame: &mut Frame<'_>) {
+    let area = frame.area();
+    let input_area = Rect::new(0, area.height.saturating_sub(1), area.width, 1);
+
+    let label = Span::styled("highlight> ", Style::default().fg(Color::Cyan));
+    let text = Span::raw(&app.highlight_input);
+    let cursor = Span::styled("▌", Style::default().fg(Color::Cyan));
+
+    let line = Line::from(vec![label, text, cursor]);
+    let paragraph = Paragraph::new(line).style(Style::default().bg(Color::DarkGray));
+
+    frame.render_widget(paragraph, input_area);
+}
+
 /// Render a centered help overlay.
 fn render_help_overlay(frame: &mut Frame<'_>) {
     let area = frame.area();
 
     // Center a box in the middle of the screen.
     let width = 56.min(area.width.saturating_sub(4));
-    let height = 28.min(area.height.saturating_sub(4));
+    let height = 30.min(area.height.saturating_sub(4));
     let x = (area.width.saturating_sub(width)) / 2;
     let y = (area.height.saturating_sub(height)) / 2;
     let popup_area = Rect::new(x, y, width, height);
@@ -360,6 +379,9 @@ fn render_help_overlay(frame: &mut Frame<'_>) {
         Line::from(""),
         Line::styled("  Search", Style::default().add_modifier(Modifier::BOLD)),
         Line::from("  /            Search all content"),
+        Line::from(""),
+        Line::styled("  Reader", Style::default().add_modifier(Modifier::BOLD)),
+        Line::from("  h            Highlight text"),
         Line::from("  ?            Toggle this help"),
     ];
 

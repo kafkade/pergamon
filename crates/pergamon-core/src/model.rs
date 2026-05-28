@@ -161,6 +161,26 @@ pub struct HighlightMeta {
     pub color: Option<String>,
 }
 
+/// A free-form note attached to any content item.
+///
+/// Notes are standalone annotations that can be attached to articles,
+/// bookmarks, highlights, or any other content item. Unlike the inline
+/// `note` field on [`HighlightMeta`], these are first-class entities
+/// with their own identity and lifecycle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Note {
+    /// Stable unique identifier.
+    pub id: Uuid,
+    /// ID of the content item this note is attached to.
+    pub content_item_id: Uuid,
+    /// Free-form text body of the note.
+    pub body: String,
+    /// When this note was created.
+    pub created_at: OffsetDateTime,
+    /// When this note was last updated.
+    pub updated_at: OffsetDateTime,
+}
+
 /// A user-defined tag.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tag {

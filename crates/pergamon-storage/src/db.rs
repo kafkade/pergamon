@@ -15,7 +15,7 @@ use uuid::Uuid;
 use pergamon_core::content_type::ContentType;
 use pergamon_core::model::{
     BookmarkMeta, Collection, ContentItem, Feed, FeedFolder, FeedItemMeta, HighlightMeta,
-    LinkHealth, SearchHit, SearchResult, Tag,
+    LinkHealth, Note, SearchHit, SearchResult, Tag,
 };
 use pergamon_core::status::DocumentStatus;
 
@@ -104,6 +104,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         6,
         "link_health",
         include_str!("../migrations/V6__link_health.sql"),
+    ),
+    (
+        7,
+        "notes_table",
+        include_str!("../migrations/V7__notes_table.sql"),
     ),
 ];
 
@@ -781,6 +786,264 @@ impl Database {
             })
     }
 
+    /// Update the note field on an existing highlight.
+    pub fn update_highlight_note(
+        &self,
+        content_item_id: Uuid,
+        note: Option<&str>,
+    ) -> Result<(), StorageError> {
+        let affected = self.conn.execute(
+            "UPDATE highlight_meta SET note = ?1 WHERE content_item_id = ?2",
+            params![note, content_item_id.to_string()],
+        )?;
+        if affected == 0 {
+            return Err(StorageError::NotFound {
+                entity: "highlight_meta",
+                id: content_item_id.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// List highlights with optional filters.
+    ///
+    /// Returns `(ContentItem, HighlightMeta)` pairs sorted by creation date
+    /// (newest first). Supports filtering by source item, tag name, and date
+    /// range.
+    pub fn list_highlights(
+        &self,
+        source_item_id: Option<Uuid>,
+        tag_name: Option<&str>,
+        since: Option<OffsetDateTime>,
+        before: Option<OffsetDateTime>,
+        limit: Option<u32>,
+    ) -> Result<Vec<(ContentItem, HighlightMeta)>, StorageError> {
+        let mut sql = String::from(
+            "SELECT ci.id, ci.url, ci.title, ci.author, ci.content_type, ci.status,
+                    ci.content_text, ci.excerpt, ci.published_at, ci.created_at, ci.updated_at,
+                    hm.content_item_id, hm.source_item_id, hm.quote_text, hm.note,
+                    hm.position_start, hm.position_end, hm.color
+             FROM content_items ci
+             JOIN highlight_meta hm ON hm.content_item_id = ci.id",
+        );
+        let mut param_values: Vec<String> = Vec::new();
+
+        if tag_name.is_some() {
+            sql.push_str(
+                " JOIN content_item_tags cit ON cit.content_item_id = ci.id
+                  JOIN tags t ON t.id = cit.tag_id",
+            );
+        }
+
+        sql.push_str(" WHERE ci.content_type = 'highlight'");
+
+        if let Some(sid) = source_item_id {
+            param_values.push(sid.to_string());
+            let _ = write!(sql, " AND hm.source_item_id = ?{}", param_values.len());
+        }
+        if let Some(tag) = tag_name {
+            param_values.push(tag.to_owned());
+            let _ = write!(sql, " AND t.name = ?{} COLLATE NOCASE", param_values.len());
+        }
+        if let Some(s) = since {
+            param_values.push(fmt_time(s));
+            let _ = write!(sql, " AND ci.created_at >= ?{}", param_values.len());
+        }
+        if let Some(b) = before {
+            param_values.push(fmt_time(b));
+            let _ = write!(sql, " AND ci.created_at < ?{}", param_values.len());
+        }
+
+        sql.push_str(" ORDER BY ci.created_at DESC");
+
+        if let Some(lim) = limit {
+            let _ = write!(sql, " LIMIT {lim}");
+        }
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
+            .iter()
+            .map(|v| v as &dyn rusqlite::types::ToSql)
+            .collect();
+
+        let rows = stmt.query_map(param_refs.as_slice(), |row| {
+            let item = row_to_content_item(row);
+            let meta = HighlightMeta {
+                content_item_id: parse_uuid(&row.get::<_, String>(11)?),
+                source_item_id: row.get::<_, Option<String>>(12)?.map(|s| parse_uuid(&s)),
+                quote_text: row.get(13)?,
+                note: row.get(14)?,
+                position_start: row.get(15)?,
+                position_end: row.get(16)?,
+                color: row.get(17)?,
+            };
+            Ok((item, meta))
+        })?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row?);
+        }
+        Ok(results)
+    }
+
+    /// Create a highlight from a source content item.
+    ///
+    /// Creates both the `content_items` row (type `highlight`) and the
+    /// `highlight_meta` extension row. The `quote_text` is also stored as
+    /// `content_text` on the content item so it participates in FTS5 search.
+    ///
+    /// If the quote text is found exactly once in the source item's
+    /// `content_text`, the byte offsets are automatically recorded.
+    pub fn create_highlight(
+        &self,
+        source_item_id: Uuid,
+        quote_text: &str,
+        note: Option<&str>,
+        color: Option<&str>,
+    ) -> Result<ContentItem, StorageError> {
+        let source = self.get_content_item(source_item_id)?;
+
+        // Auto-detect position offsets if quote appears exactly once.
+        let (pos_start, pos_end) = source
+            .content_text
+            .as_deref()
+            .and_then(|text| {
+                let first = text.find(quote_text)?;
+                // Check for a second occurrence.
+                if text[first + quote_text.len()..].contains(quote_text) {
+                    None // ambiguous
+                } else {
+                    Some((
+                        Some(i64::try_from(first).ok()?),
+                        Some(i64::try_from(first + quote_text.len()).ok()?),
+                    ))
+                }
+            })
+            .unwrap_or((None, None));
+
+        let now = OffsetDateTime::now_utc();
+        let item = ContentItem {
+            id: Uuid::new_v4(),
+            url: None,
+            title: truncate_for_title(quote_text),
+            author: source.author,
+            content_type: ContentType::Highlight,
+            status: DocumentStatus::Inbox,
+            content_text: Some(quote_text.to_owned()),
+            excerpt: note.map(String::from),
+            published_at: None,
+            created_at: now,
+            updated_at: now,
+        };
+
+        self.insert_content_item(&item)?;
+
+        let meta = HighlightMeta {
+            content_item_id: item.id,
+            source_item_id: Some(source_item_id),
+            quote_text: quote_text.to_owned(),
+            note: note.map(String::from),
+            position_start: pos_start,
+            position_end: pos_end,
+            color: color.map(String::from),
+        };
+        self.insert_highlight_meta(&meta)?;
+
+        Ok(item)
+    }
+
+    // ------------------------------------------------------------------
+    // Notes
+    // ------------------------------------------------------------------
+
+    /// Insert a new note.
+    pub fn insert_note(&self, note: &Note) -> Result<(), StorageError> {
+        self.conn.execute(
+            "INSERT INTO notes (id, content_item_id, body, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                note.id.to_string(),
+                note.content_item_id.to_string(),
+                note.body,
+                fmt_time(note.created_at),
+                fmt_time(note.updated_at),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Retrieve a note by ID.
+    pub fn get_note(&self, id: Uuid) -> Result<Note, StorageError> {
+        self.conn
+            .query_row(
+                "SELECT id, content_item_id, body, created_at, updated_at
+                 FROM notes WHERE id = ?1",
+                params![id.to_string()],
+                |row| Ok(row_to_note(row)),
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "note",
+                id: id.to_string(),
+            })
+    }
+
+    /// List all notes for a content item, ordered by creation date.
+    pub fn list_notes_for_item(&self, content_item_id: Uuid) -> Result<Vec<Note>, StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, content_item_id, body, created_at, updated_at
+             FROM notes WHERE content_item_id = ?1
+             ORDER BY created_at",
+        )?;
+        let rows = stmt.query_map(params![content_item_id.to_string()], |row| {
+            Ok(row_to_note(row))
+        })?;
+        let mut notes = Vec::new();
+        for row in rows {
+            notes.push(row?);
+        }
+        Ok(notes)
+    }
+
+    /// Update a note's body text.
+    pub fn update_note(&self, id: Uuid, body: &str) -> Result<(), StorageError> {
+        let affected = self.conn.execute(
+            "UPDATE notes SET body = ?1 WHERE id = ?2",
+            params![body, id.to_string()],
+        )?;
+        if affected == 0 {
+            return Err(StorageError::NotFound {
+                entity: "note",
+                id: id.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Delete a note by ID.
+    pub fn delete_note(&self, id: Uuid) -> Result<bool, StorageError> {
+        let affected = self
+            .conn
+            .execute("DELETE FROM notes WHERE id = ?1", params![id.to_string()])?;
+        Ok(affected > 0)
+    }
+
+    /// List all notes (for backup/export).
+    #[allow(clippy::missing_errors_doc)]
+    pub fn list_all_notes(&self) -> Result<Vec<Note>, StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, content_item_id, body, created_at, updated_at
+             FROM notes ORDER BY created_at",
+        )?;
+        let rows = stmt.query_map([], |row| Ok(row_to_note(row)))?;
+        let mut notes = Vec::new();
+        for row in rows {
+            notes.push(row?);
+        }
+        Ok(notes)
+    }
+
     // ------------------------------------------------------------------
     // Tags
     // ------------------------------------------------------------------
@@ -1399,6 +1662,7 @@ impl Database {
         highlight_metas: &[HighlightMeta],
         content_item_tags: &[(Uuid, Uuid)],
         collection_items: &[(Uuid, Uuid, i32)],
+        notes: &[Note],
     ) -> Result<(), StorageError> {
         if !self.is_empty()? {
             return Err(StorageError::Generic(
@@ -1419,6 +1683,7 @@ impl Database {
             highlight_metas,
             content_item_tags,
             collection_items,
+            notes,
         );
         // Re-enable FK checks regardless of success.
         self.conn.execute_batch("PRAGMA foreign_keys = ON;")?;
@@ -1439,6 +1704,7 @@ impl Database {
         highlight_metas: &[HighlightMeta],
         content_item_tags: &[(Uuid, Uuid)],
         collection_items: &[(Uuid, Uuid, i32)],
+        notes: &[Note],
     ) -> Result<(), StorageError> {
         self.conn.execute_batch("BEGIN;")?;
 
@@ -1475,6 +1741,9 @@ impl Database {
             }
             for meta in highlight_metas {
                 self.insert_highlight_meta(meta)?;
+            }
+            for note in notes {
+                self.insert_note(note)?;
             }
             for &(item_id, tag_id) in content_item_tags {
                 self.conn.execute(
@@ -2384,5 +2653,32 @@ fn row_to_feed_folder(row: &rusqlite::Row<'_>) -> FeedFolder {
             .map(|s| parse_uuid(&s)),
         created_at: parse_time(&row.get::<_, String>(3).unwrap_or_default()),
         updated_at: parse_time(&row.get::<_, String>(4).unwrap_or_default()),
+    }
+}
+
+/// Map a rusqlite `Row` to a [`Note`].
+///
+/// Expected column order: `id`, `content_item_id`, `body`, `created_at`, `updated_at`.
+fn row_to_note(row: &rusqlite::Row<'_>) -> Note {
+    Note {
+        id: parse_uuid(&row.get::<_, String>(0).unwrap_or_default()),
+        content_item_id: parse_uuid(&row.get::<_, String>(1).unwrap_or_default()),
+        body: row.get(2).unwrap_or_default(),
+        created_at: parse_time(&row.get::<_, String>(3).unwrap_or_default()),
+        updated_at: parse_time(&row.get::<_, String>(4).unwrap_or_default()),
+    }
+}
+
+/// Truncate a string for use as a content item title.
+///
+/// Takes the first 80 characters (or up to the first newline) and appends
+/// an ellipsis if truncated.
+fn truncate_for_title(text: &str) -> String {
+    let first_line = text.lines().next().unwrap_or(text);
+    if first_line.len() <= 80 {
+        first_line.to_owned()
+    } else {
+        let truncated: String = first_line.chars().take(77).collect();
+        format!("{truncated}…")
     }
 }
