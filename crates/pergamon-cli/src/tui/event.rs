@@ -62,6 +62,11 @@ pub fn handle_events(app: &mut App, db: &Database) -> Result<Action> {
         return Ok(handle_search_input(app, key.code));
     }
 
+    // Highlight input mode.
+    if app.show_highlight_input {
+        return Ok(handle_highlight_input(app, db, key.code));
+    }
+
     match app.view {
         View::ItemList => handle_list_keys(app, db, key.code),
         View::Reader => handle_reader_keys(app, db, key.code),
@@ -221,6 +226,12 @@ fn handle_reader_keys(app: &mut App, db: &Database, code: KeyCode) -> Result<Act
             app.close_reader();
             app.show_search_input = true;
             app.search_input.clear();
+            Ok(Action::None)
+        }
+        // Highlight: open highlight text input.
+        KeyCode::Char('h') => {
+            app.show_highlight_input = true;
+            app.highlight_input.clear();
             Ok(Action::None)
         }
         _ => Ok(Action::None),
@@ -451,5 +462,51 @@ pub fn build_filter(filter: &FilterMode) -> ContentItemFilter {
             folder_id: Some(*id),
             ..ContentItemFilter::default()
         },
+    }
+}
+
+/// Handle key events in the highlight text input overlay.
+fn handle_highlight_input(app: &mut App, db: &Database, code: KeyCode) -> Action {
+    match code {
+        KeyCode::Esc => {
+            app.show_highlight_input = false;
+            app.highlight_input.clear();
+            Action::None
+        }
+        KeyCode::Enter => {
+            if app.highlight_input.is_empty() {
+                app.show_highlight_input = false;
+                return Action::None;
+            }
+            let text = app.highlight_input.clone();
+            app.show_highlight_input = false;
+            app.highlight_input.clear();
+
+            let Some(item) = app.selected_item() else {
+                app.set_status("No item selected");
+                return Action::None;
+            };
+            let source_id = item.id;
+
+            match db.create_highlight(source_id, &text, None, None) {
+                Ok(hl) => {
+                    let short_id: String = hl.id.to_string().chars().take(8).collect();
+                    app.set_status(format!("Highlight saved ({short_id})"));
+                }
+                Err(e) => {
+                    app.set_status(format!("Highlight failed: {e}"));
+                }
+            }
+            Action::None
+        }
+        KeyCode::Backspace => {
+            app.highlight_input.pop();
+            Action::None
+        }
+        KeyCode::Char(c) => {
+            app.highlight_input.push(c);
+            Action::None
+        }
+        _ => Action::None,
     }
 }

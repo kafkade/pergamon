@@ -107,6 +107,10 @@ pub struct App {
     pub show_search_input: bool,
     /// Text being typed in the search input bar.
     pub search_input: String,
+    /// Whether the highlight input bar is visible.
+    pub show_highlight_input: bool,
+    /// Text being typed in the highlight input bar.
+    pub highlight_input: String,
 }
 
 impl App {
@@ -131,6 +135,8 @@ impl App {
             confirm: None,
             show_search_input: false,
             search_input: String::new(),
+            show_highlight_input: false,
+            highlight_input: String::new(),
         }
     }
 

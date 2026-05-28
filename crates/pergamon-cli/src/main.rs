@@ -127,6 +127,16 @@ enum Command {
         #[command(subcommand)]
         action: DoctorAction,
     },
+    /// Manage highlights across all content.
+    Highlight {
+        #[command(subcommand)]
+        action: HighlightAction,
+    },
+    /// Manage notes on content items.
+    Note {
+        #[command(subcommand)]
+        action: NoteAction,
+    },
     /// Show current configuration.
     Config,
     /// Generate shell completions.
@@ -404,6 +414,97 @@ enum DoctorAction {
     },
 }
 
+/// Highlight management subcommands.
+#[derive(Debug, Subcommand)]
+enum HighlightAction {
+    /// Create a new highlight from a source item.
+    Add {
+        /// Source content item ID.
+        source: String,
+        /// Quoted text to highlight.
+        text: String,
+        /// Optional annotation / note on the highlight.
+        #[arg(long)]
+        note: Option<String>,
+        /// Highlight color (e.g. yellow, green, blue, red).
+        #[arg(long)]
+        color: Option<String>,
+        /// Tag to apply to the highlight (repeatable).
+        #[arg(long = "tag", short = 't')]
+        tags: Vec<String>,
+    },
+    /// List all highlights with optional filters.
+    List {
+        /// Filter by source content item ID.
+        #[arg(long)]
+        source: Option<String>,
+        /// Filter by tag name.
+        #[arg(long)]
+        tag: Option<String>,
+        /// Only highlights created on or after this date (YYYY-MM-DD).
+        #[arg(long)]
+        since: Option<String>,
+        /// Only highlights created before this date (YYYY-MM-DD).
+        #[arg(long)]
+        before: Option<String>,
+        /// Maximum number of results (default: 50).
+        #[arg(long, default_value = "50")]
+        limit: u32,
+        /// Output format: text or json.
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
+    /// Show a specific highlight with full details.
+    Show {
+        /// Highlight content item ID.
+        id: String,
+    },
+    /// Export highlights to Markdown or JSON.
+    Export {
+        /// Output format: md or json.
+        #[arg(long, default_value = "md")]
+        format: String,
+        /// Output file path (default: stdout).
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+        /// Filter by source content item ID.
+        #[arg(long)]
+        source: Option<String>,
+    },
+}
+
+/// Note management subcommands.
+#[derive(Debug, Subcommand)]
+enum NoteAction {
+    /// Add a note to a content item.
+    Add {
+        /// Content item ID to attach the note to.
+        item: String,
+        /// Note body text.
+        text: String,
+    },
+    /// List notes (all or for a specific item).
+    List {
+        /// Content item ID (list all notes if omitted).
+        item: Option<String>,
+        /// Output format: text or json.
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
+    /// Edit a note's body text.
+    Edit {
+        /// Note ID.
+        id: String,
+        /// New body text.
+        text: String,
+    },
+    /// Delete a note.
+    Delete {
+        /// Note ID.
+        id: String,
+    },
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -473,6 +574,8 @@ fn main() -> Result<()> {
         Command::Tag { action } => handle_tag(&db, action),
         Command::Bulk { action } => handle_bulk(&db, action),
         Command::Doctor { action } => handle_doctor(&db, action),
+        Command::Highlight { action } => handle_highlight(&db, action),
+        Command::Note { action } => handle_note(&db, action),
         // Already handled above — unreachable at runtime.
         Command::Config | Command::Completions { .. } => Ok(()),
     }
@@ -2686,8 +2789,433 @@ fn check_url(client: &reqwest::blocking::Client, item_id: Uuid, url: &str) -> Li
 }
 
 // ======================================================================
-// TUI command
+// Highlight commands
 // ======================================================================
+
+/// Dispatch highlight subcommand.
+fn handle_highlight(db: &Database, action: HighlightAction) -> Result<()> {
+    match action {
+        HighlightAction::Add {
+            source,
+            text,
+            note,
+            color,
+            tags,
+        } => highlight_add(db, &source, &text, note.as_deref(), color.as_deref(), &tags),
+        HighlightAction::List {
+            source,
+            tag,
+            since,
+            before,
+            limit,
+            format,
+        } => highlight_list(
+            db,
+            source.as_deref(),
+            tag.as_deref(),
+            since.as_deref(),
+            before.as_deref(),
+            limit,
+            &format,
+        ),
+        HighlightAction::Show { id } => highlight_show(db, &id),
+        HighlightAction::Export {
+            format,
+            output,
+            source,
+        } => highlight_export(db, &format, output.as_deref(), source.as_deref()),
+    }
+}
+
+/// Create a new highlight from a source item.
+fn highlight_add(
+    db: &Database,
+    source_id: &str,
+    text: &str,
+    note: Option<&str>,
+    color: Option<&str>,
+    tags: &[String],
+) -> Result<()> {
+    let source_uuid = source_id
+        .parse::<Uuid>()
+        .with_context(|| format!("invalid UUID: {source_id}"))?;
+
+    let item = db
+        .create_highlight(source_uuid, text, note, color)
+        .context("failed to create highlight")?;
+
+    // Apply tags if any.
+    for tag_name in tags {
+        let tag = db
+            .get_or_create_tag(tag_name)
+            .with_context(|| format!("failed to get/create tag: {tag_name}"))?;
+        db.tag_content_item(item.id, tag.id)
+            .with_context(|| format!("failed to tag highlight with: {tag_name}"))?;
+    }
+
+    println!("Highlight created: {}", item.id);
+    println!("  Source: {source_uuid}");
+    println!("  Text:   {}", truncate_display(text, 80));
+    if let Some(n) = note {
+        println!("  Note:   {}", truncate_display(n, 80));
+    }
+    if !tags.is_empty() {
+        println!("  Tags:   {}", tags.join(", "));
+    }
+
+    Ok(())
+}
+
+/// List highlights with optional filters.
+fn highlight_list(
+    db: &Database,
+    source: Option<&str>,
+    tag: Option<&str>,
+    since_str: Option<&str>,
+    before_str: Option<&str>,
+    limit: u32,
+    format: &str,
+) -> Result<()> {
+    let source_id = source
+        .map(str::parse::<Uuid>)
+        .transpose()
+        .context("invalid source UUID")?;
+    let since = since_str.map(parse_date_arg).transpose()?;
+    let before = before_str.map(parse_date_arg).transpose()?;
+
+    let results = db
+        .list_highlights(source_id, tag, since, before, Some(limit))
+        .context("failed to list highlights")?;
+
+    if results.is_empty() {
+        println!("No highlights found.");
+        return Ok(());
+    }
+
+    if format == "json" {
+        let json_items: Vec<serde_json::Value> = results
+            .iter()
+            .map(|(item, meta)| {
+                serde_json::json!({
+                    "id": item.id.to_string(),
+                    "source_item_id": meta.source_item_id.map(|u| u.to_string()),
+                    "quote_text": meta.quote_text,
+                    "note": meta.note,
+                    "color": meta.color,
+                    "position_start": meta.position_start,
+                    "position_end": meta.position_end,
+                    "created_at": item.created_at.format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
+                    "url": item.url,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json_items).unwrap_or_else(|_| "[]".to_owned())
+        );
+    } else {
+        println!("{} highlight(s):\n", results.len());
+        for (item, meta) in &results {
+            println!(
+                "  {} | {}",
+                short_uuid(item.id),
+                truncate_display(&meta.quote_text, 60)
+            );
+            if let Some(n) = &meta.note {
+                println!("        note: {}", truncate_display(n, 60));
+            }
+            if let Some(color) = &meta.color {
+                println!("        color: {color}");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Show a specific highlight with full details.
+fn highlight_show(db: &Database, id: &str) -> Result<()> {
+    let uuid = id
+        .parse::<Uuid>()
+        .with_context(|| format!("invalid UUID: {id}"))?;
+
+    let item = db
+        .get_content_item(uuid)
+        .context("failed to load highlight")?;
+    let meta = db
+        .get_highlight_meta(uuid)
+        .context("failed to load highlight metadata")?;
+
+    println!("Highlight: {}", item.id);
+    println!("  URL:      {}", item.url.as_deref().unwrap_or("—"));
+    println!(
+        "  Source:   {}",
+        meta.source_item_id
+            .map_or_else(|| "—".to_owned(), |u| u.to_string())
+    );
+    println!("  Quote:    {}", meta.quote_text);
+    if let Some(n) = &meta.note {
+        println!("  Note:     {n}");
+    }
+    if let Some(color) = &meta.color {
+        println!("  Color:    {color}");
+    }
+    if let Some(start) = meta.position_start {
+        println!(
+            "  Position: {start}..{}",
+            meta.position_end.unwrap_or(start)
+        );
+    }
+    println!(
+        "  Created:  {}",
+        item.created_at
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default()
+    );
+
+    // Show tags.
+    let tags = db.tags_for_item(uuid).unwrap_or_default();
+    if !tags.is_empty() {
+        let names: Vec<&str> = tags.iter().map(|t| t.name.as_str()).collect();
+        println!("  Tags:     {}", names.join(", "));
+    }
+
+    // Show notes on this highlight.
+    let notes = db.list_notes_for_item(uuid).unwrap_or_default();
+    if !notes.is_empty() {
+        println!("  Notes:");
+        for note in &notes {
+            println!(
+                "    [{}] {}",
+                short_uuid(note.id),
+                truncate_display(&note.body, 60)
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Export highlights to Markdown or JSON.
+fn highlight_export(
+    db: &Database,
+    format: &str,
+    output: Option<&std::path::Path>,
+    source: Option<&str>,
+) -> Result<()> {
+    let source_id = source
+        .map(str::parse::<Uuid>)
+        .transpose()
+        .context("invalid source UUID")?;
+
+    let results = db
+        .list_highlights(source_id, None, None, None, None)
+        .context("failed to list highlights")?;
+
+    if results.is_empty() {
+        println!("No highlights to export.");
+        return Ok(());
+    }
+
+    let content = if format == "json" {
+        let json_items: Vec<serde_json::Value> = results
+            .iter()
+            .map(|(item, meta)| {
+                serde_json::json!({
+                    "id": item.id.to_string(),
+                    "source_item_id": meta.source_item_id.map(|u| u.to_string()),
+                    "quote_text": meta.quote_text,
+                    "note": meta.note,
+                    "color": meta.color,
+                    "position_start": meta.position_start,
+                    "position_end": meta.position_end,
+                    "created_at": item.created_at.format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
+                    "url": item.url,
+                })
+            })
+            .collect();
+        serde_json::to_string_pretty(&json_items).unwrap_or_else(|_| "[]".to_owned())
+    } else {
+        // Markdown export.
+        use std::fmt::Write as _;
+        let mut md = String::from("# Highlights\n\n");
+        for (item, meta) in &results {
+            let _ = writeln!(md, "## {}\n", truncate_display(&meta.quote_text, 120));
+            let _ = writeln!(md, "> {}\n", meta.quote_text);
+            if let Some(n) = &meta.note {
+                let _ = writeln!(md, "**Note:** {n}\n");
+            }
+            let _ = writeln!(
+                md,
+                "- Source: {}",
+                meta.source_item_id
+                    .map_or_else(|| "—".to_owned(), |u| u.to_string())
+            );
+            let _ = writeln!(md, "- URL: {}", item.url.as_deref().unwrap_or("—"));
+            let _ = writeln!(
+                md,
+                "- Created: {}\n",
+                item.created_at
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .unwrap_or_default()
+            );
+            md.push_str("---\n\n");
+        }
+        md
+    };
+
+    if let Some(path) = output {
+        std::fs::write(path, &content)
+            .with_context(|| format!("failed to write to {}", path.display()))?;
+        println!(
+            "Exported {} highlight(s) to {}",
+            results.len(),
+            path.display()
+        );
+    } else {
+        print!("{content}");
+    }
+
+    Ok(())
+}
+
+// ======================================================================
+// Note commands
+// ======================================================================
+
+/// Dispatch note subcommand.
+fn handle_note(db: &Database, action: NoteAction) -> Result<()> {
+    match action {
+        NoteAction::Add { item, text } => note_add(db, &item, &text),
+        NoteAction::List { item, format } => note_list(db, item.as_deref(), &format),
+        NoteAction::Edit { id, text } => note_edit(db, &id, &text),
+        NoteAction::Delete { id } => note_delete(db, &id),
+    }
+}
+
+/// Add a note to a content item.
+fn note_add(db: &Database, item_id: &str, text: &str) -> Result<()> {
+    let uuid = item_id
+        .parse::<Uuid>()
+        .with_context(|| format!("invalid UUID: {item_id}"))?;
+
+    // Verify the content item exists.
+    db.get_content_item(uuid)
+        .with_context(|| format!("content item not found: {uuid}"))?;
+
+    let now = OffsetDateTime::now_utc();
+    let note = pergamon_core::model::Note {
+        id: Uuid::new_v4(),
+        content_item_id: uuid,
+        body: text.to_owned(),
+        created_at: now,
+        updated_at: now,
+    };
+
+    db.insert_note(&note).context("failed to insert note")?;
+
+    println!("Note added: {}", note.id);
+    println!("  Item: {uuid}");
+    println!("  Body: {}", truncate_display(text, 80));
+
+    Ok(())
+}
+
+/// List notes, optionally filtered by content item.
+fn note_list(db: &Database, item_id: Option<&str>, format: &str) -> Result<()> {
+    let notes = if let Some(id_str) = item_id {
+        let uuid = id_str
+            .parse::<Uuid>()
+            .with_context(|| format!("invalid UUID: {id_str}"))?;
+        db.list_notes_for_item(uuid)
+            .context("failed to list notes")?
+    } else {
+        db.list_all_notes().context("failed to list all notes")?
+    };
+
+    if notes.is_empty() {
+        println!("No notes found.");
+        return Ok(());
+    }
+
+    if format == "json" {
+        let json_items: Vec<serde_json::Value> = notes
+            .iter()
+            .map(|n| {
+                serde_json::json!({
+                    "id": n.id.to_string(),
+                    "content_item_id": n.content_item_id.to_string(),
+                    "body": n.body,
+                    "created_at": n.created_at.format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
+                    "updated_at": n.updated_at.format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json_items).unwrap_or_else(|_| "[]".to_owned())
+        );
+    } else {
+        println!("{} note(s):\n", notes.len());
+        for note in &notes {
+            println!(
+                "  {} | item {} | {}",
+                short_uuid(note.id),
+                short_uuid(note.content_item_id),
+                truncate_display(&note.body, 60),
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Edit a note's body text.
+fn note_edit(db: &Database, id: &str, text: &str) -> Result<()> {
+    let uuid = id
+        .parse::<Uuid>()
+        .with_context(|| format!("invalid UUID: {id}"))?;
+
+    db.update_note(uuid, text)
+        .context("failed to update note")?;
+
+    println!("Note updated: {uuid}");
+
+    Ok(())
+}
+
+/// Delete a note.
+fn note_delete(db: &Database, id: &str) -> Result<()> {
+    let uuid = id
+        .parse::<Uuid>()
+        .with_context(|| format!("invalid UUID: {id}"))?;
+
+    let deleted = db.delete_note(uuid).context("failed to delete note")?;
+
+    if deleted {
+        println!("Note deleted: {uuid}");
+    } else {
+        println!("Note not found: {uuid}");
+    }
+
+    Ok(())
+}
+
+/// Truncate a string for display, adding "…" if cut.
+fn truncate_display(text: &str, max: usize) -> String {
+    let first_line = text.lines().next().unwrap_or(text);
+    if first_line.len() <= max {
+        first_line.to_owned()
+    } else {
+        let truncated: String = first_line.chars().take(max.saturating_sub(1)).collect();
+        format!("{truncated}…")
+    }
+}
+
+/// Format a UUID as its first 8 characters.
+fn short_uuid(id: Uuid) -> String {
+    id.to_string()[..8].to_owned()
+}
 
 /// Terminal guard that restores the terminal state on drop.
 ///
@@ -2858,6 +3386,7 @@ fn export_backup(db: &Database, output: &std::path::Path) -> Result<()> {
     let highlight_meta = db
         .list_all_highlight_meta()
         .context("listing highlight meta")?;
+    let notes = db.list_all_notes().context("listing notes")?;
     let content_item_tags = db
         .list_all_content_item_tags()
         .context("listing content item tags")?;
@@ -2883,6 +3412,7 @@ fn export_backup(db: &Database, output: &std::path::Path) -> Result<()> {
     write_json_entry(&mut zip, &opts, "feed_item_meta.json", &feed_item_meta)?;
     write_json_entry(&mut zip, &opts, "bookmark_meta.json", &bookmark_meta)?;
     write_json_entry(&mut zip, &opts, "highlight_meta.json", &highlight_meta)?;
+    write_json_entry(&mut zip, &opts, "notes.json", &notes)?;
     write_json_entry(
         &mut zip,
         &opts,
@@ -2901,16 +3431,18 @@ fn export_backup(db: &Database, output: &std::path::Path) -> Result<()> {
         + feed_item_meta.len()
         + bookmark_meta.len()
         + highlight_meta.len()
+        + notes.len()
         + content_item_tags.len()
         + collection_items.len();
 
     println!("Backup written to {}", output.display());
     println!(
-        "  {} feeds, {} items, {} tags, {} collections ({total} records total)",
+        "  {} feeds, {} items, {} tags, {} collections, {} notes ({total} records total)",
         feeds.len(),
         content_items.len(),
         tags.len(),
         collections.len(),
+        notes.len(),
     );
 
     Ok(())
@@ -2936,7 +3468,7 @@ fn write_json_entry<W: Write + std::io::Seek, T: serde::Serialize>(
 
 /// Restore from a full backup archive.
 fn restore_backup(db: &Database, path: &std::path::Path) -> Result<()> {
-    use pergamon_core::model::{BookmarkMeta, Collection, HighlightMeta, Tag};
+    use pergamon_core::model::{BookmarkMeta, Collection, HighlightMeta, Note as NoteModel, Tag};
     use zip::ZipArchive;
 
     let file = std::fs::File::open(path)
@@ -2970,6 +3502,7 @@ fn restore_backup(db: &Database, path: &std::path::Path) -> Result<()> {
     let feed_item_meta: Vec<FeedItemMeta> = read_json_entry(&mut archive, "feed_item_meta.json")?;
     let bookmark_meta: Vec<BookmarkMeta> = read_json_entry(&mut archive, "bookmark_meta.json")?;
     let highlight_meta: Vec<HighlightMeta> = read_json_entry(&mut archive, "highlight_meta.json")?;
+    let notes: Vec<NoteModel> = read_json_entry(&mut archive, "notes.json").unwrap_or_default();
     let content_item_tags: Vec<(Uuid, Uuid)> =
         read_json_entry(&mut archive, "content_item_tags.json")?;
     let collection_items: Vec<(Uuid, Uuid, i32)> =
@@ -2986,6 +3519,7 @@ fn restore_backup(db: &Database, path: &std::path::Path) -> Result<()> {
         &highlight_meta,
         &content_item_tags,
         &collection_items,
+        &notes,
     )
     .context("failed to restore backup into database")?;
 
@@ -2997,16 +3531,18 @@ fn restore_backup(db: &Database, path: &std::path::Path) -> Result<()> {
         + feed_item_meta.len()
         + bookmark_meta.len()
         + highlight_meta.len()
+        + notes.len()
         + content_item_tags.len()
         + collection_items.len();
 
     println!("Backup restored from {}", path.display());
     println!(
-        "  {} feeds, {} items, {} tags, {} collections ({total} records total)",
+        "  {} feeds, {} items, {} tags, {} collections, {} notes ({total} records total)",
         feeds.len(),
         content_items.len(),
         tags.len(),
         collections.len(),
+        notes.len(),
     );
 
     Ok(())

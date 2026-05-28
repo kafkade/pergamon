@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `highlight add` command: create highlights from any content item with optional `--note`, `--color`, and `--tag` flags
+- `highlight list` command: list highlights with `--source`, `--tag`, `--since`, `--before`, `--limit`, and `--format` filters
+- `highlight show` command: display full highlight details including source item, tags, and attached notes
+- `highlight export` command: export highlights as Markdown or JSON with optional `--source` filter and `--output` file
+- `note add` command: attach free-form notes to any content item
+- `note list` command: list notes for a specific item or across all items with JSON output support
+- `note edit` command: update an existing note's text
+- `note delete` command: remove a note by ID
+- TUI highlight capture: press `h` in reader view to create a highlight with a text input overlay
+- Highlights are searchable via full-text search
+- Auto-position detection for highlights: byte offsets are recorded when quote text uniquely matches the source
+- Notes table with foreign key cascade deletion (V7 migration)
+- Backup and restore now includes notes
+
 ## [0.2.0] - 2026-05-28
 
 ### Added

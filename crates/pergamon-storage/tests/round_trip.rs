@@ -1158,7 +1158,17 @@ fn backup_round_trip() {
     // Restore into a fresh database.
     let dst = test_db();
     dst.restore_backup(
-        &folders, &feeds, &items, &tags_out, &colls, &fim, &bms, &hls, &cit, &ci,
+        &folders,
+        &feeds,
+        &items,
+        &tags_out,
+        &colls,
+        &fim,
+        &bms,
+        &hls,
+        &cit,
+        &ci,
+        &[],
     )
     .unwrap_or_else(|e| unreachable!("restore failed: {e}"));
 
@@ -1217,7 +1227,7 @@ fn restore_rejects_nonempty_database() {
     db.insert_tag(&tag)
         .unwrap_or_else(|e| unreachable!("insert: {e}"));
 
-    let result = db.restore_backup(&[], &[], &[], &[], &[], &[], &[], &[], &[], &[]);
+    let result = db.restore_backup(&[], &[], &[], &[], &[], &[], &[], &[], &[], &[], &[]);
     match result {
         Ok(()) => unreachable!("expected restore to fail on non-empty DB"),
         Err(e) => {
@@ -1233,8 +1243,8 @@ fn schema_version_returns_latest() {
     let version = db
         .schema_version()
         .unwrap_or_else(|e| unreachable!("version: {e}"));
-    // We have 6 migrations (V1–V6).
-    assert_eq!(version, 6);
+    // We have 7 migrations (V1–V7).
+    assert_eq!(version, 7);
 }
 
 #[test]
@@ -1699,3 +1709,395 @@ mod collection_tag_bulk {
         assert!(!results.is_empty());
     }
 } // mod collection_tag_bulk
+
+// ======================================================================
+// Note CRUD tests
+// ======================================================================
+
+#[test]
+fn note_insert_and_get() {
+    let db = test_db();
+    let item = ContentItem {
+        id: Uuid::new_v4(),
+        url: Some("https://example.com/article".to_owned()),
+        title: "Test Article".to_owned(),
+        author: None,
+        content_type: ContentType::Article,
+        status: DocumentStatus::Inbox,
+        content_text: Some("Article body text for testing notes".to_owned()),
+        excerpt: None,
+        published_at: None,
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.insert_content_item(&item)
+        .unwrap_or_else(|e| unreachable!("insert item: {e}"));
+
+    let note = pergamon_core::model::Note {
+        id: Uuid::new_v4(),
+        content_item_id: item.id,
+        body: "This is a great article".to_owned(),
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.insert_note(&note)
+        .unwrap_or_else(|e| unreachable!("insert note: {e}"));
+
+    let got = db
+        .get_note(note.id)
+        .unwrap_or_else(|e| unreachable!("get note: {e}"));
+    assert_eq!(got.id, note.id);
+    assert_eq!(got.content_item_id, item.id);
+    assert_eq!(got.body, "This is a great article");
+}
+
+#[test]
+fn note_list_for_item() {
+    let db = test_db();
+    let item = ContentItem {
+        id: Uuid::new_v4(),
+        url: Some("https://example.com/list-notes".to_owned()),
+        title: "Note List Test".to_owned(),
+        author: None,
+        content_type: ContentType::Article,
+        status: DocumentStatus::Inbox,
+        content_text: None,
+        excerpt: None,
+        published_at: None,
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.insert_content_item(&item)
+        .unwrap_or_else(|e| unreachable!("insert: {e}"));
+
+    for i in 0..3 {
+        let n = pergamon_core::model::Note {
+            id: Uuid::new_v4(),
+            content_item_id: item.id,
+            body: format!("Note {i}"),
+            created_at: now(),
+            updated_at: now(),
+        };
+        db.insert_note(&n)
+            .unwrap_or_else(|e| unreachable!("insert note {i}: {e}"));
+    }
+
+    let notes = db
+        .list_notes_for_item(item.id)
+        .unwrap_or_else(|e| unreachable!("list: {e}"));
+    assert_eq!(notes.len(), 3);
+}
+
+#[test]
+fn note_update_and_delete() {
+    let db = test_db();
+    let item = ContentItem {
+        id: Uuid::new_v4(),
+        url: Some("https://example.com/note-update".to_owned()),
+        title: "Note Update Test".to_owned(),
+        author: None,
+        content_type: ContentType::Article,
+        status: DocumentStatus::Inbox,
+        content_text: None,
+        excerpt: None,
+        published_at: None,
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.insert_content_item(&item)
+        .unwrap_or_else(|e| unreachable!("insert: {e}"));
+
+    let note = pergamon_core::model::Note {
+        id: Uuid::new_v4(),
+        content_item_id: item.id,
+        body: "Original".to_owned(),
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.insert_note(&note)
+        .unwrap_or_else(|e| unreachable!("insert: {e}"));
+
+    // Update.
+    db.update_note(note.id, "Updated body")
+        .unwrap_or_else(|e| unreachable!("update: {e}"));
+    let got = db
+        .get_note(note.id)
+        .unwrap_or_else(|e| unreachable!("get: {e}"));
+    assert_eq!(got.body, "Updated body");
+
+    // Delete.
+    let deleted = db
+        .delete_note(note.id)
+        .unwrap_or_else(|e| unreachable!("delete: {e}"));
+    assert!(deleted);
+
+    // Should be gone.
+    assert!(db.get_note(note.id).is_err());
+}
+
+#[test]
+fn notes_cascade_on_content_item_delete() {
+    let db = test_db();
+    let item = ContentItem {
+        id: Uuid::new_v4(),
+        url: Some("https://example.com/cascade".to_owned()),
+        title: "Cascade Test".to_owned(),
+        author: None,
+        content_type: ContentType::Article,
+        status: DocumentStatus::Inbox,
+        content_text: None,
+        excerpt: None,
+        published_at: None,
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.insert_content_item(&item)
+        .unwrap_or_else(|e| unreachable!("insert: {e}"));
+
+    let note = pergamon_core::model::Note {
+        id: Uuid::new_v4(),
+        content_item_id: item.id,
+        body: "Should be deleted with item".to_owned(),
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.insert_note(&note)
+        .unwrap_or_else(|e| unreachable!("insert note: {e}"));
+
+    // Delete the content item.
+    db.delete_content_item(item.id)
+        .unwrap_or_else(|e| unreachable!("delete item: {e}"));
+
+    // Note should be gone via CASCADE.
+    assert!(db.get_note(note.id).is_err());
+}
+
+// ======================================================================
+// Highlight listing and creation tests
+// ======================================================================
+
+#[test]
+fn create_highlight_with_auto_position() {
+    let db = test_db();
+    let source = ContentItem {
+        id: Uuid::new_v4(),
+        url: Some("https://example.com/source".to_owned()),
+        title: "Source Article".to_owned(),
+        author: Some("Author".to_owned()),
+        content_type: ContentType::Article,
+        status: DocumentStatus::Inbox,
+        content_text: Some("The quick brown fox jumps over the lazy dog".to_owned()),
+        excerpt: None,
+        published_at: None,
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.insert_content_item(&source)
+        .unwrap_or_else(|e| unreachable!("insert source: {e}"));
+
+    let hl = db
+        .create_highlight(source.id, "brown fox", Some("great phrase"), Some("yellow"))
+        .unwrap_or_else(|e| unreachable!("create highlight: {e}"));
+
+    // Verify content item.
+    assert_eq!(hl.content_type, ContentType::Highlight);
+    assert_eq!(hl.content_text.as_deref(), Some("brown fox"));
+
+    // Verify metadata.
+    let meta = db
+        .get_highlight_meta(hl.id)
+        .unwrap_or_else(|e| unreachable!("get meta: {e}"));
+    assert_eq!(meta.source_item_id, Some(source.id));
+    assert_eq!(meta.quote_text, "brown fox");
+    assert_eq!(meta.note.as_deref(), Some("great phrase"));
+    assert_eq!(meta.color.as_deref(), Some("yellow"));
+
+    // Position should be auto-detected.
+    assert_eq!(meta.position_start, Some(10)); // "The quick " = 10 chars
+    assert_eq!(meta.position_end, Some(19)); // "brown fox" = 9 chars
+}
+
+#[test]
+fn create_highlight_ambiguous_position() {
+    let db = test_db();
+    let source = ContentItem {
+        id: Uuid::new_v4(),
+        url: Some("https://example.com/ambig".to_owned()),
+        title: "Ambiguous Source".to_owned(),
+        author: None,
+        content_type: ContentType::Article,
+        status: DocumentStatus::Inbox,
+        content_text: Some("fox fox fox".to_owned()),
+        excerpt: None,
+        published_at: None,
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.insert_content_item(&source)
+        .unwrap_or_else(|e| unreachable!("insert: {e}"));
+
+    let hl = db
+        .create_highlight(source.id, "fox", None, None)
+        .unwrap_or_else(|e| unreachable!("create: {e}"));
+
+    let meta = db
+        .get_highlight_meta(hl.id)
+        .unwrap_or_else(|e| unreachable!("get meta: {e}"));
+    // Ambiguous — positions should be None.
+    assert!(meta.position_start.is_none());
+    assert!(meta.position_end.is_none());
+}
+
+#[test]
+fn list_highlights_with_filters() {
+    let db = test_db();
+
+    // Create two source articles.
+    let source1 = ContentItem {
+        id: Uuid::new_v4(),
+        url: Some("https://example.com/s1".to_owned()),
+        title: "Source 1".to_owned(),
+        author: None,
+        content_type: ContentType::Article,
+        status: DocumentStatus::Inbox,
+        content_text: Some("First article content".to_owned()),
+        excerpt: None,
+        published_at: None,
+        created_at: now(),
+        updated_at: now(),
+    };
+    let source2 = ContentItem {
+        id: Uuid::new_v4(),
+        url: Some("https://example.com/s2".to_owned()),
+        title: "Source 2".to_owned(),
+        author: None,
+        content_type: ContentType::Article,
+        status: DocumentStatus::Inbox,
+        content_text: Some("Second article content".to_owned()),
+        excerpt: None,
+        published_at: None,
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.insert_content_item(&source1)
+        .unwrap_or_else(|e| unreachable!("insert s1: {e}"));
+    db.insert_content_item(&source2)
+        .unwrap_or_else(|e| unreachable!("insert s2: {e}"));
+
+    // Create highlights.
+    db.create_highlight(source1.id, "First article", None, None)
+        .unwrap_or_else(|e| unreachable!("hl1: {e}"));
+    db.create_highlight(source2.id, "Second article", None, None)
+        .unwrap_or_else(|e| unreachable!("hl2: {e}"));
+
+    // List all.
+    let all = db
+        .list_highlights(None, None, None, None, None)
+        .unwrap_or_else(|e| unreachable!("list all: {e}"));
+    assert_eq!(all.len(), 2);
+
+    // Filter by source.
+    let from_s1 = db
+        .list_highlights(Some(source1.id), None, None, None, None)
+        .unwrap_or_else(|e| unreachable!("list s1: {e}"));
+    assert_eq!(from_s1.len(), 1);
+    assert_eq!(from_s1[0].1.quote_text, "First article");
+
+    // Limit.
+    let limited = db
+        .list_highlights(None, None, None, None, Some(1))
+        .unwrap_or_else(|e| unreachable!("limited: {e}"));
+    assert_eq!(limited.len(), 1);
+}
+
+#[test]
+fn highlight_searchable_via_fts() {
+    let db = test_db();
+    let source = ContentItem {
+        id: Uuid::new_v4(),
+        url: Some("https://example.com/fts-hl".to_owned()),
+        title: "FTS Source".to_owned(),
+        author: None,
+        content_type: ContentType::Article,
+        status: DocumentStatus::Inbox,
+        content_text: Some("Some unique content for highlight FTS test".to_owned()),
+        excerpt: None,
+        published_at: None,
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.insert_content_item(&source)
+        .unwrap_or_else(|e| unreachable!("insert: {e}"));
+
+    db.create_highlight(source.id, "xylophone_rare_word", None, None)
+        .unwrap_or_else(|e| unreachable!("create hl: {e}"));
+
+    let results = db
+        .search("xylophone_rare_word")
+        .unwrap_or_else(|e| unreachable!("search: {e}"));
+    assert!(
+        !results.is_empty(),
+        "highlight should be searchable via FTS"
+    );
+}
+
+#[test]
+fn backup_restore_includes_notes() {
+    let db = test_db();
+    let item = ContentItem {
+        id: Uuid::new_v4(),
+        url: Some("https://example.com/backup-notes".to_owned()),
+        title: "Backup Notes Test".to_owned(),
+        author: None,
+        content_type: ContentType::Article,
+        status: DocumentStatus::Inbox,
+        content_text: None,
+        excerpt: None,
+        published_at: None,
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.insert_content_item(&item)
+        .unwrap_or_else(|e| unreachable!("insert: {e}"));
+
+    let note = pergamon_core::model::Note {
+        id: Uuid::new_v4(),
+        content_item_id: item.id,
+        body: "A note to backup".to_owned(),
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.insert_note(&note)
+        .unwrap_or_else(|e| unreachable!("insert note: {e}"));
+
+    // Export.
+    let notes_out = db
+        .list_all_notes()
+        .unwrap_or_else(|e| unreachable!("list notes: {e}"));
+    let items_out = db
+        .list_all_content_items()
+        .unwrap_or_else(|e| unreachable!("list items: {e}"));
+
+    // Restore into a fresh database.
+    let dst = test_db();
+    dst.restore_backup(
+        &[],
+        &[],
+        &items_out,
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &notes_out,
+    )
+    .unwrap_or_else(|e| unreachable!("restore: {e}"));
+
+    let dst_notes = dst
+        .list_all_notes()
+        .unwrap_or_else(|e| unreachable!("dst notes: {e}"));
+    assert_eq!(dst_notes.len(), 1);
+    assert_eq!(dst_notes[0].body, "A note to backup");
+}
