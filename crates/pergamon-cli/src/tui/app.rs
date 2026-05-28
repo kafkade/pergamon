@@ -24,6 +24,8 @@ pub enum FilterMode {
     Feed(Uuid, String),
     /// Items from feeds in a specific folder.
     Folder(Uuid, String),
+    /// Full-text search results.
+    Search(String),
 }
 
 impl std::fmt::Display for FilterMode {
@@ -33,6 +35,7 @@ impl std::fmt::Display for FilterMode {
             Self::Status(s) => write!(f, "{s}"),
             Self::Feed(_, name) => write!(f, "Feed: {name}"),
             Self::Folder(_, name) => write!(f, "Folder: {name}"),
+            Self::Search(query) => write!(f, "Search: {query}"),
         }
     }
 }
@@ -66,6 +69,7 @@ pub enum ConfirmAction {
 }
 
 /// Top-level application state.
+#[allow(clippy::struct_excessive_bools)]
 pub struct App {
     /// Current view mode.
     pub view: View,
@@ -99,6 +103,10 @@ pub struct App {
     pub total_count: u64,
     /// Pending confirmation dialog.
     pub confirm: Option<ConfirmDialog>,
+    /// Whether the search input bar is visible.
+    pub show_search_input: bool,
+    /// Text being typed in the search input bar.
+    pub search_input: String,
 }
 
 impl App {
@@ -121,6 +129,8 @@ impl App {
             unread_count: 0,
             total_count: 0,
             confirm: None,
+            show_search_input: false,
+            search_input: String::new(),
         }
     }
 

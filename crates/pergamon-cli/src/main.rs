@@ -66,6 +66,35 @@ enum Command {
     },
     /// Open the TUI inbox / reader.
     Read,
+    /// Search across all content (title, author, content, tags).
+    Search {
+        /// Search query.
+        query: String,
+        /// Filter by content type (`feed_item`, `article`, `bookmark`, etc.).
+        #[arg(long = "type")]
+        content_type: Option<String>,
+        /// Filter by tag name.
+        #[arg(long)]
+        tag: Option<String>,
+        /// Filter by status (inbox, later, reading, reference, archived, discarded).
+        #[arg(long)]
+        status: Option<String>,
+        /// Filter by feed (title substring or UUID).
+        #[arg(long)]
+        source: Option<String>,
+        /// Only items created on or after this date (YYYY-MM-DD).
+        #[arg(long)]
+        since: Option<String>,
+        /// Only items created before this date (YYYY-MM-DD).
+        #[arg(long)]
+        before: Option<String>,
+        /// Maximum number of results (default: 20).
+        #[arg(long, default_value = "20")]
+        limit: u32,
+        /// Output format: text or json.
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
     /// Import data from external sources.
     Import {
         #[command(subcommand)]
@@ -168,6 +197,28 @@ fn main() -> Result<()> {
             bookmark,
         } => save_url(&db, url.as_deref(), &tags, bookmark),
         Command::Read => run_tui(&db),
+        Command::Search {
+            query,
+            content_type,
+            tag,
+            status,
+            source,
+            since,
+            before,
+            limit,
+            format,
+        } => handle_search(
+            &db,
+            &query,
+            content_type.as_deref(),
+            tag.as_deref(),
+            status.as_deref(),
+            source.as_deref(),
+            since.as_deref(),
+            before.as_deref(),
+            limit,
+            &format,
+        ),
         Command::Import { action } => handle_import(&db, action),
         Command::Export { action } => handle_export(&db, action),
     }
@@ -1014,6 +1065,193 @@ fn apply_tags(db: &Database, item_id: Uuid, tag_names: &[String]) -> Result<Vec<
 }
 
 // ======================================================================
+// Search command
+// ======================================================================
+
+/// Handle the `search` command: full-text search with faceted filters.
+#[allow(clippy::too_many_arguments)]
+fn handle_search(
+    db: &Database,
+    query: &str,
+    content_type: Option<&str>,
+    tag: Option<&str>,
+    status: Option<&str>,
+    source: Option<&str>,
+    since: Option<&str>,
+    before: Option<&str>,
+    limit: u32,
+    format: &str,
+) -> Result<()> {
+    let filter = build_search_filter(db, content_type, tag, status, source, since, before)?;
+
+    let hits = db
+        .search_filtered(query, &filter, Some(limit))
+        .context("search failed")?;
+
+    if hits.is_empty() {
+        println!("No results for \"{query}\"");
+        return Ok(());
+    }
+
+    if format == "json" {
+        print_search_json(&hits)?;
+    } else {
+        print_search_text(query, &hits);
+    }
+
+    Ok(())
+}
+
+/// Build a [`SearchFilter`] from CLI flag values.
+fn build_search_filter(
+    db: &Database,
+    content_type: Option<&str>,
+    tag: Option<&str>,
+    status: Option<&str>,
+    source: Option<&str>,
+    since: Option<&str>,
+    before: Option<&str>,
+) -> Result<pergamon_storage::SearchFilter> {
+    use pergamon_storage::SearchFilter;
+
+    let ct = content_type
+        .map(|s| {
+            s.parse::<ContentType>()
+                .map_err(|_| anyhow::anyhow!("invalid content type: {s}"))
+        })
+        .transpose()?;
+
+    let st = status
+        .map(|s| {
+            s.parse::<DocumentStatus>()
+                .map_err(|_| anyhow::anyhow!("invalid status: {s}"))
+        })
+        .transpose()?;
+
+    let feed_id = source.map(|s| resolve_source(db, s)).transpose()?;
+
+    let since_dt = since.map(parse_date_arg).transpose()?;
+    let before_dt = before.map(parse_date_arg).transpose()?;
+
+    Ok(SearchFilter {
+        content_type: ct,
+        status: st,
+        tag_name: tag.map(String::from),
+        feed_id,
+        since: since_dt,
+        before: before_dt,
+    })
+}
+
+/// Resolve a `--source` value to a feed UUID.
+///
+/// Accepts a UUID directly, or a feed title substring (case-insensitive).
+/// If multiple feeds match the title, lists them and returns an error.
+fn resolve_source(db: &Database, source: &str) -> Result<Uuid> {
+    // Try UUID first.
+    if let Ok(id) = Uuid::parse_str(source) {
+        return Ok(id);
+    }
+
+    // Search by title substring.
+    let feeds = db.list_feeds().context("failed to list feeds")?;
+    let lower = source.to_lowercase();
+    let matches: Vec<_> = feeds
+        .iter()
+        .filter(|f| f.title.to_lowercase().contains(&lower))
+        .collect();
+
+    match matches.len() {
+        0 => bail!("no feed matching \"{source}\""),
+        1 => Ok(matches[0].id),
+        _ => {
+            eprintln!("Multiple feeds match \"{source}\":");
+            for feed in &matches {
+                eprintln!("  {} [{}]", feed.title, feed.id);
+            }
+            bail!("use a more specific name or pass the feed UUID")
+        }
+    }
+}
+
+/// Parse a YYYY-MM-DD date argument into an `OffsetDateTime` at midnight UTC.
+fn parse_date_arg(s: &str) -> Result<OffsetDateTime> {
+    let format =
+        time::format_description::parse("[year]-[month]-[day]").context("invalid date format")?;
+    let date = time::Date::parse(s, &format)
+        .with_context(|| format!("invalid date: {s} (expected YYYY-MM-DD)"))?;
+    Ok(date
+        .with_hms(0, 0, 0)
+        .unwrap_or_else(|_| unreachable!("midnight is valid"))
+        .assume_utc())
+}
+
+/// Print search results as JSON.
+fn print_search_json(hits: &[pergamon_core::model::SearchHit]) -> Result<()> {
+    #[derive(serde::Serialize)]
+    struct JsonResult {
+        id: String,
+        title: String,
+        url: Option<String>,
+        author: Option<String>,
+        content_type: String,
+        status: String,
+        rank: f64,
+        snippet: Option<String>,
+    }
+
+    let results: Vec<JsonResult> = hits
+        .iter()
+        .map(|hit| JsonResult {
+            id: hit.item.id.to_string(),
+            title: hit.item.title.clone(),
+            url: hit.item.url.clone(),
+            author: hit.item.author.clone(),
+            content_type: hit.item.content_type.as_str().to_owned(),
+            status: hit.item.status.as_str().to_owned(),
+            rank: hit.rank,
+            snippet: hit.snippet.clone(),
+        })
+        .collect();
+
+    let json =
+        serde_json::to_string_pretty(&results).context("failed to serialize search results")?;
+    println!("{json}");
+    Ok(())
+}
+
+/// Print search results as formatted text.
+fn print_search_text(query: &str, hits: &[pergamon_core::model::SearchHit]) {
+    println!("Search: \"{}\" ({} results)\n", query, hits.len());
+
+    for (i, hit) in hits.iter().enumerate() {
+        let item = &hit.item;
+        let type_label = item.content_type.as_str();
+        let status_label = item.status.as_str();
+
+        println!(
+            "  {:<3} {} [{}] ({}/{})",
+            i + 1,
+            item.title,
+            item.id,
+            type_label,
+            status_label,
+        );
+
+        if let Some(ref url) = item.url {
+            println!("      {url}");
+        }
+
+        if let Some(ref snippet) = hit.snippet {
+            let clean = snippet.replace('\n', " ");
+            println!("      {clean}");
+        }
+
+        println!();
+    }
+}
+
+// ======================================================================
 // TUI command
 // ======================================================================
 
@@ -1071,10 +1309,19 @@ fn run_tui(db: &Database) -> Result<()> {
 
         match tui::event::handle_events(&mut app, db)? {
             tui::event::Action::Reload => {
-                let filter = tui::event::build_filter(&app.filter);
-                app.items = db
-                    .list_content_items_filtered(&filter, Some(ITEM_LIMIT), None)
-                    .context("failed to reload content items")?;
+                if let tui::app::FilterMode::Search(ref query) = app.filter {
+                    let search_filter = pergamon_storage::SearchFilter::default();
+                    let hits = db
+                        .search_filtered(query, &search_filter, Some(ITEM_LIMIT))
+                        .context("failed to run search")?;
+                    app.items = hits.into_iter().map(|h| h.item).collect();
+                    app.set_status(format!("Search: {} result(s)", app.items.len()));
+                } else {
+                    let filter = tui::event::build_filter(&app.filter);
+                    app.items = db
+                        .list_content_items_filtered(&filter, Some(ITEM_LIMIT), None)
+                        .context("failed to reload content items")?;
+                }
                 app.clamp_selection();
                 reload_metadata(&mut app, db)?;
             }
@@ -1099,10 +1346,18 @@ fn reload_metadata(app: &mut tui::app::App, db: &Database) -> Result<()> {
         .context("failed to count unread items")?;
 
     // Total items matching current filter.
-    let current_filter = tui::event::build_filter(&app.filter);
-    app.total_count = db
-        .count_content_items_filtered(&current_filter)
-        .context("failed to count items")?;
+    if let tui::app::FilterMode::Search(ref query) = app.filter {
+        let search_filter = pergamon_storage::SearchFilter::default();
+        let hits = db
+            .search_filtered(query, &search_filter, None)
+            .context("failed to count search results")?;
+        app.total_count = hits.len() as u64;
+    } else {
+        let current_filter = tui::event::build_filter(&app.filter);
+        app.total_count = db
+            .count_content_items_filtered(&current_filter)
+            .context("failed to count items")?;
+    }
 
     // Feeds and folders for the picker.
     app.feeds = db.list_feeds().context("failed to load feeds")?;

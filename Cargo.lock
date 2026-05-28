@@ -1470,6 +1470,8 @@ dependencies = [
  "pergamon-storage",
  "ratatui",
  "reqwest",
+ "serde",
+ "serde_json",
  "time",
  "uuid",
 ]

@@ -57,6 +57,11 @@ pub fn handle_events(app: &mut App, db: &Database) -> Result<Action> {
         return Ok(handle_picker_keys(app, key.code));
     }
 
+    // Search input mode.
+    if app.show_search_input {
+        return Ok(handle_search_input(app, key.code));
+    }
+
     match app.view {
         View::ItemList => handle_list_keys(app, db, key.code),
         View::Reader => handle_reader_keys(app, db, key.code),
@@ -159,6 +164,12 @@ fn handle_list_keys(app: &mut App, db: &Database, code: KeyCode) -> Result<Actio
         }
         // Bulk mark as read.
         KeyCode::Char('R') => initiate_bulk_mark_read(app, db),
+        // Search.
+        KeyCode::Char('/') => {
+            app.show_search_input = true;
+            app.search_input.clear();
+            Ok(Action::None)
+        }
         _ => Ok(Action::None),
     }
 }
@@ -205,7 +216,45 @@ fn handle_reader_keys(app: &mut App, db: &Database, code: KeyCode) -> Result<Act
             open_in_browser(app);
             Ok(Action::None)
         }
+        // Search (exits reader, opens search input).
+        KeyCode::Char('/') => {
+            app.close_reader();
+            app.show_search_input = true;
+            app.search_input.clear();
+            Ok(Action::None)
+        }
         _ => Ok(Action::None),
+    }
+}
+
+/// Handle key events in the search input bar.
+fn handle_search_input(app: &mut App, code: KeyCode) -> Action {
+    match code {
+        KeyCode::Esc => {
+            app.show_search_input = false;
+            app.search_input.clear();
+            Action::None
+        }
+        KeyCode::Enter => {
+            if app.search_input.is_empty() {
+                app.show_search_input = false;
+                return Action::None;
+            }
+            let query = app.search_input.clone();
+            app.show_search_input = false;
+            app.filter = FilterMode::Search(query);
+            app.selected = 0;
+            Action::Reload
+        }
+        KeyCode::Backspace => {
+            app.search_input.pop();
+            Action::None
+        }
+        KeyCode::Char(c) => {
+            app.search_input.push(c);
+            Action::None
+        }
+        _ => Action::None,
     }
 }
 
@@ -349,7 +398,8 @@ fn cycle_filter(app: &mut App) {
         }
         FilterMode::Status(DocumentStatus::Archived | DocumentStatus::Discarded)
         | FilterMode::Feed(..)
-        | FilterMode::Folder(..) => FilterMode::All,
+        | FilterMode::Folder(..)
+        | FilterMode::Search(_) => FilterMode::All,
     };
     app.selected = 0;
 }
@@ -373,6 +423,7 @@ fn initiate_bulk_mark_read(app: &mut App, db: &Database) -> Result<Action> {
         FilterMode::Status(_) => "current view".to_owned(),
         FilterMode::Feed(_, name) => format!("feed \"{name}\""),
         FilterMode::Folder(_, name) => format!("folder \"{name}\""),
+        FilterMode::Search(query) => format!("search \"{query}\""),
     };
 
     app.confirm = Some(ConfirmDialog {
@@ -387,7 +438,7 @@ fn initiate_bulk_mark_read(app: &mut App, db: &Database) -> Result<Action> {
 /// Build a [`ContentItemFilter`] from the current [`FilterMode`].
 pub fn build_filter(filter: &FilterMode) -> ContentItemFilter {
     match filter {
-        FilterMode::All => ContentItemFilter::default(),
+        FilterMode::All | FilterMode::Search(_) => ContentItemFilter::default(),
         FilterMode::Status(status) => ContentItemFilter {
             status: Some(*status),
             ..ContentItemFilter::default()

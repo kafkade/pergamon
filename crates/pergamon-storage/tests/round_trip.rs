@@ -10,6 +10,7 @@ use pergamon_core::model::{
 };
 use pergamon_core::status::DocumentStatus;
 use pergamon_storage::Database;
+use pergamon_storage::SearchFilter;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -668,4 +669,342 @@ fn get_nonexistent_feed_returns_not_found() {
             "expected not-found error, got: {e}"
         ),
     }
+}
+
+// ======================================================================
+// Filtered FTS search (search_filtered)
+// ======================================================================
+
+/// Helper: insert a content item and return it.
+fn insert_item(db: &Database, title: &str, ct: ContentType, status: DocumentStatus) -> ContentItem {
+    let item = ContentItem {
+        id: Uuid::new_v4(),
+        url: None,
+        title: title.to_owned(),
+        author: Some("Author".to_owned()),
+        content_type: ct,
+        status,
+        content_text: Some(format!("Body text for {title}")),
+        excerpt: None,
+        published_at: None,
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.insert_content_item(&item)
+        .unwrap_or_else(|e| unreachable!("insert failed: {e}"));
+    item
+}
+
+#[test]
+fn fts_search_filtered_basic() {
+    let db = test_db();
+    insert_item(
+        &db,
+        "Rust Ownership Guide",
+        ContentType::Article,
+        DocumentStatus::Inbox,
+    );
+    insert_item(
+        &db,
+        "Cooking Pasta",
+        ContentType::Article,
+        DocumentStatus::Inbox,
+    );
+
+    let filter = SearchFilter::default();
+    let hits = db
+        .search_filtered("Rust", &filter, None)
+        .unwrap_or_else(|e| unreachable!("search_filtered failed: {e}"));
+
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].item.title, "Rust Ownership Guide");
+    assert!(hits[0].rank < 0.0, "BM25 rank should be negative");
+}
+
+#[test]
+fn fts_search_filtered_by_type() {
+    let db = test_db();
+    insert_item(
+        &db,
+        "Rust News Feed",
+        ContentType::FeedItem,
+        DocumentStatus::Inbox,
+    );
+    insert_item(
+        &db,
+        "Rust Bookmark",
+        ContentType::Bookmark,
+        DocumentStatus::Inbox,
+    );
+
+    let filter = SearchFilter {
+        content_type: Some(ContentType::Bookmark),
+        ..SearchFilter::default()
+    };
+    let hits = db
+        .search_filtered("Rust", &filter, None)
+        .unwrap_or_else(|e| unreachable!("search_filtered failed: {e}"));
+
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].item.content_type, ContentType::Bookmark);
+}
+
+#[test]
+fn fts_search_filtered_by_status() {
+    let db = test_db();
+    insert_item(
+        &db,
+        "Rust in Inbox",
+        ContentType::Article,
+        DocumentStatus::Inbox,
+    );
+    insert_item(
+        &db,
+        "Rust Archived",
+        ContentType::Article,
+        DocumentStatus::Archived,
+    );
+
+    let filter = SearchFilter {
+        status: Some(DocumentStatus::Archived),
+        ..SearchFilter::default()
+    };
+    let hits = db
+        .search_filtered("Rust", &filter, None)
+        .unwrap_or_else(|e| unreachable!("search_filtered failed: {e}"));
+
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].item.status, DocumentStatus::Archived);
+}
+
+#[test]
+fn fts_search_filtered_by_tag() {
+    let db = test_db();
+    let item = insert_item(
+        &db,
+        "Tagged Rust Item",
+        ContentType::Article,
+        DocumentStatus::Inbox,
+    );
+    insert_item(
+        &db,
+        "Untagged Rust Item",
+        ContentType::Article,
+        DocumentStatus::Inbox,
+    );
+
+    let tag = Tag {
+        id: Uuid::new_v4(),
+        name: "programming".to_owned(),
+        created_at: now(),
+    };
+    db.insert_tag(&tag)
+        .unwrap_or_else(|e| unreachable!("insert_tag failed: {e}"));
+    db.tag_content_item(item.id, tag.id)
+        .unwrap_or_else(|e| unreachable!("tag_content_item failed: {e}"));
+
+    let filter = SearchFilter {
+        tag_name: Some("programming".to_owned()),
+        ..SearchFilter::default()
+    };
+    let hits = db
+        .search_filtered("Rust", &filter, None)
+        .unwrap_or_else(|e| unreachable!("search_filtered failed: {e}"));
+
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].item.id, item.id);
+}
+
+#[test]
+fn fts_search_filtered_by_date() {
+    let db = test_db();
+
+    // Insert two items with different timestamps.
+    let old = ContentItem {
+        id: Uuid::new_v4(),
+        url: None,
+        title: "Old Rust Article".to_owned(),
+        author: None,
+        content_type: ContentType::Article,
+        status: DocumentStatus::Inbox,
+        content_text: Some("Rust old stuff".to_owned()),
+        excerpt: None,
+        published_at: Some(
+            OffsetDateTime::from_unix_timestamp(1_600_000_000)
+                .unwrap_or_else(|_| unreachable!("valid timestamp")),
+        ),
+        created_at: OffsetDateTime::from_unix_timestamp(1_600_000_000)
+            .unwrap_or_else(|_| unreachable!("valid timestamp")),
+        updated_at: now(),
+    };
+    let recent = ContentItem {
+        id: Uuid::new_v4(),
+        url: None,
+        title: "Recent Rust Article".to_owned(),
+        author: None,
+        content_type: ContentType::Article,
+        status: DocumentStatus::Inbox,
+        content_text: Some("Rust recent stuff".to_owned()),
+        excerpt: None,
+        published_at: Some(now()),
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.insert_content_item(&old)
+        .unwrap_or_else(|e| unreachable!("insert failed: {e}"));
+    db.insert_content_item(&recent)
+        .unwrap_or_else(|e| unreachable!("insert failed: {e}"));
+
+    // Filter: only items since 2024-01-01.
+    let cutoff = OffsetDateTime::from_unix_timestamp(1_704_067_200)
+        .unwrap_or_else(|_| unreachable!("valid timestamp"));
+    let filter = SearchFilter {
+        since: Some(cutoff),
+        ..SearchFilter::default()
+    };
+    let hits = db
+        .search_filtered("Rust", &filter, None)
+        .unwrap_or_else(|e| unreachable!("search_filtered failed: {e}"));
+
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].item.id, recent.id);
+}
+
+#[test]
+fn fts_search_filtered_combined() {
+    let db = test_db();
+    insert_item(
+        &db,
+        "Rust Article Inbox",
+        ContentType::Article,
+        DocumentStatus::Inbox,
+    );
+    insert_item(
+        &db,
+        "Rust Bookmark Inbox",
+        ContentType::Bookmark,
+        DocumentStatus::Inbox,
+    );
+    insert_item(
+        &db,
+        "Rust Article Archived",
+        ContentType::Article,
+        DocumentStatus::Archived,
+    );
+
+    let filter = SearchFilter {
+        content_type: Some(ContentType::Article),
+        status: Some(DocumentStatus::Inbox),
+        ..SearchFilter::default()
+    };
+    let hits = db
+        .search_filtered("Rust", &filter, None)
+        .unwrap_or_else(|e| unreachable!("search_filtered failed: {e}"));
+
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].item.title, "Rust Article Inbox");
+}
+
+#[test]
+fn fts_search_filtered_with_limit() {
+    let db = test_db();
+    for i in 0..5 {
+        insert_item(
+            &db,
+            &format!("Rust Item {i}"),
+            ContentType::Article,
+            DocumentStatus::Inbox,
+        );
+    }
+
+    let filter = SearchFilter::default();
+    let hits = db
+        .search_filtered("Rust", &filter, Some(3))
+        .unwrap_or_else(|e| unreachable!("search_filtered failed: {e}"));
+
+    assert_eq!(hits.len(), 3);
+}
+
+#[test]
+fn fts_search_filtered_snippet_returned() {
+    let db = test_db();
+    let item = ContentItem {
+        id: Uuid::new_v4(),
+        url: None,
+        title: "Quantum Computing Overview".to_owned(),
+        author: None,
+        content_type: ContentType::Article,
+        status: DocumentStatus::Inbox,
+        content_text: Some(
+            "Quantum computing uses qubits which can be in superposition of states.".to_owned(),
+        ),
+        excerpt: None,
+        published_at: None,
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.insert_content_item(&item)
+        .unwrap_or_else(|e| unreachable!("insert failed: {e}"));
+
+    let filter = SearchFilter::default();
+    let hits = db
+        .search_filtered("superposition", &filter, None)
+        .unwrap_or_else(|e| unreachable!("search_filtered failed: {e}"));
+
+    assert_eq!(hits.len(), 1);
+    // Snippet should exist and contain the search term context.
+    assert!(hits[0].snippet.is_some(), "expected a snippet");
+}
+
+#[test]
+fn fts_search_filtered_no_results() {
+    let db = test_db();
+    insert_item(
+        &db,
+        "Cooking Pasta",
+        ContentType::Article,
+        DocumentStatus::Inbox,
+    );
+
+    let filter = SearchFilter::default();
+    let hits = db
+        .search_filtered("blockchain", &filter, None)
+        .unwrap_or_else(|e| unreachable!("search_filtered failed: {e}"));
+
+    assert!(hits.is_empty());
+}
+
+#[test]
+fn list_tags_round_trip() {
+    let db = test_db();
+
+    // Initially empty.
+    let tags = db
+        .list_tags()
+        .unwrap_or_else(|e| unreachable!("list_tags failed: {e}"));
+    assert!(tags.is_empty());
+
+    // Insert two tags.
+    let t1 = Tag {
+        id: Uuid::new_v4(),
+        name: "rust".to_owned(),
+        created_at: now(),
+    };
+    let t2 = Tag {
+        id: Uuid::new_v4(),
+        name: "python".to_owned(),
+        created_at: now(),
+    };
+    db.insert_tag(&t1)
+        .unwrap_or_else(|e| unreachable!("insert failed: {e}"));
+    db.insert_tag(&t2)
+        .unwrap_or_else(|e| unreachable!("insert failed: {e}"));
+
+    let tags = db
+        .list_tags()
+        .unwrap_or_else(|e| unreachable!("list_tags failed: {e}"));
+    assert_eq!(tags.len(), 2);
+    let names: Vec<_> = tags.iter().map(|t| t.name.as_str()).collect();
+    assert!(names.contains(&"rust"));
+    assert!(names.contains(&"python"));
 }

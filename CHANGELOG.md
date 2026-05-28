@@ -58,3 +58,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Duplicate saves still apply new tags to the existing item
 - `get_or_create_tag` storage method for race-safe tag creation by name
 - V4 migration: partial unique index on `content_items.url` and case-insensitive unique index on `tags.name`
+- `pergamon search <query>` command: full-text search across all content (title, author, body, tags)
+- Search faceted filters: `--type`, `--tag`, `--status`, `--source`, `--since`, `--before`
+- `--source` filter accepts feed title substring (case-insensitive) or UUID
+- JSON output format for search results (`--format json`)
+- Search results show BM25-ranked hits with snippet context
+- TUI search: press `/` in list or reader view to search all content
+- Search input bar with live typing, Enter to submit, Esc to cancel
+- Help overlay updated with `/` search keybinding
