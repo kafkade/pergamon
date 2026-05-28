@@ -25,11 +25,18 @@ use crate::error::StorageError;
 // ======================================================================
 
 /// Ordered list of migrations. Each entry is (version, description, sql).
-const MIGRATIONS: &[(i64, &str, &str)] = &[(
-    1,
-    "initial_schema",
-    include_str!("../migrations/V1__initial_schema.sql"),
-)];
+const MIGRATIONS: &[(i64, &str, &str)] = &[
+    (
+        1,
+        "initial_schema",
+        include_str!("../migrations/V1__initial_schema.sql"),
+    ),
+    (
+        2,
+        "feed_health_tracking",
+        include_str!("../migrations/V2__feed_health_tracking.sql"),
+    ),
+];
 
 /// Run all pending migrations inside a transaction.
 fn run_migrations(conn: &Connection) -> Result<(), StorageError> {
@@ -103,15 +110,22 @@ impl Database {
     /// Insert a new feed.
     pub fn insert_feed(&self, feed: &Feed) -> Result<(), StorageError> {
         self.conn.execute(
-            "INSERT INTO feeds (id, title, url, site_url, description, last_fetched_at, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO feeds (id, title, url, site_url, description, etag,
+                last_modified_header, error_count, last_error,
+                last_fetched_at, last_successful_fetch_at, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 feed.id.to_string(),
                 feed.title,
                 feed.url,
                 feed.site_url,
                 feed.description,
+                feed.etag,
+                feed.last_modified_header,
+                feed.error_count,
+                feed.last_error,
                 feed.last_fetched_at.map(fmt_time),
+                feed.last_fetched_at.map(fmt_time), // last_successful_fetch_at = last_fetched_at on insert
                 fmt_time(feed.created_at),
                 fmt_time(feed.updated_at),
             ],
@@ -123,27 +137,124 @@ impl Database {
     pub fn get_feed(&self, id: Uuid) -> Result<Feed, StorageError> {
         self.conn
             .query_row(
-                "SELECT id, title, url, site_url, description, last_fetched_at, created_at, updated_at
+                "SELECT id, title, url, site_url, description, etag,
+                        last_modified_header, error_count, last_error,
+                        last_fetched_at, created_at, updated_at
                  FROM feeds WHERE id = ?1",
                 params![id.to_string()],
-                |row| {
-                    Ok(Feed {
-                        id: parse_uuid(&row.get::<_, String>(0)?),
-                        title: row.get(1)?,
-                        url: row.get(2)?,
-                        site_url: row.get(3)?,
-                        description: row.get(4)?,
-                        last_fetched_at: row.get::<_, Option<String>>(5)?.map(|s| parse_time(&s)),
-                        created_at: parse_time(&row.get::<_, String>(6)?),
-                        updated_at: parse_time(&row.get::<_, String>(7)?),
-                    })
-                },
+                |row| Ok(row_to_feed(row)),
             )
             .optional()?
             .ok_or_else(|| StorageError::NotFound {
                 entity: "feed",
                 id: id.to_string(),
             })
+    }
+
+    /// Retrieve a feed by its URL.
+    pub fn get_feed_by_url(&self, url: &str) -> Result<Option<Feed>, StorageError> {
+        self.conn
+            .query_row(
+                "SELECT id, title, url, site_url, description, etag,
+                        last_modified_header, error_count, last_error,
+                        last_fetched_at, created_at, updated_at
+                 FROM feeds WHERE url = ?1",
+                params![url],
+                |row| Ok(row_to_feed(row)),
+            )
+            .optional()
+            .map_err(StorageError::from)
+    }
+
+    /// List all feeds, ordered by title.
+    pub fn list_feeds(&self) -> Result<Vec<Feed>, StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, title, url, site_url, description, etag,
+                    last_modified_header, error_count, last_error,
+                    last_fetched_at, created_at, updated_at
+             FROM feeds ORDER BY title COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map([], |row| Ok(row_to_feed(row)))?;
+        let mut feeds = Vec::new();
+        for row in rows {
+            feeds.push(row?);
+        }
+        Ok(feeds)
+    }
+
+    /// Delete a feed and all associated data (cascades to `feed_item_meta`).
+    pub fn delete_feed(&self, id: Uuid) -> Result<bool, StorageError> {
+        let count = self
+            .conn
+            .execute("DELETE FROM feeds WHERE id = ?1", params![id.to_string()])?;
+        Ok(count > 0)
+    }
+
+    /// Record a successful feed fetch (with or without new content).
+    pub fn update_feed_fetch_success(
+        &self,
+        id: Uuid,
+        etag: Option<&str>,
+        last_modified: Option<&str>,
+    ) -> Result<(), StorageError> {
+        let now = fmt_time(OffsetDateTime::now_utc());
+        self.conn.execute(
+            "UPDATE feeds SET
+                etag = ?2,
+                last_modified_header = ?3,
+                error_count = 0,
+                last_error = NULL,
+                last_fetched_at = ?4,
+                last_successful_fetch_at = ?4
+             WHERE id = ?1",
+            params![id.to_string(), etag, last_modified, now],
+        )?;
+        Ok(())
+    }
+
+    /// Record a failed feed fetch.
+    pub fn update_feed_fetch_error(
+        &self,
+        id: Uuid,
+        error_message: &str,
+    ) -> Result<(), StorageError> {
+        let now = fmt_time(OffsetDateTime::now_utc());
+        self.conn.execute(
+            "UPDATE feeds SET
+                error_count = error_count + 1,
+                last_error = ?2,
+                last_fetched_at = ?3
+             WHERE id = ?1",
+            params![id.to_string(), error_message, now],
+        )?;
+        Ok(())
+    }
+
+    /// Check whether a feed item already exists by GUID within a feed.
+    pub fn feed_item_exists_by_guid(
+        &self,
+        feed_id: Uuid,
+        guid: &str,
+    ) -> Result<bool, StorageError> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM feed_item_meta
+             WHERE feed_id = ?1 AND guid = ?2",
+            params![feed_id.to_string(), guid],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Check whether a feed item already exists by URL within a feed.
+    pub fn feed_item_exists_by_url(&self, feed_id: Uuid, url: &str) -> Result<bool, StorageError> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM feed_item_meta fm
+             JOIN content_items ci ON ci.id = fm.content_item_id
+             WHERE fm.feed_id = ?1 AND ci.url = ?2",
+            params![feed_id.to_string(), url],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
     }
 
     // ------------------------------------------------------------------
@@ -633,5 +744,30 @@ fn row_to_content_item(row: &rusqlite::Row<'_>) -> ContentItem {
             .map(|s| parse_time(&s)),
         created_at: parse_time(&row.get::<_, String>(9).unwrap_or_default()),
         updated_at: parse_time(&row.get::<_, String>(10).unwrap_or_default()),
+    }
+}
+
+/// Map a rusqlite `Row` to a `Feed`.
+///
+/// Expected column order: `id`, `title`, `url`, `site_url`, `description`, `etag`,
+/// `last_modified_header`, `error_count`, `last_error`, `last_fetched_at`,
+/// `created_at`, `updated_at`.
+fn row_to_feed(row: &rusqlite::Row<'_>) -> Feed {
+    Feed {
+        id: parse_uuid(&row.get::<_, String>(0).unwrap_or_default()),
+        title: row.get(1).unwrap_or_default(),
+        url: row.get(2).unwrap_or_default(),
+        site_url: row.get(3).unwrap_or_default(),
+        description: row.get(4).unwrap_or_default(),
+        etag: row.get(5).unwrap_or_default(),
+        last_modified_header: row.get(6).unwrap_or_default(),
+        error_count: row.get(7).unwrap_or_default(),
+        last_error: row.get(8).unwrap_or_default(),
+        last_fetched_at: row
+            .get::<_, Option<String>>(9)
+            .unwrap_or_default()
+            .map(|s| parse_time(&s)),
+        created_at: parse_time(&row.get::<_, String>(10).unwrap_or_default()),
+        updated_at: parse_time(&row.get::<_, String>(11).unwrap_or_default()),
     }
 }

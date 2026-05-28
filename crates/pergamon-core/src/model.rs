@@ -55,7 +55,15 @@ pub struct Feed {
     pub site_url: Option<String>,
     /// Feed description.
     pub description: Option<String>,
-    /// When the feed was last successfully fetched.
+    /// HTTP `ETag` header from the last fetch (for conditional GET).
+    pub etag: Option<String>,
+    /// HTTP `Last-Modified` header from the last fetch (for conditional GET).
+    pub last_modified_header: Option<String>,
+    /// Number of consecutive fetch errors.
+    pub error_count: i32,
+    /// Description of the last fetch error.
+    pub last_error: Option<String>,
+    /// When the feed was last successfully fetched (content changed or 304).
     pub last_fetched_at: Option<OffsetDateTime>,
     /// When this feed was added to pergamon.
     pub created_at: OffsetDateTime,

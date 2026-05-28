@@ -6,3 +6,9 @@
 //! - Parsing RSS 2.0, Atom 1.0, and JSON Feed 1.1 formats (via `feed-rs`)
 //! - OPML import and export for subscription lists
 //! - Feed URL discovery from web page `<link>` tags
+
+mod error;
+mod parser;
+
+pub use error::FeedError;
+pub use parser::{ParsedEntry, ParsedFeed, parse_feed};
