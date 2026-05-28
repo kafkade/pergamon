@@ -2285,7 +2285,7 @@ Import/export is not a supporting feature for pergamon. It is one of the main re
 | Inoreader saved/starred/history export | Service export/API | Read state, saved items, stars, tags | Phase 2 | 🟡 | [Validation Required] |
 | Netscape bookmark HTML | `.html` | Browser bookmarks/folders | MVP | 🟢 | [Validated] |
 | Raindrop.io export | CSV/JSON | URLs, tags, collections, notes, dates | Phase 2 | 🟡 | [Validation Required] |
-| Readwise export/API | CSV/API | Highlights, notes, source refs, tags, review context | Phase 2 | 🟡 | [Validation Required] |
+| Readwise export/API | CSV/API | Highlights, notes, source refs, tags, review context | Phase 2 | 🟢 | [Implemented] |
 | Readwise Reader export/API | CSV/JSON/API | Saved articles, highlights, read state, tags | Phase 2 | 🔴 | [Validation Required] |
 | Kindle `My Clippings.txt` | Plain text | Highlights, notes, location markers | MVP | 🟢 | [Validated] |
 | Local PDF import | File/folder | PDF asset, metadata, extracted text, hash | MVP | 🟢 | [Validated] |
@@ -2917,18 +2917,18 @@ Predictable, portable, well-maintained, and aligned with the rest of the Rust ec
 
 ---
 
-### Phase 3: Knowledge Retention (Highlights, FSRS, Kindle, Readwise Import) 🟡
+### Phase 3: Knowledge Retention (Highlights, FSRS, Kindle, Readwise Import) ✅
 
 **Theme:** *“Saved things become remembered things.”*  
 **Goal:** add the retention loop that turns pergamon from archive to personal learning system: highlights, notes, resurfacing, and migration paths from Readwise/Kindle workflows. **[Validated]**
 
 **Deliverables**
 
-1. Unified highlight and note model across reader selections, imported clippings, and imported exports. **[Validated]**
-2. Review queue and spaced repetition scheduling using FSRS. **[Validated]**
-3. Kindle **My Clippings** import and Readwise export import. **[Validation Required]**
-4. Inline highlighting inside pergamon’s reader flows. **[Validation Required]**
-5. Retention stats: due count, review completion, resurfaced highlights, source breakdown. **[Validated]**
+1. Unified highlight and note model across reader selections, imported clippings, and imported exports. **[Implemented]**
+2. Review queue and spaced repetition scheduling using FSRS. **[Implemented]**
+3. Kindle **My Clippings** import and Readwise export import. **[Implemented]**
+4. Inline highlighting inside pergamon's reader flows. **[Implemented]**
+5. Retention stats: due count, review completion, resurfaced highlights, source breakdown. **[Implemented]**
 
 **Acceptance criteria for top 3**
 

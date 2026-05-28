@@ -125,9 +125,9 @@ Use conventional commits: `feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `chore
 - Repository scaffolding: GitHub templates, CI workflow, copilot instructions, contribution guide, and licensing
 - Architecture Decision Records (`docs/adr/ADR-001` through `ADR-010`)
 - Product roadmap (`docs/roadmap.md`)
-- Cargo workspace with five crates: `pergamon-core`, `pergamon-storage`, `pergamon-feed`, `pergamon-extract`, `pergamon-cli`
+- Cargo workspace with six crates: `pergamon-core`, `pergamon-storage`, `pergamon-feed`, `pergamon-extract`, `pergamon-import`, `pergamon-cli`
 - Unified content model: domain types for content items, feeds, feed folders, tags, collections, highlights, and bookmarks (`pergamon-core`)
-- SQLite schema with FTS5 full-text search (4 migrations), extension tables, `updated_at` triggers (`pergamon-storage`)
+- SQLite schema with FTS5 full-text search (8 migrations), extension tables, `updated_at` triggers (`pergamon-storage`)
 - Custom embedded migration runner for schema versioning
 - CRUD operations for all content entities with filtered listing and full-text search
 - Feed subscription and sync engine: `feed add/list/refresh/remove`, `sync` commands
@@ -147,13 +147,25 @@ Use conventional commits: `feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `chore
 - Configuration file support: `config` command, TOML config at platform config dir
 - Shell completions: `completions <shell>` for bash/zsh/fish/powershell
 - Test fixture corpus: 25 feed fixtures, 29 extraction HTML fixtures, corpus integration tests
+- Collections, tags, and bulk organization: `collection` and `tag` command groups, nested collections, bulk tag/move/archive/delete (#13)
+- Raindrop.io CSV import and Pocket HTML import with dry-run and idempotent re-import (#14)
+- Metadata enrichment: favicon, JSON-LD author, `og:site_name`, Twitter Card fallback (#15)
+- Duplicate detection (`doctor dupes`) and merge (`doctor merge`) with canonical URL matching (#16)
+- Link health checking (`doctor links`) with `--stale` flag for incremental re-checking (#17)
+- Highlight and note model: `highlight add/list/show/export`, `note add/list/edit/delete`, TUI highlight capture (#18)
+- Notes table with cascade deletion (V7 migration), highlights searchable via FTS
+- FSRS-5 spaced repetition engine in `pergamon-core` (pure computation, zero I/O) (#19)
+- Review cards and review logs: `review enable/disable/due/stats/start` commands, TUI review mode (#19)
+- Review cards and review logs tables with FK cascades (V8 migration)
+- Kindle My Clippings.txt import: `import kindle` with BOM handling, multi-format date parsing, highlight/note dedup (#20)
+- Readwise CSV export import: `import readwise` with flexible headers, source type mapping, tag preservation (#21)
+- `--dry-run` and `--enable-review` flags for Kindle and Readwise imports
+- Idempotent re-import via synthetic stable URLs (`kindle://` and `readwise://` schemes)
+- Transaction-wrapped bulk imports for atomicity and performance
+- Backup and restore includes notes, review cards, and review logs
 
 ### What's NOT yet implemented
 
-- Collections, tags, and bulk organization UI (#13)
-- Raindrop.io and Pocket import (#14)
-- Metadata enrichment, duplicate detection, link health checking (#15-#17)
-- Highlights, notes, and spaced repetition (#18-#22)
 - Obsidian plugin (#23)
 - Stable export contracts (#24)
 - Smart collections, content rules, analytics (#25-#27)
@@ -165,10 +177,11 @@ Use conventional commits: `feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `chore
 
 **Crates:**
 
-- `crates/pergamon-core/` — Domain model, content types, status enum (zero I/O)
-- `crates/pergamon-storage/` — SQLite + FTS5, migrations, CRUD operations
+- `crates/pergamon-core/` — Domain model, content types, status enum, FSRS-5 spaced repetition engine (zero I/O)
+- `crates/pergamon-storage/` — SQLite + FTS5, 8 migrations, CRUD operations, transaction API
 - `crates/pergamon-feed/` — RSS/Atom/JSON Feed parsing, OPML import/export
 - `crates/pergamon-extract/` — Article extraction, HTML sanitization, URL canonicalization
+- `crates/pergamon-import/` — Importers: OPML, Raindrop.io (CSV), Pocket (HTML), Kindle (My Clippings.txt), Readwise (CSV)
 - `crates/pergamon-cli/` — CLI binary (clap), TUI (ratatui), HTTP (reqwest)
 
 **Documentation:**
