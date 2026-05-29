@@ -193,6 +193,9 @@ pub struct Tag {
 }
 
 /// A hierarchical collection (folder).
+///
+/// Collections can be either manual (items added/removed explicitly) or
+/// *smart* (membership computed dynamically from a filter query).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Collection {
     /// Stable unique identifier.
@@ -203,6 +206,10 @@ pub struct Collection {
     pub parent_id: Option<Uuid>,
     /// Sort order within the parent.
     pub sort_order: i32,
+    /// Whether this is a smart (auto-populated) collection.
+    pub is_smart: bool,
+    /// The filter query string for smart collections (DSL syntax).
+    pub filter_query: Option<String>,
     /// When this collection was created.
     pub created_at: OffsetDateTime,
     /// When this collection was last updated.

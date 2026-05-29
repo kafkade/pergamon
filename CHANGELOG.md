@@ -49,6 +49,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `--type`: filter by content type
   - Outputs to file or stdout
 - Export format documentation (`docs/export-format.md`): schema reference, stability guarantees, examples
+- Smart collections: rule-based dynamic collections using a filter DSL
+  - `collection create <name> --smart "type:article tag:rust"`: create a smart collection
+  - `collection edit-filter <id> <query>`: update a smart collection's filter
+  - `collection show <id>`: displays dynamically matching items for smart collections
+  - `collection list`: shows `[smart]` indicator and dynamic item counts
+  - Filter DSL supports: `type:`, `tag:`, `status:`, `source:`, `since:`, `before:`, `text:` predicates
+  - Predicates AND together; comma-separated values within a predicate OR together
+  - Negation with `-status:discarded` syntax
+  - Smart collections guard against manual `add`/`remove` operations
+- Saved searches: create named smart collections from search queries
+  - `search --save <name>`: save a search as a smart collection
+  - `saved-search <name>`: re-run a saved search
+  - `list-saved`: list all saved searches with their filters
+- Smart filter DSL parser in `pergamon-core` (pure computation, zero I/O)
+- `StorageError::Constraint` variant for smart collection guard errors
+- V9 migration: `is_smart` and `filter_query` columns on collections table with trigger-based constraints
+- TUI `SmartCollection` filter mode (preparatory for smart collection picker)
 
 ## [0.3.0] - 2026-05-28
 

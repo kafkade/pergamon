@@ -423,6 +423,8 @@ fn collection_insert_get_and_associate() {
         name: "Tech".to_owned(),
         parent_id: None,
         sort_order: 0,
+        is_smart: false,
+        filter_query: None,
         created_at: now(),
         updated_at: now(),
     };
@@ -434,6 +436,8 @@ fn collection_insert_get_and_associate() {
         name: "Rust".to_owned(),
         parent_id: Some(parent.id),
         sort_order: 1,
+        is_smart: false,
+        filter_query: None,
         created_at: now(),
         updated_at: now(),
     };
@@ -1115,6 +1119,8 @@ fn backup_round_trip() {
         name: "Reading List".to_owned(),
         parent_id: None,
         sort_order: 1,
+        is_smart: false,
+        filter_query: None,
         created_at: now(),
         updated_at: now(),
     };
@@ -1259,8 +1265,8 @@ fn schema_version_returns_latest() {
     let version = db
         .schema_version()
         .unwrap_or_else(|e| unreachable!("version: {e}"));
-    // We have 8 migrations (V1–V8).
-    assert_eq!(version, 8);
+    // We have 9 migrations (V1–V9).
+    assert_eq!(version, 9);
 }
 
 #[test]
@@ -1304,6 +1310,8 @@ mod collection_tag_bulk {
             name: name.to_owned(),
             parent_id,
             sort_order: 0,
+            is_smart: false,
+            filter_query: None,
             created_at: now(),
             updated_at: now(),
         };
@@ -1428,6 +1436,169 @@ mod collection_tag_bulk {
         // Child should now have no parent (promoted).
         let got = db.get_collection(child.id).unwrap();
         assert_eq!(got.parent_id, None);
+    }
+
+    // ======================================================================
+    // Smart collection tests
+    // ======================================================================
+
+    #[test]
+    fn smart_collection_create_and_query() {
+        let db = test_db();
+
+        // Create an article.
+        let article = make_item(&db, "Rust Article");
+        // make_item creates with ContentType::Article.
+
+        // Create a feed_item (different content type).
+        let feed_item = ContentItem {
+            id: Uuid::new_v4(),
+            url: Some(format!("https://example.com/{}", Uuid::new_v4())),
+            title: "Feed Post".to_owned(),
+            author: None,
+            content_type: ContentType::FeedItem,
+            status: DocumentStatus::Inbox,
+            content_text: Some("Feed content".to_owned()),
+            excerpt: None,
+            published_at: None,
+            created_at: now(),
+            updated_at: now(),
+        };
+        db.insert_content_item(&feed_item).unwrap();
+
+        // Create a smart collection filtering for articles.
+        let now = now();
+        let smart = Collection {
+            id: Uuid::new_v4(),
+            name: "Articles Only".to_owned(),
+            parent_id: None,
+            sort_order: 0,
+            is_smart: true,
+            filter_query: Some("type:article".to_owned()),
+            created_at: now,
+            updated_at: now,
+        };
+        db.insert_collection(&smart).unwrap();
+
+        // Query should return only the article.
+        let items = db.list_smart_collection_items(smart.id).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, article.id);
+
+        // Count should match.
+        let count = db.count_smart_collection_items(smart.id).unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn smart_collection_guards_reject_manual_ops() {
+        let db = test_db();
+        let item = make_item(&db, "Test Item");
+        let now = now();
+        let smart = Collection {
+            id: Uuid::new_v4(),
+            name: "Smart Guard Test".to_owned(),
+            parent_id: None,
+            sort_order: 0,
+            is_smart: true,
+            filter_query: Some("status:inbox".to_owned()),
+            created_at: now,
+            updated_at: now,
+        };
+        db.insert_collection(&smart).unwrap();
+
+        // Adding to smart collection should fail.
+        let err = db.add_to_collection(item.id, smart.id, 0);
+        assert!(err.is_err());
+
+        // Removing from smart collection should also fail.
+        let err = db.remove_from_collection(item.id, smart.id);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn smart_collection_update_filter() {
+        let db = test_db();
+        let now = now();
+        let smart = Collection {
+            id: Uuid::new_v4(),
+            name: "Updatable Smart".to_owned(),
+            parent_id: None,
+            sort_order: 0,
+            is_smart: true,
+            filter_query: Some("type:article".to_owned()),
+            created_at: now,
+            updated_at: now,
+        };
+        db.insert_collection(&smart).unwrap();
+
+        // Update the filter.
+        db.update_smart_filter(smart.id, "type:bookmark").unwrap();
+
+        // Verify the filter was updated.
+        let got = db.get_collection(smart.id).unwrap();
+        assert_eq!(got.filter_query.as_deref(), Some("type:bookmark"));
+    }
+
+    #[test]
+    fn smart_collection_with_status_filter() {
+        let db = test_db();
+        let item = make_item(&db, "Inbox Item");
+        // Default status is inbox, so this should match.
+
+        let now = now();
+        let smart = Collection {
+            id: Uuid::new_v4(),
+            name: "Inbox Items".to_owned(),
+            parent_id: None,
+            sort_order: 0,
+            is_smart: true,
+            filter_query: Some("status:inbox".to_owned()),
+            created_at: now,
+            updated_at: now,
+        };
+        db.insert_collection(&smart).unwrap();
+
+        let items = db.list_smart_collection_items(smart.id).unwrap();
+        assert!(items.iter().any(|i| i.id == item.id));
+    }
+
+    #[test]
+    fn smart_collection_listed_with_is_smart_flag() {
+        let db = test_db();
+        let now = now();
+
+        let manual = Collection {
+            id: Uuid::new_v4(),
+            name: "Manual".to_owned(),
+            parent_id: None,
+            sort_order: 0,
+            is_smart: false,
+            filter_query: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let smart = Collection {
+            id: Uuid::new_v4(),
+            name: "Smart".to_owned(),
+            parent_id: None,
+            sort_order: 0,
+            is_smart: true,
+            filter_query: Some("type:article".to_owned()),
+            created_at: now,
+            updated_at: now,
+        };
+        db.insert_collection(&manual).unwrap();
+        db.insert_collection(&smart).unwrap();
+
+        let colls = db.list_collections().unwrap();
+        let manual_got = colls.iter().find(|c| c.name == "Manual").unwrap();
+        let smart_got = colls.iter().find(|c| c.name == "Smart").unwrap();
+
+        assert!(!manual_got.is_smart);
+        assert!(manual_got.filter_query.is_none());
+        assert!(smart_got.is_smart);
+        assert_eq!(smart_got.filter_query.as_deref(), Some("type:article"));
     }
 
     // ======================================================================

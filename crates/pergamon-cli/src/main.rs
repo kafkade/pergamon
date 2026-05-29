@@ -96,7 +96,20 @@ enum Command {
         /// Output format: text or json.
         #[arg(long, default_value = "text")]
         format: String,
+        /// Save this search as a smart collection with the given name.
+        #[arg(long)]
+        save: Option<String>,
     },
+    /// Run a previously saved search by name.
+    SavedSearch {
+        /// Name of the saved search (smart collection).
+        name: String,
+        /// Maximum number of results (default: 20).
+        #[arg(long, default_value = "20")]
+        limit: u32,
+    },
+    /// List all saved searches (smart collections).
+    ListSaved,
     /// Import data from external sources.
     Import {
         #[command(subcommand)]
@@ -324,6 +337,9 @@ enum CollectionAction {
         /// Parent collection (name or UUID).
         #[arg(long)]
         parent: Option<String>,
+        /// Create a smart (auto-populated) collection with the given filter.
+        #[arg(long)]
+        smart: Option<String>,
     },
     /// List all collections.
     List {
@@ -373,6 +389,13 @@ enum CollectionAction {
     Show {
         /// Collection (name or UUID).
         collection: String,
+    },
+    /// Update the filter query of a smart collection.
+    EditFilter {
+        /// Collection (name or UUID).
+        collection: String,
+        /// New filter query string (DSL syntax).
+        filter: String,
     },
 }
 
@@ -699,18 +722,37 @@ fn main() -> Result<()> {
             before,
             limit,
             format,
-        } => handle_search(
-            &db,
-            &query,
-            content_type.as_deref(),
-            tag.as_deref(),
-            status.as_deref(),
-            source.as_deref(),
-            since.as_deref(),
-            before.as_deref(),
-            limit,
-            &format,
-        ),
+            save,
+        } => {
+            handle_search(
+                &db,
+                &query,
+                content_type.as_deref(),
+                tag.as_deref(),
+                status.as_deref(),
+                source.as_deref(),
+                since.as_deref(),
+                before.as_deref(),
+                limit,
+                &format,
+            )?;
+            if let Some(name) = save {
+                save_search(
+                    &db,
+                    &name,
+                    &query,
+                    content_type.as_deref(),
+                    tag.as_deref(),
+                    status.as_deref(),
+                    source.as_deref(),
+                    since.as_deref(),
+                    before.as_deref(),
+                )?;
+            }
+            Ok(())
+        }
+        Command::SavedSearch { name, limit } => run_saved_search(&db, &name, limit),
+        Command::ListSaved => list_saved_searches(&db),
         Command::Import { action } => handle_import(&db, action),
         Command::Export { action } => handle_export(&db, action),
         Command::Collection { action } => handle_collection(&db, action),
@@ -2072,6 +2114,8 @@ fn apply_collection(db: &Database, item_id: Uuid, folder_name: &str) -> Result<(
             name: folder_name.to_owned(),
             parent_id: None,
             sort_order: 0,
+            is_smart: false,
+            filter_query: None,
             created_at: now,
             updated_at: now,
         };
@@ -2759,6 +2803,115 @@ fn handle_search(
     Ok(())
 }
 
+/// Save a search as a smart collection.
+#[allow(clippy::too_many_arguments)]
+fn save_search(
+    db: &Database,
+    name: &str,
+    query: &str,
+    content_type: Option<&str>,
+    tag: Option<&str>,
+    status: Option<&str>,
+    source: Option<&str>,
+    since: Option<&str>,
+    before: Option<&str>,
+) -> Result<()> {
+    // Build DSL filter string from search parameters.
+    let mut parts = Vec::new();
+    parts.push(format!("text:{query}"));
+    if let Some(ct) = content_type {
+        parts.push(format!("type:{ct}"));
+    }
+    if let Some(t) = tag {
+        parts.push(format!("tag:{t}"));
+    }
+    if let Some(s) = status {
+        parts.push(format!("status:{s}"));
+    }
+    if let Some(src) = source {
+        parts.push(format!("source:{src}"));
+    }
+    if let Some(s) = since {
+        parts.push(format!("since:{s}"));
+    }
+    if let Some(b) = before {
+        parts.push(format!("before:{b}"));
+    }
+    let filter_str = parts.join(" ");
+
+    // Validate.
+    pergamon_core::smart_filter::SmartFilter::parse(&filter_str)
+        .map_err(|e| anyhow::anyhow!("invalid filter: {e}"))?;
+
+    let now = OffsetDateTime::now_utc();
+    let coll = Collection {
+        id: Uuid::new_v4(),
+        name: name.to_owned(),
+        parent_id: None,
+        sort_order: 0,
+        is_smart: true,
+        filter_query: Some(filter_str.clone()),
+        created_at: now,
+        updated_at: now,
+    };
+    db.insert_collection(&coll)
+        .context("failed to save search")?;
+    println!("Saved search '{name}' ({filter_str})");
+    Ok(())
+}
+
+/// Run a previously saved search by name.
+fn run_saved_search(db: &Database, name: &str, limit: u32) -> Result<()> {
+    let coll = db
+        .get_collection_by_name(name)
+        .context("failed to look up saved search")?
+        .ok_or_else(|| anyhow::anyhow!("no saved search named '{name}'"))?;
+    if !coll.is_smart {
+        bail!("'{name}' is not a smart collection / saved search");
+    }
+    let items = db
+        .list_smart_collection_items(coll.id)
+        .context("failed to run saved search")?;
+
+    println!("Saved search: {} ({} result(s))", coll.name, items.len());
+    if let Some(ref fq) = coll.filter_query {
+        println!("Filter: {fq}");
+    }
+    println!();
+    for item in items.iter().take(limit as usize) {
+        let type_label = item.content_type.as_str();
+        let status_label = item.status.as_str();
+        println!(
+            "  {} [{}, {}/{}]",
+            item.title, item.id, type_label, status_label,
+        );
+        if let Some(ref url) = item.url {
+            println!("    {url}");
+        }
+    }
+    Ok(())
+}
+
+/// List all saved searches (smart collections).
+fn list_saved_searches(db: &Database) -> Result<()> {
+    let colls = db
+        .list_collections()
+        .context("failed to list collections")?;
+    let smart: Vec<_> = colls.iter().filter(|c| c.is_smart).collect();
+    if smart.is_empty() {
+        println!("No saved searches.");
+        return Ok(());
+    }
+    for coll in &smart {
+        let count = db.count_smart_collection_items(coll.id).unwrap_or(0);
+        println!("  {} [{}, {} result(s)]", coll.name, coll.id, count);
+        if let Some(ref fq) = coll.filter_query {
+            println!("    Filter: {fq}");
+        }
+    }
+    Ok(())
+}
+
 /// Build a [`SearchFilter`] from CLI flag values.
 fn build_search_filter(
     db: &Database,
@@ -2927,9 +3080,11 @@ fn resolve_collection(db: &Database, reference: &str) -> Result<Collection> {
 /// Dispatch collection subcommand.
 fn handle_collection(db: &Database, action: CollectionAction) -> Result<()> {
     match action {
-        CollectionAction::Create { name, parent } => {
-            collection_create(db, &name, parent.as_deref())
-        }
+        CollectionAction::Create {
+            name,
+            parent,
+            smart,
+        } => collection_create(db, &name, parent.as_deref(), smart.as_deref()),
         CollectionAction::List { tree } => {
             if tree {
                 collection_list_tree(db)
@@ -3002,26 +3157,57 @@ fn handle_collection(db: &Database, action: CollectionAction) -> Result<()> {
             Ok(())
         }
         CollectionAction::Show { collection } => collection_show(db, &collection),
+        CollectionAction::EditFilter { collection, filter } => {
+            let coll = resolve_collection(db, &collection)?;
+            if !coll.is_smart {
+                bail!("'{}' is not a smart collection", coll.name);
+            }
+            db.update_smart_filter(coll.id, &filter)
+                .context("failed to update filter")?;
+            println!("Updated filter for '{}': {filter}", coll.name);
+            Ok(())
+        }
     }
 }
 
-/// Create a new collection.
-fn collection_create(db: &Database, name: &str, parent_ref: Option<&str>) -> Result<()> {
+/// Create a new collection (manual or smart).
+fn collection_create(
+    db: &Database,
+    name: &str,
+    parent_ref: Option<&str>,
+    smart_filter: Option<&str>,
+) -> Result<()> {
     let parent_id = parent_ref
         .map(|p| resolve_collection(db, p).map(|c| c.id))
         .transpose()?;
+
+    let (is_smart, filter_query) = if let Some(filter) = smart_filter {
+        // Validate the filter parses correctly before creating.
+        pergamon_core::smart_filter::SmartFilter::parse(filter)
+            .map_err(|e| anyhow::anyhow!("invalid filter: {e}"))?;
+        (true, Some(filter.to_owned()))
+    } else {
+        (false, None)
+    };
+
     let now = OffsetDateTime::now_utc();
     let coll = Collection {
         id: Uuid::new_v4(),
         name: name.to_owned(),
         parent_id,
         sort_order: 0,
+        is_smart,
+        filter_query,
         created_at: now,
         updated_at: now,
     };
     db.insert_collection(&coll)
         .context("failed to create collection")?;
-    println!("Created collection '{}' ({})", coll.name, coll.id);
+    if is_smart {
+        println!("Created smart collection '{}' ({})", coll.name, coll.id);
+    } else {
+        println!("Created collection '{}' ({})", coll.name, coll.id);
+    }
     Ok(())
 }
 
@@ -3034,7 +3220,7 @@ fn collection_list(db: &Database) -> Result<()> {
         println!("No collections.");
         return Ok(());
     }
-    // Count items per collection.
+    // Count items per manual collection.
     let all_memberships = db
         .list_all_collection_items()
         .context("failed to load collection memberships")?;
@@ -3044,13 +3230,18 @@ fn collection_list(db: &Database) -> Result<()> {
     }
 
     for coll in &colls {
-        let count = item_counts.get(&coll.id).copied().unwrap_or(0);
+        let count = if coll.is_smart {
+            db.count_smart_collection_items(coll.id).unwrap_or(0)
+        } else {
+            item_counts.get(&coll.id).copied().unwrap_or(0)
+        };
+        let kind_label = if coll.is_smart { " [smart]" } else { "" };
         let parent_label = coll
             .parent_id
             .and_then(|pid| colls.iter().find(|c| c.id == pid))
             .map_or(String::new(), |p| format!(" (in {})", p.name));
         println!(
-            "  {} [{}, {} item(s)]{parent_label}",
+            "  {}{kind_label} [{}, {} item(s)]{parent_label}",
             coll.name, coll.id, count,
         );
     }
@@ -3091,11 +3282,23 @@ fn print_collection_tree(coll: &Collection, all: &[Collection], depth: usize) {
 /// Show items in a collection.
 fn collection_show(db: &Database, reference: &str) -> Result<()> {
     let coll = resolve_collection(db, reference)?;
-    let items = db
-        .list_collection_items(coll.id)
-        .context("failed to list collection items")?;
+    let items = if coll.is_smart {
+        db.list_smart_collection_items(coll.id)
+            .context("failed to run smart filter")?
+    } else {
+        db.list_collection_items(coll.id)
+            .context("failed to list collection items")?
+    };
 
-    println!("Collection: {} ({} item(s))", coll.name, items.len());
+    let kind_label = if coll.is_smart { " [smart]" } else { "" };
+    println!(
+        "Collection: {}{kind_label} ({} item(s))",
+        coll.name,
+        items.len()
+    );
+    if let Some(ref fq) = coll.filter_query {
+        println!("Filter: {fq}");
+    }
     println!();
     for item in &items {
         let type_label = item.content_type.as_str();
@@ -4563,6 +4766,12 @@ fn run_tui(db: &Database) -> Result<()> {
                         .context("failed to run search")?;
                     app.items = hits.into_iter().map(|h| h.item).collect();
                     app.set_status(format!("Search: {} result(s)", app.items.len()));
+                } else if let tui::app::FilterMode::SmartCollection(id, ref name) = app.filter {
+                    let items = db
+                        .list_smart_collection_items(id)
+                        .with_context(|| format!("failed to run smart collection '{name}'"))?;
+                    app.set_status(format!("🔍 {name}: {} result(s)", items.len()));
+                    app.items = items;
                 } else {
                     let filter = tui::event::build_filter(&app.filter);
                     app.items = db
@@ -4599,6 +4808,10 @@ fn reload_metadata(app: &mut tui::app::App, db: &Database) -> Result<()> {
             .search_filtered(query, &search_filter, None)
             .context("failed to count search results")?;
         app.total_count = hits.len() as u64;
+    } else if let tui::app::FilterMode::SmartCollection(id, _) = app.filter {
+        app.total_count = db
+            .count_smart_collection_items(id)
+            .context("failed to count smart collection items")? as u64;
     } else {
         let current_filter = tui::event::build_filter(&app.filter);
         app.total_count = db

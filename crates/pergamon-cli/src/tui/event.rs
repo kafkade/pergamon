@@ -410,7 +410,8 @@ fn cycle_filter(app: &mut App) {
         FilterMode::Status(DocumentStatus::Archived | DocumentStatus::Discarded)
         | FilterMode::Feed(..)
         | FilterMode::Folder(..)
-        | FilterMode::Search(_) => FilterMode::All,
+        | FilterMode::Search(_)
+        | FilterMode::SmartCollection(..) => FilterMode::All,
     };
     app.selected = 0;
 }
@@ -435,6 +436,7 @@ fn initiate_bulk_mark_read(app: &mut App, db: &Database) -> Result<Action> {
         FilterMode::Feed(_, name) => format!("feed \"{name}\""),
         FilterMode::Folder(_, name) => format!("folder \"{name}\""),
         FilterMode::Search(query) => format!("search \"{query}\""),
+        FilterMode::SmartCollection(_, name) => format!("smart collection \"{name}\""),
     };
 
     app.confirm = Some(ConfirmDialog {
@@ -449,7 +451,9 @@ fn initiate_bulk_mark_read(app: &mut App, db: &Database) -> Result<Action> {
 /// Build a [`ContentItemFilter`] from the current [`FilterMode`].
 pub fn build_filter(filter: &FilterMode) -> ContentItemFilter {
     match filter {
-        FilterMode::All | FilterMode::Search(_) => ContentItemFilter::default(),
+        FilterMode::All | FilterMode::Search(_) | FilterMode::SmartCollection(_, _) => {
+            ContentItemFilter::default()
+        }
         FilterMode::Status(status) => ContentItemFilter {
             status: Some(*status),
             ..ContentItemFilter::default()

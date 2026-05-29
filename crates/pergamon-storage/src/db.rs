@@ -117,6 +117,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "review_cards",
         include_str!("../migrations/V8__review_cards.sql"),
     ),
+    (
+        9,
+        "smart_collections",
+        include_str!("../migrations/V9__smart_collections.sql"),
+    ),
 ];
 
 /// Run all pending migrations inside a transaction.
@@ -1794,13 +1799,15 @@ impl Database {
     /// Insert a new collection.
     pub fn insert_collection(&self, coll: &Collection) -> Result<(), StorageError> {
         self.conn.execute(
-            "INSERT INTO collections (id, name, parent_id, sort_order, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO collections (id, name, parent_id, sort_order, is_smart, filter_query, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 coll.id.to_string(),
                 coll.name,
                 coll.parent_id.map(|id| id.to_string()),
                 coll.sort_order,
+                i32::from(coll.is_smart),
+                coll.filter_query,
                 fmt_time(coll.created_at),
                 fmt_time(coll.updated_at),
             ],
@@ -1812,7 +1819,7 @@ impl Database {
     pub fn get_collection(&self, id: Uuid) -> Result<Collection, StorageError> {
         self.conn
             .query_row(
-                "SELECT id, name, parent_id, sort_order, created_at, updated_at
+                "SELECT id, name, parent_id, sort_order, is_smart, filter_query, created_at, updated_at
                  FROM collections WHERE id = ?1",
                 params![id.to_string()],
                 |row| {
@@ -1821,8 +1828,10 @@ impl Database {
                         name: row.get(1)?,
                         parent_id: row.get::<_, Option<String>>(2)?.map(|s| parse_uuid(&s)),
                         sort_order: row.get(3)?,
-                        created_at: parse_time(&row.get::<_, String>(4)?),
-                        updated_at: parse_time(&row.get::<_, String>(5)?),
+                        is_smart: row.get::<_, i32>(4)? != 0,
+                        filter_query: row.get(5)?,
+                        created_at: parse_time(&row.get::<_, String>(6)?),
+                        updated_at: parse_time(&row.get::<_, String>(7)?),
                     })
                 },
             )
@@ -1834,12 +1843,21 @@ impl Database {
     }
 
     /// Add a content item to a collection.
+    ///
+    /// Returns an error if the collection is a smart collection (membership
+    /// is computed dynamically).
     pub fn add_to_collection(
         &self,
         content_item_id: Uuid,
         collection_id: Uuid,
         sort_order: i32,
     ) -> Result<(), StorageError> {
+        let coll = self.get_collection(collection_id)?;
+        if coll.is_smart {
+            return Err(StorageError::Constraint(
+                "cannot manually add items to a smart collection".to_owned(),
+            ));
+        }
         self.conn.execute(
             "INSERT OR IGNORE INTO content_item_collections (content_item_id, collection_id, sort_order)
              VALUES (?1, ?2, ?3)",
@@ -1853,11 +1871,19 @@ impl Database {
     }
 
     /// Remove a content item from a collection.
+    ///
+    /// Returns an error if the collection is a smart collection.
     pub fn remove_from_collection(
         &self,
         content_item_id: Uuid,
         collection_id: Uuid,
     ) -> Result<bool, StorageError> {
+        let coll = self.get_collection(collection_id)?;
+        if coll.is_smart {
+            return Err(StorageError::Constraint(
+                "cannot manually remove items from a smart collection".to_owned(),
+            ));
+        }
         let count = self.conn.execute(
             "DELETE FROM content_item_collections
              WHERE content_item_id = ?1 AND collection_id = ?2",
@@ -1951,7 +1977,7 @@ impl Database {
     pub fn get_collection_by_name(&self, name: &str) -> Result<Option<Collection>, StorageError> {
         self.conn
             .query_row(
-                "SELECT id, name, parent_id, sort_order, created_at, updated_at
+                "SELECT id, name, parent_id, sort_order, is_smart, filter_query, created_at, updated_at
                  FROM collections WHERE name = ?1 COLLATE NOCASE",
                 params![name],
                 |row| {
@@ -1960,8 +1986,10 @@ impl Database {
                         name: row.get(1)?,
                         parent_id: row.get::<_, Option<String>>(2)?.map(|s| parse_uuid(&s)),
                         sort_order: row.get(3)?,
-                        created_at: parse_time(&row.get::<_, String>(4)?),
-                        updated_at: parse_time(&row.get::<_, String>(5)?),
+                        is_smart: row.get::<_, i32>(4)? != 0,
+                        filter_query: row.get(5)?,
+                        created_at: parse_time(&row.get::<_, String>(6)?),
+                        updated_at: parse_time(&row.get::<_, String>(7)?),
                     })
                 },
             )
@@ -2016,7 +2044,7 @@ impl Database {
     #[allow(clippy::missing_errors_doc)]
     pub fn list_collections(&self) -> Result<Vec<Collection>, StorageError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, parent_id, sort_order, created_at, updated_at
+            "SELECT id, name, parent_id, sort_order, is_smart, filter_query, created_at, updated_at
              FROM collections ORDER BY sort_order, name",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -2025,8 +2053,10 @@ impl Database {
                 name: row.get(1)?,
                 parent_id: row.get::<_, Option<String>>(2)?.map(|s| parse_uuid(&s)),
                 sort_order: row.get(3)?,
-                created_at: parse_time(&row.get::<_, String>(4)?),
-                updated_at: parse_time(&row.get::<_, String>(5)?),
+                is_smart: row.get::<_, i32>(4)? != 0,
+                filter_query: row.get(5)?,
+                created_at: parse_time(&row.get::<_, String>(6)?),
+                updated_at: parse_time(&row.get::<_, String>(7)?),
             })
         })?;
         let mut colls = Vec::new();
@@ -2034,6 +2064,78 @@ impl Database {
             colls.push(row?);
         }
         Ok(colls)
+    }
+
+    /// List items matching a smart collection's filter.
+    ///
+    /// Parses the collection's `filter_query` and dynamically queries
+    /// matching content items. Returns an error if the collection is not smart.
+    pub fn list_smart_collection_items(
+        &self,
+        collection_id: Uuid,
+    ) -> Result<Vec<ContentItem>, StorageError> {
+        let coll = self.get_collection(collection_id)?;
+        if !coll.is_smart {
+            return Err(StorageError::Constraint(
+                "not a smart collection".to_owned(),
+            ));
+        }
+        let filter_str = coll.filter_query.as_deref().unwrap_or("");
+        let smart = pergamon_core::smart_filter::SmartFilter::parse(filter_str)
+            .map_err(|e| StorageError::Generic(format!("invalid smart filter: {e}")))?;
+
+        let (sql, param_values) = build_smart_filter_query(&smart, None);
+        let mut stmt = self.conn.prepare(&sql)?;
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
+            .iter()
+            .map(|v| v as &dyn rusqlite::types::ToSql)
+            .collect();
+        let rows = stmt.query_map(param_refs.as_slice(), |row| Ok(row_to_content_item(row)))?;
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(row?);
+        }
+        Ok(items)
+    }
+
+    /// Count items matching a smart collection's filter.
+    pub fn count_smart_collection_items(&self, collection_id: Uuid) -> Result<usize, StorageError> {
+        let coll = self.get_collection(collection_id)?;
+        if !coll.is_smart {
+            return Err(StorageError::Constraint(
+                "not a smart collection".to_owned(),
+            ));
+        }
+        let filter_str = coll.filter_query.as_deref().unwrap_or("");
+        let smart = pergamon_core::smart_filter::SmartFilter::parse(filter_str)
+            .map_err(|e| StorageError::Generic(format!("invalid smart filter: {e}")))?;
+
+        let (sql, param_values) = build_smart_filter_count(&smart);
+        let mut stmt = self.conn.prepare(&sql)?;
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
+            .iter()
+            .map(|v| v as &dyn rusqlite::types::ToSql)
+            .collect();
+        let count: i64 = stmt.query_row(param_refs.as_slice(), |row| row.get(0))?;
+        Ok(usize::try_from(count).unwrap_or(0))
+    }
+
+    /// Update the filter query of a smart collection.
+    pub fn update_smart_filter(
+        &self,
+        collection_id: Uuid,
+        filter_query: &str,
+    ) -> Result<(), StorageError> {
+        // Validate the filter parses correctly before storing.
+        pergamon_core::smart_filter::SmartFilter::parse(filter_query)
+            .map_err(|e| StorageError::Generic(format!("invalid smart filter: {e}")))?;
+
+        self.conn.execute(
+            "UPDATE collections SET filter_query = ?1, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+             WHERE id = ?2 AND is_smart = 1",
+            params![filter_query, collection_id.to_string()],
+        )?;
+        Ok(())
     }
 
     /// List all feed item metadata rows.
@@ -2966,7 +3068,163 @@ fn build_content_item_query(
     (sql, param_values)
 }
 
-/// Re-index placeholder parameters in a SQL string by an offset.
+/// Build a SQL query for a smart collection filter.
+///
+/// Translates [`SmartFilter`] predicates into a WHERE clause against
+/// `content_items`. Returns `(sql, param_values)`.
+fn build_smart_filter_query(
+    filter: &pergamon_core::smart_filter::SmartFilter,
+    limit: Option<u32>,
+) -> (String, Vec<String>) {
+    use pergamon_core::smart_filter::FilterPredicate;
+
+    let mut param_values: Vec<String> = Vec::new();
+    let mut sql = String::from(
+        "SELECT ci.id, ci.url, ci.title, ci.author, ci.content_type, ci.status,
+                ci.content_text, ci.excerpt, ci.published_at, ci.created_at, ci.updated_at
+         FROM content_items ci",
+    );
+
+    let has_source = filter
+        .predicates()
+        .iter()
+        .any(|p| matches!(p, FilterPredicate::Source(_)));
+    if has_source {
+        sql.push_str(
+            " LEFT JOIN feed_item_meta fim ON fim.content_item_id = ci.id
+             LEFT JOIN feeds f ON f.id = fim.feed_id",
+        );
+    }
+
+    let has_text = filter.has_text_query();
+    if has_text {
+        sql.push_str(" JOIN content_items_fts fts ON fts.rowid = ci.rowid");
+    }
+
+    sql.push_str(" WHERE 1=1");
+
+    for pred in filter.predicates() {
+        append_predicate_sql(&mut sql, &mut param_values, pred);
+    }
+
+    sql.push_str(" ORDER BY ci.created_at DESC");
+
+    if let Some(lim) = limit {
+        let _ = write!(sql, " LIMIT {lim}");
+    }
+
+    (sql, param_values)
+}
+
+/// Build a COUNT query for a smart collection filter.
+fn build_smart_filter_count(
+    filter: &pergamon_core::smart_filter::SmartFilter,
+) -> (String, Vec<String>) {
+    use pergamon_core::smart_filter::FilterPredicate;
+
+    let mut param_values: Vec<String> = Vec::new();
+    let mut sql = String::from("SELECT COUNT(*) FROM content_items ci");
+
+    let has_source = filter
+        .predicates()
+        .iter()
+        .any(|p| matches!(p, FilterPredicate::Source(_)));
+    if has_source {
+        sql.push_str(
+            " LEFT JOIN feed_item_meta fim ON fim.content_item_id = ci.id
+             LEFT JOIN feeds f ON f.id = fim.feed_id",
+        );
+    }
+
+    let has_text = filter.has_text_query();
+    if has_text {
+        sql.push_str(" JOIN content_items_fts fts ON fts.rowid = ci.rowid");
+    }
+
+    sql.push_str(" WHERE 1=1");
+
+    for pred in filter.predicates() {
+        append_predicate_sql(&mut sql, &mut param_values, pred);
+    }
+
+    (sql, param_values)
+}
+
+/// Append SQL for a single filter predicate.
+fn append_predicate_sql(
+    sql: &mut String,
+    params: &mut Vec<String>,
+    pred: &pergamon_core::smart_filter::FilterPredicate,
+) {
+    use pergamon_core::smart_filter::FilterPredicate;
+
+    match pred {
+        FilterPredicate::ContentType(types) => {
+            let placeholders: Vec<String> = types
+                .iter()
+                .map(|t| {
+                    params.push(t.as_str().to_owned());
+                    format!("?{}", params.len())
+                })
+                .collect();
+            let _ = write!(sql, " AND ci.content_type IN ({})", placeholders.join(", "));
+        }
+        FilterPredicate::Tag(tags) => {
+            let placeholders: Vec<String> = tags
+                .iter()
+                .map(|t| {
+                    params.push(t.clone());
+                    format!("?{}", params.len())
+                })
+                .collect();
+            let _ = write!(
+                sql,
+                " AND EXISTS (SELECT 1 FROM content_item_tags cit \
+                 JOIN tags t ON t.id = cit.tag_id \
+                 WHERE cit.content_item_id = ci.id \
+                 AND t.name IN ({}))",
+                placeholders.join(", ")
+            );
+        }
+        FilterPredicate::Status(statuses) => {
+            let placeholders: Vec<String> = statuses
+                .iter()
+                .map(|s| {
+                    params.push(s.as_str().to_owned());
+                    format!("?{}", params.len())
+                })
+                .collect();
+            let _ = write!(sql, " AND ci.status IN ({})", placeholders.join(", "));
+        }
+        FilterPredicate::ExcludeStatus(statuses) => {
+            let placeholders: Vec<String> = statuses
+                .iter()
+                .map(|s| {
+                    params.push(s.as_str().to_owned());
+                    format!("?{}", params.len())
+                })
+                .collect();
+            let _ = write!(sql, " AND ci.status NOT IN ({})", placeholders.join(", "));
+        }
+        FilterPredicate::Source(src) => {
+            params.push(format!("%{src}%"));
+            let _ = write!(sql, " AND f.title LIKE ?{}", params.len());
+        }
+        FilterPredicate::CreatedSince(date) => {
+            params.push(format!("{date}T00:00:00Z"));
+            let _ = write!(sql, " AND ci.created_at >= ?{}", params.len());
+        }
+        FilterPredicate::CreatedBefore(date) => {
+            params.push(format!("{date}T00:00:00Z"));
+            let _ = write!(sql, " AND ci.created_at < ?{}", params.len());
+        }
+        FilterPredicate::Text(query) => {
+            let safe = quote_fts_tokens(query);
+            params.push(safe);
+            let _ = write!(sql, " AND fts MATCH ?{}", params.len());
+        }
+    }
+}
 ///
 /// When a subquery with `?1, ?2, ...` is embedded inside a larger statement
 /// that already uses `?1` and `?2` (e.g. for `new_status` and `now`), this
