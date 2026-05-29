@@ -1,0 +1,25 @@
+{
+  "name": "obsidian-pergamon",
+  "version": "0.3.0",
+  "description": "Obsidian plugin for pergamon — browse, insert, and sync highlights.",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "node esbuild.config.mjs production",
+    "lint": "npx tsc --noEmit"
+  },
+  "keywords": [
+    "obsidian",
+    "pergamon",
+    "highlights",
+    "knowledge-management"
+  ],
+  "author": "kafkade",
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.25.0",
+    "obsidian": "latest",
+    "typescript": "^5.7.0"
+  }
+}

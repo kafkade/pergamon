@@ -10,6 +10,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `pergamon-export` crate: new crate for structured export pipelines (Obsidian, future formats)
+- `export obsidian` command: export highlights and bookmarks as Markdown notes into an Obsidian vault
+  - `--vault <path>`: target vault directory
+  - `--folder <name>`: subfolder within the vault (default: `Pergamon`)
+  - `--dry-run`: preview files without writing
+- Obsidian plugin (`apps/obsidian-plugin/`): TypeScript community plugin for browsing and inserting pergamon references
+  - **Browse pergamon items**: fuzzy-search all exported highlights and bookmarks
+  - **Insert pergamon reference**: insert wikilink, markdown link, or embed at cursor
+  - **Reload manifest**: re-read the export manifest after a fresh export
+  - **Show stats**: display item counts and last export time
+  - Settings: configurable folder name, insert format, ribbon icon toggle
+- Stable filename strategy: `{slug}--{uuid-prefix}.md` for deterministic, conflict-free file paths
+- YAML frontmatter with proper escaping: handles quotes, backslashes, newlines, and YAML special characters
+- Export manifest (`manifest.json`): JSON index of all exported items for plugin consumption
+- Atomic manifest writes: temp file + rename to prevent partial reads
+- Per-source highlight grouping: one Markdown note per source with all highlights and notes
 - `pergamon stats review` top-level command: view retention and review statistics dashboard
 - `review stats --format json` flag: machine-readable JSON output for review statistics
 - `review stats --tui` / `stats review --tui` flag: launch a standalone TUI stats dashboard

@@ -263,6 +263,18 @@ enum ExportAction {
         #[arg(long, short)]
         output: PathBuf,
     },
+    /// Export highlights and bookmarks to an Obsidian vault.
+    Obsidian {
+        /// Path to the Obsidian vault root directory.
+        #[arg(long)]
+        vault: PathBuf,
+        /// Folder name within the vault (default: "Pergamon").
+        #[arg(long, default_value = "Pergamon")]
+        folder: String,
+        /// Preview what would be exported without writing files.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 /// Collection management subcommands.
@@ -1080,6 +1092,11 @@ fn handle_export(db: &Database, action: ExportAction) -> Result<()> {
     match action {
         ExportAction::Opml { output } => export_opml(db, output.as_deref()),
         ExportAction::Backup { output } => export_backup(db, &output),
+        ExportAction::Obsidian {
+            vault,
+            folder,
+            dry_run,
+        } => export_obsidian(db, &vault, &folder, dry_run),
     }
 }
 
@@ -2096,6 +2113,146 @@ fn feed_to_outline(feed: &Feed) -> pergamon_feed::OpmlOutline {
         feed_type: Some("rss".to_owned()),
         children: Vec::new(),
     }
+}
+
+// ======================================================================
+// Obsidian export
+// ======================================================================
+
+/// Export highlights and bookmarks to an Obsidian vault.
+fn export_obsidian(
+    db: &Database,
+    vault_path: &std::path::Path,
+    folder: &str,
+    dry_run: bool,
+) -> Result<()> {
+    use pergamon_core::content_type::ContentType as CT;
+    use pergamon_export::obsidian::{
+        BookmarkBundle, ExportConfig, SourceBundle, execute_export, group_highlights_by_source,
+        plan_export,
+    };
+
+    // 1. Fetch all highlights with their metadata.
+    let all_highlights = db
+        .list_highlights(None, None, None, None, None)
+        .context("failed to list highlights")?;
+
+    // 2. Group by source_item_id.
+    let grouped = group_highlights_by_source(&all_highlights);
+
+    // 3. Build source bundles for items that have highlights.
+    let mut source_bundles = Vec::new();
+
+    for (source_id_opt, highlights) in &grouped {
+        if let Some(source_id) = source_id_opt {
+            // Try to load the source content item.
+            if let Ok(source) = db.get_content_item(*source_id) {
+                let tags: Vec<String> = db
+                    .tags_for_item(*source_id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|t| t.name)
+                    .collect();
+
+                let notes = db.list_notes_for_item(*source_id).unwrap_or_default();
+
+                source_bundles.push(SourceBundle {
+                    source,
+                    tags,
+                    highlights: highlights.clone(),
+                    notes,
+                });
+            }
+        }
+        // Orphan highlights (no source) are skipped for now.
+    }
+
+    // 4. Fetch bookmarks without highlights for standalone export.
+    let bookmark_items = db
+        .list_content_items(Some(CT::Bookmark), None, None, None)
+        .context("failed to list bookmarks")?;
+
+    // Filter out bookmarks that already appear as highlight sources.
+    let source_ids: std::collections::HashSet<Uuid> =
+        source_bundles.iter().map(|b| b.source.id).collect();
+
+    let mut bookmark_bundles = Vec::new();
+    for item in bookmark_items {
+        if source_ids.contains(&item.id) {
+            continue;
+        }
+
+        let tags: Vec<String> = db
+            .tags_for_item(item.id)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+
+        let description = db
+            .get_bookmark_meta(item.id)
+            .ok()
+            .and_then(|m| m.description);
+
+        bookmark_bundles.push(BookmarkBundle {
+            item,
+            tags,
+            description,
+        });
+    }
+
+    // 5. Plan the export.
+    let config = ExportConfig {
+        folder_name: folder.to_owned(),
+        pergamon_version: env!("CARGO_PKG_VERSION").to_owned(),
+    };
+
+    let plan = plan_export(&config, &source_bundles, &bookmark_bundles);
+
+    if dry_run {
+        println!("Dry run — no files will be written.\n");
+        println!(
+            "Would export {} file(s) to {}/{}",
+            plan.files.len(),
+            vault_path.display(),
+            folder,
+        );
+        println!(
+            "  {} source document(s) with highlights",
+            source_bundles.len()
+        );
+        println!("  {} standalone bookmark(s)", bookmark_bundles.len());
+
+        if !plan.files.is_empty() {
+            println!("\nFiles:");
+            for file in &plan.files {
+                println!("  {}", file.relative_path.display());
+            }
+        }
+        return Ok(());
+    }
+
+    // 6. Execute the export.
+    let result = execute_export(&plan, vault_path).context("failed to write Obsidian export")?;
+
+    println!(
+        "Exported {} file(s) to {}/{}",
+        result.written,
+        vault_path.display(),
+        folder,
+    );
+    println!(
+        "  {} source document(s) with highlights",
+        source_bundles.len()
+    );
+    println!("  {} standalone bookmark(s)", bookmark_bundles.len());
+    println!(
+        "  Manifest: {}/{}/.pergamon/manifest.json",
+        vault_path.display(),
+        folder,
+    );
+
+    Ok(())
 }
 
 // ======================================================================
