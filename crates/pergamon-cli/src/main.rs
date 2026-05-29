@@ -5133,8 +5133,7 @@ fn apply_rule_action(
             let coll = get_or_create_collection(db, name)?;
             let pos = db
                 .list_collection_items(coll.id)
-                .map(|v| i32::try_from(v.len()).unwrap_or(0))
-                .unwrap_or(0);
+                .map_or(0, |v| i32::try_from(v.len()).unwrap_or(0));
             db.add_to_collection(coll.id, item_id, pos)
                 .context("adding to collection")?;
         }
