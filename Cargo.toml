@@ -11,7 +11,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"
@@ -21,12 +21,12 @@ authors = ["The pergamon authors"]
 
 # Shared dependency versions. Members opt in via `dep = { workspace = true }`.
 [workspace.dependencies]
-pergamon-core = { path = "crates/pergamon-core", version = "0.3.0" }
-pergamon-storage = { path = "crates/pergamon-storage", version = "0.3.0" }
-pergamon-feed = { path = "crates/pergamon-feed", version = "0.3.0" }
-pergamon-extract = { path = "crates/pergamon-extract", version = "0.3.0" }
-pergamon-import = { path = "crates/pergamon-import", version = "0.3.0" }
-pergamon-export = { path = "crates/pergamon-export", version = "0.3.0" }
+pergamon-core = { path = "crates/pergamon-core", version = "0.4.0" }
+pergamon-storage = { path = "crates/pergamon-storage", version = "0.4.0" }
+pergamon-feed = { path = "crates/pergamon-feed", version = "0.4.0" }
+pergamon-extract = { path = "crates/pergamon-extract", version = "0.4.0" }
+pergamon-import = { path = "crates/pergamon-import", version = "0.4.0" }
+pergamon-export = { path = "crates/pergamon-export", version = "0.4.0" }
 
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
