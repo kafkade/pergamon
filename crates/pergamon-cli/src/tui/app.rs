@@ -26,6 +26,9 @@ pub enum FilterMode {
     Folder(Uuid, String),
     /// Full-text search results.
     Search(String),
+    /// Items matching a smart collection's filter.
+    #[allow(dead_code)]
+    SmartCollection(Uuid, String),
 }
 
 impl std::fmt::Display for FilterMode {
@@ -36,6 +39,7 @@ impl std::fmt::Display for FilterMode {
             Self::Feed(_, name) => write!(f, "Feed: {name}"),
             Self::Folder(_, name) => write!(f, "Folder: {name}"),
             Self::Search(query) => write!(f, "Search: {query}"),
+            Self::SmartCollection(_, name) => write!(f, "🔍 {name}"),
         }
     }
 }

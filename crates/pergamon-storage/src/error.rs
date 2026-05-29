@@ -25,4 +25,8 @@ pub enum StorageError {
     /// A generic storage-layer error.
     #[error("{0}")]
     Generic(String),
+
+    /// A constraint violation (e.g. trying to modify a smart collection manually).
+    #[error("constraint violation: {0}")]
+    Constraint(String),
 }
