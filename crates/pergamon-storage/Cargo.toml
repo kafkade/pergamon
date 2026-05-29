@@ -18,6 +18,6 @@ thiserror = { workspace = true }
 rusqlite = { workspace = true }
 uuid = { workspace = true }
 time = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
-serde_json = { workspace = true }
