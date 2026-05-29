@@ -275,6 +275,43 @@ enum ExportAction {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Export content items as Markdown files with YAML frontmatter.
+    Markdown {
+        /// Output directory.
+        #[arg(long, short)]
+        output: PathBuf,
+        /// Filename template (default: "{title}--{id}").
+        /// Placeholders: {title}, {date}, {id}, {type}.
+        #[arg(long, default_value = "{title}--{id}")]
+        filename: String,
+        /// Generate wikilink backlinks between related items.
+        #[arg(long)]
+        backlinks: bool,
+        /// Tag format: "yaml" (default), "hashtag", or "both".
+        #[arg(long, default_value = "yaml")]
+        tag_format: String,
+        /// Filter by content type (e.g. "article", "bookmark", "highlight").
+        #[arg(long, name = "type")]
+        type_filter: Option<String>,
+        /// Preview what would be exported without writing files.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Export content items as versioned JSON.
+    Json {
+        /// Output file path (default: stdout).
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+        /// Pretty-print the JSON output.
+        #[arg(long)]
+        pretty: bool,
+        /// Include full content text (can be large).
+        #[arg(long)]
+        include_content: bool,
+        /// Filter by content type (e.g. "article", "bookmark", "highlight").
+        #[arg(long, name = "type")]
+        type_filter: Option<String>,
+    },
 }
 
 /// Collection management subcommands.
@@ -1097,6 +1134,34 @@ fn handle_export(db: &Database, action: ExportAction) -> Result<()> {
             folder,
             dry_run,
         } => export_obsidian(db, &vault, &folder, dry_run),
+        ExportAction::Markdown {
+            output,
+            filename,
+            backlinks,
+            tag_format,
+            type_filter,
+            dry_run,
+        } => export_markdown(
+            db,
+            &output,
+            &filename,
+            backlinks,
+            &tag_format,
+            type_filter.as_deref(),
+            dry_run,
+        ),
+        ExportAction::Json {
+            output,
+            pretty,
+            include_content,
+            type_filter,
+        } => export_json(
+            db,
+            output.as_deref(),
+            pretty,
+            include_content,
+            type_filter.as_deref(),
+        ),
     }
 }
 
@@ -2251,6 +2316,194 @@ fn export_obsidian(
         vault_path.display(),
         folder,
     );
+
+    Ok(())
+}
+
+/// Export content items as Markdown files with YAML frontmatter.
+fn export_markdown(
+    db: &Database,
+    output_dir: &std::path::Path,
+    filename_template: &str,
+    backlinks: bool,
+    tag_format_str: &str,
+    type_filter: Option<&str>,
+    dry_run: bool,
+) -> Result<()> {
+    use pergamon_export::markdown::{
+        ExportItem, MarkdownExportConfig, TagFormat, execute_markdown_export, plan_markdown_export,
+    };
+    use pergamon_export::template::SlugTemplate;
+
+    let slug_template = SlugTemplate::parse(filename_template)
+        .with_context(|| format!("invalid filename template: {filename_template}"))?;
+
+    if !slug_template.has_id_placeholder() {
+        eprintln!("Warning: template does not include {{id}} — duplicate titles may collide.");
+    }
+
+    let tag_format = match tag_format_str {
+        "yaml" => TagFormat::YamlOnly,
+        "hashtag" => TagFormat::Hashtag,
+        "both" => TagFormat::Both,
+        other => anyhow::bail!("unknown tag format: {other} (expected: yaml, hashtag, both)"),
+    };
+
+    let content_type_filter = type_filter
+        .map(|s| {
+            s.parse::<pergamon_core::content_type::ContentType>()
+                .with_context(|| format!("unknown content type: {s}"))
+        })
+        .transpose()?;
+
+    // Fetch items from the database.
+    let items = db
+        .list_content_items(content_type_filter, None, None, None)
+        .context("failed to list content items")?;
+
+    if items.is_empty() {
+        println!("No items to export.");
+        return Ok(());
+    }
+
+    // Build export items with tags, highlights, and notes.
+    let mut export_items = Vec::new();
+    for item in &items {
+        let tags: Vec<String> = db
+            .tags_for_item(item.id)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+
+        let highlights = db
+            .list_highlights(Some(item.id), None, None, None, None)
+            .unwrap_or_default();
+
+        let notes = db.list_notes_for_item(item.id).unwrap_or_default();
+
+        export_items.push(ExportItem {
+            item: item.clone(),
+            tags,
+            highlights,
+            notes,
+        });
+    }
+
+    let config = MarkdownExportConfig {
+        slug_template,
+        backlinks,
+        tag_format,
+        pergamon_version: env!("CARGO_PKG_VERSION").to_owned(),
+    };
+
+    let files = plan_markdown_export(&config, &export_items);
+
+    if dry_run {
+        println!("Dry run — no files will be written.\n");
+        println!(
+            "Would export {} file(s) to {}",
+            files.len(),
+            output_dir.display()
+        );
+        if !files.is_empty() {
+            println!("\nFiles:");
+            for file in &files {
+                println!("  {}", file.relative_path.display());
+            }
+        }
+        return Ok(());
+    }
+
+    let result =
+        execute_markdown_export(&files, output_dir).context("failed to write Markdown export")?;
+
+    println!(
+        "Exported {} file(s) to {}",
+        result.written,
+        output_dir.display(),
+    );
+
+    Ok(())
+}
+
+/// Export content items as versioned JSON.
+fn export_json(
+    db: &Database,
+    output: Option<&std::path::Path>,
+    pretty: bool,
+    include_content: bool,
+    type_filter: Option<&str>,
+) -> Result<()> {
+    use pergamon_export::json::{
+        JsonExportConfig, JsonExportItem, build_json_export, serialize_json_export,
+    };
+
+    let content_type_filter = type_filter
+        .map(|s| {
+            s.parse::<pergamon_core::content_type::ContentType>()
+                .with_context(|| format!("unknown content type: {s}"))
+        })
+        .transpose()?;
+
+    let items = db
+        .list_content_items(content_type_filter, None, None, None)
+        .context("failed to list content items")?;
+
+    if items.is_empty() {
+        println!("No items to export.");
+        return Ok(());
+    }
+
+    let mut export_items = Vec::new();
+    for item in &items {
+        let tags: Vec<String> = db
+            .tags_for_item(item.id)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+
+        let highlights = db
+            .list_highlights(Some(item.id), None, None, None, None)
+            .unwrap_or_default();
+
+        let notes = db.list_notes_for_item(item.id).unwrap_or_default();
+
+        let bookmark_meta = db.get_bookmark_meta(item.id).ok();
+
+        let feed_item_meta = db.get_feed_item_meta(item.id).ok();
+
+        export_items.push(JsonExportItem {
+            item: item.clone(),
+            tags,
+            highlights,
+            notes,
+            bookmark_meta,
+            feed_item_meta,
+        });
+    }
+
+    let config = JsonExportConfig {
+        pretty,
+        include_content_text: include_content,
+        pergamon_version: env!("CARGO_PKG_VERSION").to_owned(),
+    };
+
+    let export = build_json_export(&config, &export_items);
+    let json = serialize_json_export(&export, pretty).context("failed to serialize JSON export")?;
+
+    if let Some(path) = output {
+        std::fs::write(path, &json)
+            .with_context(|| format!("failed to write to {}", path.display()))?;
+        println!(
+            "Exported {} item(s) to {}",
+            export.item_count,
+            path.display()
+        );
+    } else {
+        print!("{json}");
+    }
 
     Ok(())
 }

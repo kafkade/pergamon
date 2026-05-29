@@ -35,6 +35,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Weekly review trend: last 12 weeks of review activity with bar charts
 - TUI stats dashboard: cards overview, retention/streaks panel, source breakdown, daily and weekly charts
 - Review summary screen now shows `[s] Stats dashboard` option after completing a review session
+- `export markdown` command: export content items as Markdown files with YAML frontmatter
+  - Configurable filename templates with `{title}`, `{date}`, `{id}`, `{type}` placeholders
+  - `--backlinks`: generate wikilink cross-references between related items
+  - `--tag-format`: choose between YAML-only, hashtag, or both tag styles
+  - `--type`: filter by content type
+  - `--dry-run`: preview without writing
+  - Automatic collision detection when template omits `{id}`
+- `export json` command: export content items as versioned JSON with stable schema
+  - Hierarchical structure: items with nested highlights, notes, bookmark and feed metadata
+  - `--pretty`: human-readable formatting
+  - `--include-content`: opt-in full content text
+  - `--type`: filter by content type
+  - Outputs to file or stdout
+- Export format documentation (`docs/export-format.md`): schema reference, stability guarantees, examples
 
 ## [0.3.0] - 2026-05-28
 
