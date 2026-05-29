@@ -234,6 +234,7 @@ mod tests {
             published_at: None,
             created_at: now,
             updated_at: now,
+            read_at: None,
         }
     }
 

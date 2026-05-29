@@ -361,6 +361,7 @@ mod tests {
             published_at: None,
             created_at: OffsetDateTime::UNIX_EPOCH,
             updated_at: OffsetDateTime::UNIX_EPOCH,
+            read_at: None,
         }
     }
 
@@ -440,6 +441,7 @@ mod tests {
             published_at: None,
             created_at: OffsetDateTime::UNIX_EPOCH,
             updated_at: OffsetDateTime::UNIX_EPOCH,
+            read_at: None,
         };
         let hl_meta = HighlightMeta {
             content_item_id: hl_item.id,

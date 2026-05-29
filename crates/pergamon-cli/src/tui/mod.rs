@@ -626,3 +626,247 @@ impl Drop for ReviewTermGuard {
         let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen);
     }
 }
+
+// ======================================================================
+// Usage statistics TUI
+// ======================================================================
+
+/// Run a standalone usage stats TUI dashboard.
+pub fn run_usage_stats_tui(db: &Database) -> Result<()> {
+    let report = db
+        .usage_stats_report(OffsetDateTime::now_utc())
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    enable_raw_mode().context("failed to enable raw mode")?;
+    crossterm::execute!(std::io::stdout(), EnterAlternateScreen)
+        .context("failed to enter alternate screen")?;
+
+    let _guard = ReviewTermGuard;
+
+    let backend = CrosstermBackend::new(std::io::stdout());
+    let mut terminal = Terminal::new(backend).context("failed to initialize terminal")?;
+
+    loop {
+        terminal
+            .draw(|frame| {
+                render_usage_dashboard(frame, &report);
+            })
+            .context("failed to draw usage stats")?;
+
+        if crossterm::event::poll(Duration::from_millis(100))? {
+            if let Event::Key(key) = crossterm::event::read()? {
+                if key.code == KeyCode::Char('q')
+                    || key.code == KeyCode::Esc
+                    || (key.modifiers.contains(KeyModifiers::CONTROL)
+                        && key.code == KeyCode::Char('c'))
+                {
+                    break;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Render the usage statistics dashboard.
+#[allow(clippy::too_many_lines)]
+fn render_usage_dashboard(
+    frame: &mut ratatui::Frame,
+    report: &pergamon_core::model::UsageStatsReport,
+) {
+    let area = frame.area();
+    let o = &report.overview;
+
+    let main_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),  // title
+            Constraint::Length(12), // overview panels
+            Constraint::Min(8),     // charts
+            Constraint::Length(1),  // footer
+        ])
+        .split(area);
+
+    // Title
+    let title = Paragraph::new(Line::styled(
+        " Usage Statistics Dashboard ",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    ))
+    .alignment(Alignment::Center)
+    .block(Block::default().borders(Borders::BOTTOM));
+    frame.render_widget(title, main_chunks[0]);
+
+    // Overview panels (3 columns)
+    let top_cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(33),
+            Constraint::Percentage(34),
+            Constraint::Percentage(33),
+        ])
+        .split(main_chunks[1]);
+
+    // Library panel
+    let lib_text = vec![
+        Line::raw(format!("Total items:  {}", o.total_items)),
+        Line::raw(format!("  Inbox:      {}", o.inbox_count)),
+        Line::raw(format!("  Archived:   {}", o.archived_count)),
+        Line::raw(format!("  Highlights: {}", o.total_highlights)),
+        Line::raw(format!("  Feeds:      {}", o.total_feeds)),
+    ];
+    let lib_panel = Paragraph::new(lib_text).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Library ")
+            .title_alignment(Alignment::Left),
+    );
+    frame.render_widget(lib_panel, top_cols[0]);
+
+    // Save rate panel
+    let save_text = vec![
+        Line::raw(format!("Today:       {}", o.items_saved_today)),
+        Line::raw(format!("This week:   {}", o.items_saved_this_week)),
+        Line::raw(format!("This month:  {}", o.items_saved_this_month)),
+        Line::raw(format!("30-day avg:  {:.1}/day", o.saves_per_day_30d)),
+        Line::raw(format!("HL rate:     {:.1}%", o.highlight_rate * 100.0)),
+    ];
+    let save_panel = Paragraph::new(save_text).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Save Rate ")
+            .title_alignment(Alignment::Left),
+    );
+    frame.render_widget(save_panel, top_cols[1]);
+
+    // Reading panel
+    let read_text = vec![
+        Line::raw(format!(
+            "Read time:   {} hr {} min",
+            o.total_reading_minutes / 60,
+            o.total_reading_minutes % 60
+        )),
+        Line::raw(format!(
+            "Streak:      {} day{}",
+            o.reading_streak_days,
+            if o.reading_streak_days == 1 { "" } else { "s" }
+        )),
+        Line::raw(format!(
+            "Longest:     {} day{}",
+            o.longest_reading_streak,
+            if o.longest_reading_streak == 1 {
+                ""
+            } else {
+                "s"
+            }
+        )),
+    ];
+    let read_panel = Paragraph::new(read_text).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Reading ")
+            .title_alignment(Alignment::Left),
+    );
+    frame.render_widget(read_panel, top_cols[2]);
+
+    // Charts area: daily activity + top sources
+    let chart_cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+        .split(main_chunks[2]);
+
+    // Daily bar chart (last 7 days)
+    let daily: Vec<_> = report.reading_activity.daily.iter().rev().take(7).collect();
+    let max_read = daily.iter().map(|d| d.items_read).max().unwrap_or(1).max(1);
+    let mut daily_lines: Vec<Line<'_>> = Vec::new();
+    for day in daily.into_iter().rev() {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss
+        )]
+        let bar_len = ((day.items_read as f64 / max_read as f64) * 15.0) as usize;
+        let bar: String = "█".repeat(bar_len);
+        let date_short = day.date.get(5..).unwrap_or(&day.date);
+        daily_lines.push(Line::from(vec![
+            Span::raw(format!("  {date_short} ")),
+            Span::styled(
+                format!("{:>3}", day.items_read),
+                Style::default().fg(Color::Yellow),
+            ),
+            Span::raw(" "),
+            Span::styled(bar, Style::default().fg(Color::Green)),
+        ]));
+    }
+    if daily_lines.is_empty() {
+        daily_lines.push(Line::styled(
+            "  (no reading activity)",
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    let daily_panel = Paragraph::new(daily_lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Last 7 Days (read) ")
+            .title_alignment(Alignment::Left),
+    );
+    frame.render_widget(daily_panel, chart_cols[0]);
+
+    // Top sources + tag distribution
+    let right_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(chart_cols[1]);
+
+    let mut src_lines: Vec<Line<'_>> = Vec::new();
+    if report.top_sources.is_empty() {
+        src_lines.push(Line::styled(
+            "  (no sources yet)",
+            Style::default().fg(Color::DarkGray),
+        ));
+    } else {
+        for src in report.top_sources.iter().take(6) {
+            let name: String = src.source_name.chars().take(20).collect();
+            src_lines.push(Line::raw(format!(
+                "  {:<20} {}/{}",
+                name, src.items_read, src.total_items
+            )));
+        }
+    }
+    let src_panel = Paragraph::new(src_lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Top Sources ")
+            .title_alignment(Alignment::Left),
+    );
+    frame.render_widget(src_panel, right_chunks[0]);
+
+    let mut tag_lines: Vec<Line<'_>> = Vec::new();
+    if report.tag_distribution.is_empty() {
+        tag_lines.push(Line::styled(
+            "  (no tags yet)",
+            Style::default().fg(Color::DarkGray),
+        ));
+    } else {
+        for tag in report.tag_distribution.iter().take(6) {
+            tag_lines.push(Line::raw(format!("  {:<20} {}", tag.tag_name, tag.count)));
+        }
+    }
+    let tag_panel = Paragraph::new(tag_lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Tags ")
+            .title_alignment(Alignment::Left),
+    );
+    frame.render_widget(tag_panel, right_chunks[1]);
+
+    // Footer
+    let footer = Paragraph::new(Line::styled(
+        "Press [q] or [Esc] to exit",
+        Style::default().fg(Color::DarkGray),
+    ))
+    .alignment(Alignment::Center);
+    frame.render_widget(footer, main_chunks[3]);
+}

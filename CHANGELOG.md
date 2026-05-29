@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Usage statistics and reading analytics: `stats usage` command with text and JSON output
+- Articles read per day, week, and month with reading time estimates (238 WPM)
+- Reading streaks: current and longest consecutive-day streaks
+- Top content sources ranked by read count (feed-backed and URL-based)
+- Tag distribution and monthly tag usage trends
+- TUI usage statistics dashboard accessible from `stats usage --tui`
+- `read_at` column tracking when items are marked as read (archived)
+- `reading_time` module in `pergamon-core` for word count and reading time estimation
+
 ## [0.5.0] - 2026-05-29
 
 ### Added
