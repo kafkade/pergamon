@@ -315,4 +315,56 @@ pub struct ReviewStats {
     pub review_count: i64,
     /// Number of cards in relearning state.
     pub relearning_count: i64,
+    /// Number of reviews completed today (UTC).
+    pub reviews_today: i64,
+    /// Current consecutive-day review streak.
+    pub current_streak: i64,
+    /// Longest consecutive-day review streak ever achieved.
+    pub longest_streak: i64,
+}
+
+/// Review card count grouped by provenance (source origin).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceBreakdown {
+    /// Label for the source origin (e.g. "Kindle", "Readwise", "Feed", "Manual").
+    pub origin: String,
+    /// Number of review cards from this origin.
+    pub count: i64,
+}
+
+/// Daily review activity for trend charts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DailyReviewSummary {
+    /// Date in YYYY-MM-DD format (UTC).
+    pub date: String,
+    /// Total reviews performed that day.
+    pub reviews: i64,
+    /// Reviews rated Hard or above (successful).
+    pub successes: i64,
+}
+
+/// Composite report bundling all review statistics.
+///
+/// Designed for JSON serialisation and shared between CLI and TUI.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReviewStatsReport {
+    /// Core review statistics with streaks.
+    pub stats: ReviewStats,
+    /// Review cards grouped by source provenance.
+    pub source_breakdown: Vec<SourceBreakdown>,
+    /// Daily review counts for the last 30 days.
+    pub daily_history: Vec<DailyReviewSummary>,
+    /// Weekly review counts (last 12 weeks).
+    pub weekly_history: Vec<WeeklyReviewSummary>,
+}
+
+/// Weekly review activity summary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WeeklyReviewSummary {
+    /// ISO week label (e.g. "2026-W22").
+    pub week: String,
+    /// Total reviews performed that week.
+    pub reviews: i64,
+    /// Reviews rated Hard or above (successful).
+    pub successes: i64,
 }

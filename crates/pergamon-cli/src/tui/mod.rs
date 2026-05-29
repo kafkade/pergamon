@@ -13,7 +13,7 @@ use anyhow::{Context, Result};
 use crossterm::event::{Event, KeyCode, KeyModifiers};
 use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
 use pergamon_core::fsrs::{MemoryState, Parameters, Rating, Scheduler};
-use pergamon_core::model::{ReviewCard, ReviewLog};
+use pergamon_core::model::{ReviewCard, ReviewLog, ReviewStatsReport};
 use pergamon_storage::Database;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -197,18 +197,31 @@ pub fn run_review(db: &Database, cards: Vec<ReviewCard>) -> Result<()> {
         }
     }
 
-    // Show summary before exiting
-    terminal
-        .draw(|frame| {
-            render_review_summary(frame, reviewed, again_count);
-        })
-        .context("failed to draw summary")?;
-
-    // Wait for any key to dismiss
+    // Show summary, allow 's' for stats or any other key to exit
+    let mut show_stats = false;
     loop {
+        terminal
+            .draw(|frame| {
+                if show_stats {
+                    if let Ok(report) = db.review_stats_report(OffsetDateTime::now_utc()) {
+                        render_stats_dashboard(frame, &report);
+                    } else {
+                        render_review_summary(frame, reviewed, again_count);
+                    }
+                } else {
+                    render_review_summary(frame, reviewed, again_count);
+                }
+            })
+            .context("failed to draw summary")?;
+
         if crossterm::event::poll(Duration::from_millis(100))? {
-            if let Event::Key(_) = crossterm::event::read()? {
-                break;
+            if let Event::Key(key) = crossterm::event::read()? {
+                match key.code {
+                    KeyCode::Char('s') if !show_stats => {
+                        show_stats = true;
+                    }
+                    _ => break,
+                }
             }
         }
     }
@@ -345,7 +358,7 @@ fn render_review_summary(frame: &mut ratatui::Frame, reviewed: usize, again_coun
         Line::raw(format!("  Retention:  {retention:.0}%")),
         Line::raw(""),
         Line::styled(
-            "Press any key to exit",
+            "[s] Stats dashboard  [any key] Exit",
             Style::default().fg(Color::DarkGray),
         ),
     ];
@@ -366,6 +379,242 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 
 fn short_id(id: Uuid) -> String {
     id.to_string()[..8].to_owned()
+}
+
+/// Run a standalone TUI stats dashboard (no review session needed).
+pub fn run_stats_tui(db: &Database) -> Result<()> {
+    let report = db
+        .review_stats_report(OffsetDateTime::now_utc())
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    enable_raw_mode().context("failed to enable raw mode")?;
+    crossterm::execute!(std::io::stdout(), EnterAlternateScreen)
+        .context("failed to enter alternate screen")?;
+
+    let _guard = ReviewTermGuard;
+
+    let backend = CrosstermBackend::new(std::io::stdout());
+    let mut terminal = Terminal::new(backend).context("failed to initialize terminal")?;
+
+    loop {
+        terminal
+            .draw(|frame| {
+                render_stats_dashboard(frame, &report);
+            })
+            .context("failed to draw stats")?;
+
+        if crossterm::event::poll(Duration::from_millis(100))? {
+            if let Event::Key(key) = crossterm::event::read()? {
+                if key.code == KeyCode::Char('q')
+                    || key.code == KeyCode::Esc
+                    || (key.modifiers.contains(KeyModifiers::CONTROL)
+                        && key.code == KeyCode::Char('c'))
+                {
+                    break;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Render the full stats dashboard as a TUI screen.
+#[allow(clippy::too_many_lines)]
+fn render_stats_dashboard(frame: &mut ratatui::Frame, report: &ReviewStatsReport) {
+    let area = frame.area();
+
+    let main_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),  // title
+            Constraint::Length(12), // core stats + streaks
+            Constraint::Min(6),     // charts
+            Constraint::Length(1),  // footer
+        ])
+        .split(area);
+
+    // Title
+    let title = Paragraph::new(Line::styled(
+        " Review Statistics Dashboard ",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    ))
+    .alignment(Alignment::Center)
+    .block(Block::default().borders(Borders::BOTTOM));
+    frame.render_widget(title, main_chunks[0]);
+
+    // Core stats + streaks (side by side)
+    let stats = &report.stats;
+    let top_cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(35),
+            Constraint::Percentage(30),
+            Constraint::Percentage(35),
+        ])
+        .split(main_chunks[1]);
+
+    // Cards overview
+    let cards_text = vec![
+        Line::raw(format!("Total cards:   {}", stats.total_cards)),
+        Line::raw(format!("  New:         {}", stats.new_count)),
+        Line::raw(format!("  Learning:    {}", stats.learning_count)),
+        Line::raw(format!("  Review:      {}", stats.review_count)),
+        Line::raw(format!("  Relearning:  {}", stats.relearning_count)),
+        Line::raw(""),
+        Line::raw(format!("Due now:       {}", stats.due_count)),
+        Line::raw(format!("Today:         {}", stats.reviews_today)),
+    ];
+    let cards_panel = Paragraph::new(cards_text).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Cards ")
+            .title_alignment(Alignment::Left),
+    );
+    frame.render_widget(cards_panel, top_cols[0]);
+
+    // Retention + streaks
+    let retention_text = vec![
+        Line::raw(format!(
+            "Retention:  {:.1}%",
+            stats.observed_retention * 100.0
+        )),
+        Line::raw(format!("Reviews:    {}", stats.total_reviews)),
+        Line::raw(format!("Successes:  {}", stats.success_count)),
+        Line::raw(""),
+        Line::styled("Streaks", Style::default().add_modifier(Modifier::BOLD)),
+        Line::raw(format!(
+            "  Current:  {} day{}",
+            stats.current_streak,
+            if stats.current_streak == 1 { "" } else { "s" }
+        )),
+        Line::raw(format!(
+            "  Longest:  {} day{}",
+            stats.longest_streak,
+            if stats.longest_streak == 1 { "" } else { "s" }
+        )),
+    ];
+    let retention_panel = Paragraph::new(retention_text).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Retention ")
+            .title_alignment(Alignment::Left),
+    );
+    frame.render_widget(retention_panel, top_cols[1]);
+
+    // Source breakdown
+    let mut src_lines: Vec<Line<'_>> = Vec::new();
+    if report.source_breakdown.is_empty() {
+        src_lines.push(Line::styled(
+            "(no review cards)",
+            Style::default().fg(Color::DarkGray),
+        ));
+    } else {
+        for src in &report.source_breakdown {
+            src_lines.push(Line::raw(format!("  {:<12} {}", src.origin, src.count)));
+        }
+    }
+    let src_panel = Paragraph::new(src_lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Sources ")
+            .title_alignment(Alignment::Left),
+    );
+    frame.render_widget(src_panel, top_cols[2]);
+
+    // Charts area: daily + weekly side by side
+    let chart_cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+        .split(main_chunks[2]);
+
+    // Daily bar chart (last 7 days)
+    let daily: Vec<_> = report.daily_history.iter().rev().take(7).collect();
+    let max_daily = daily.iter().map(|d| d.reviews).max().unwrap_or(1).max(1);
+    let mut daily_lines: Vec<Line<'_>> = Vec::new();
+    for day in daily.into_iter().rev() {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss
+        )]
+        let bar_len = ((day.reviews as f64 / max_daily as f64) * 15.0) as usize;
+        let bar: String = "█".repeat(bar_len);
+        let date_short = day.date.get(5..).unwrap_or(&day.date);
+        daily_lines.push(Line::from(vec![
+            Span::raw(format!("  {date_short} ")),
+            Span::styled(
+                format!("{:>3}", day.reviews),
+                Style::default().fg(Color::Yellow),
+            ),
+            Span::raw(" "),
+            Span::styled(bar, Style::default().fg(Color::Green)),
+        ]));
+    }
+    if daily_lines.is_empty() {
+        daily_lines.push(Line::styled(
+            "  (no reviews yet)",
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    let daily_panel = Paragraph::new(daily_lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Last 7 Days ")
+            .title_alignment(Alignment::Left),
+    );
+    frame.render_widget(daily_panel, chart_cols[0]);
+
+    // Weekly chart
+    let max_weekly = report
+        .weekly_history
+        .iter()
+        .map(|w| w.reviews)
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let mut weekly_lines: Vec<Line<'_>> = Vec::new();
+    for week in &report.weekly_history {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss
+        )]
+        let bar_len = ((week.reviews as f64 / max_weekly as f64) * 12.0) as usize;
+        let bar: String = "█".repeat(bar_len);
+        weekly_lines.push(Line::from(vec![
+            Span::raw(format!("  {} ", week.week)),
+            Span::styled(
+                format!("{:>3}", week.reviews),
+                Style::default().fg(Color::Yellow),
+            ),
+            Span::raw(" "),
+            Span::styled(bar, Style::default().fg(Color::Cyan)),
+        ]));
+    }
+    if weekly_lines.is_empty() {
+        weekly_lines.push(Line::styled(
+            "  (no reviews yet)",
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    let weekly_panel = Paragraph::new(weekly_lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Weekly Trend ")
+            .title_alignment(Alignment::Left),
+    );
+    frame.render_widget(weekly_panel, chart_cols[1]);
+
+    // Footer
+    let footer = Paragraph::new(Line::styled(
+        "Press [q] or [Esc] to exit",
+        Style::default().fg(Color::DarkGray),
+    ))
+    .alignment(Alignment::Center);
+    frame.render_widget(footer, main_chunks[3]);
 }
 
 /// Guard that restores terminal state on drop for review sessions.

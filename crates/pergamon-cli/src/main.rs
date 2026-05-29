@@ -144,6 +144,11 @@ enum Command {
     },
     /// Show current configuration.
     Config,
+    /// View statistics dashboards.
+    Stats {
+        #[command(subcommand)]
+        action: StatsAction,
+    },
     /// Generate shell completions.
     Completions {
         /// Shell to generate completions for.
@@ -555,13 +560,43 @@ enum ReviewAction {
         format: String,
     },
     /// Show review statistics.
-    Stats,
+    Stats {
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
+        /// Show stats in a TUI dashboard instead of text/JSON output.
+        #[arg(long)]
+        tui: bool,
+    },
     /// Start an interactive review session in the TUI.
     Start {
         /// Maximum number of cards to review (default: all due).
         #[arg(long)]
         limit: Option<usize>,
     },
+}
+
+/// Statistics subcommands.
+#[derive(Debug, Subcommand)]
+enum StatsAction {
+    /// Show retention and review statistics dashboard.
+    Review {
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
+        /// Show stats in a TUI dashboard instead of text/JSON output.
+        #[arg(long)]
+        tui: bool,
+    },
+}
+
+/// CLI output format for commands supporting structured output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum OutputFormat {
+    /// Human-readable text.
+    Text,
+    /// Machine-readable JSON.
+    Json,
 }
 
 fn main() -> Result<()> {
@@ -636,6 +671,7 @@ fn main() -> Result<()> {
         Command::Highlight { action } => handle_highlight(&db, action),
         Command::Note { action } => handle_note(&db, action),
         Command::Review { action } => handle_review(&db, action),
+        Command::Stats { action } => handle_stats(&db, &action),
         // Already handled above — unreachable at runtime.
         Command::Config | Command::Completions { .. } => Ok(()),
     }
@@ -3780,7 +3816,7 @@ fn handle_review(db: &Database, action: ReviewAction) -> Result<()> {
         ReviewAction::Enable { id } => review_enable(db, &id),
         ReviewAction::Disable { id } => review_disable(db, &id),
         ReviewAction::Due { limit, format } => review_due(db, limit, &format),
-        ReviewAction::Stats => review_stats(db),
+        ReviewAction::Stats { format, tui } => review_stats_cmd(db, format, tui),
         ReviewAction::Start { limit } => review_start(db, limit),
     }
 }
@@ -3913,10 +3949,30 @@ fn review_due(db: &Database, limit: usize, format: &str) -> Result<()> {
     Ok(())
 }
 
+/// Route top-level `stats` subcommands.
+fn handle_stats(db: &Database, action: &StatsAction) -> Result<()> {
+    match action {
+        StatsAction::Review { format, tui } => review_stats_cmd(db, *format, *tui),
+    }
+}
+
 /// Show aggregated review statistics.
-fn review_stats(db: &Database) -> Result<()> {
+fn review_stats_cmd(db: &Database, format: OutputFormat, tui: bool) -> Result<()> {
+    if tui {
+        return tui::run_stats_tui(db);
+    }
     let now = OffsetDateTime::now_utc();
-    let stats = db.review_stats(now).context("failed to get review stats")?;
+    let report = db
+        .review_stats_report(now)
+        .context("failed to get review stats")?;
+
+    if format == OutputFormat::Json {
+        let json = serde_json::to_string_pretty(&report).context("failed to serialize stats")?;
+        println!("{json}");
+        return Ok(());
+    }
+
+    let stats = &report.stats;
 
     println!("Review Statistics");
     println!("─────────────────");
@@ -3926,8 +3982,73 @@ fn review_stats(db: &Database) -> Result<()> {
     println!("  Review:        {}", stats.review_count);
     println!("  Relearning:    {}", stats.relearning_count);
     println!("Due now:         {}", stats.due_count);
+    println!("Today:           {}", stats.reviews_today);
     println!("Total reviews:   {}", stats.total_reviews);
     println!("Retention:       {:.1}%", stats.observed_retention * 100.0);
+
+    println!();
+    println!("Streaks");
+    println!("───────");
+    println!(
+        "Current:         {} day{}",
+        stats.current_streak,
+        if stats.current_streak == 1 { "" } else { "s" }
+    );
+    println!(
+        "Longest:         {} day{}",
+        stats.longest_streak,
+        if stats.longest_streak == 1 { "" } else { "s" }
+    );
+
+    if !report.source_breakdown.is_empty() {
+        println!();
+        println!("Source Breakdown");
+        println!("───────────────");
+        for src in &report.source_breakdown {
+            println!("  {:<14} {}", format!("{}:", src.origin), src.count);
+        }
+    }
+
+    if !report.daily_history.is_empty() {
+        println!();
+        println!("Last 7 Days");
+        println!("───────────");
+        let recent: Vec<_> = report.daily_history.iter().rev().take(7).collect();
+        let max_reviews = recent.iter().map(|d| d.reviews).max().unwrap_or(1).max(1);
+        for day in recent.into_iter().rev() {
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                clippy::cast_precision_loss
+            )]
+            let bar_len = ((day.reviews as f64 / max_reviews as f64) * 20.0) as usize;
+            let bar: String = "█".repeat(bar_len);
+            println!("  {} {:>3}  {}", day.date, day.reviews, bar);
+        }
+    }
+
+    if !report.weekly_history.is_empty() {
+        println!();
+        println!("Weekly Trend");
+        println!("────────────");
+        let max_reviews = report
+            .weekly_history
+            .iter()
+            .map(|w| w.reviews)
+            .max()
+            .unwrap_or(1)
+            .max(1);
+        for week in &report.weekly_history {
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                clippy::cast_precision_loss
+            )]
+            let bar_len = ((week.reviews as f64 / max_reviews as f64) * 20.0) as usize;
+            let bar: String = "█".repeat(bar_len);
+            println!("  {} {:>3}  {}", week.week, week.reviews, bar);
+        }
+    }
 
     Ok(())
 }

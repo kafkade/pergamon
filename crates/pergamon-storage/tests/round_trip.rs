@@ -2640,3 +2640,358 @@ fn review_stats_computed_correctly() {
     assert!((stats.observed_retention - 0.5).abs() < f64::EPSILON);
     assert_eq!(stats.new_count, 1); // Card is still in New state in DB
 }
+
+// ======================================================================
+// Review stats: streaks, source breakdown, daily/weekly history
+// ======================================================================
+
+#[allow(clippy::unwrap_used)]
+mod review_stats_tests {
+    use super::*;
+
+    /// Create a highlight + card + source item scaffolding for stats tests.
+    /// Returns `(source_item_id, highlight_item_id, card_id)`.
+    fn create_review_scaffold(
+        db: &Database,
+        source_url: Option<&str>,
+        feed_linked: bool,
+    ) -> (Uuid, Uuid, Uuid) {
+        let source = ContentItem {
+            id: Uuid::new_v4(),
+            url: source_url.map(std::borrow::ToOwned::to_owned),
+            title: "Source".to_owned(),
+            author: None,
+            content_type: ContentType::Article,
+            status: DocumentStatus::Inbox,
+            content_text: Some("body".to_owned()),
+            excerpt: None,
+            published_at: None,
+            created_at: now(),
+            updated_at: now(),
+        };
+        db.insert_content_item(&source)
+            .unwrap_or_else(|e| unreachable!("insert source: {e}"));
+
+        if feed_linked {
+            let feed = Feed {
+                id: Uuid::new_v4(),
+                title: "Feed".to_owned(),
+                url: "https://example.com/feed.xml".to_owned(),
+                site_url: None,
+                description: None,
+                etag: None,
+                last_modified_header: None,
+                error_count: 0,
+                last_error: None,
+                last_fetched_at: None,
+                folder_id: None,
+                created_at: now(),
+                updated_at: now(),
+            };
+            db.insert_feed(&feed)
+                .unwrap_or_else(|e| unreachable!("insert feed: {e}"));
+            let fmeta = FeedItemMeta {
+                content_item_id: source.id,
+                feed_id: feed.id,
+                guid: Some("test-guid".to_owned()),
+                summary: None,
+            };
+            db.insert_feed_item_meta(&fmeta)
+                .unwrap_or_else(|e| unreachable!("insert feed meta: {e}"));
+        }
+
+        let hl = ContentItem {
+            id: Uuid::new_v4(),
+            url: None,
+            title: "Highlight".to_owned(),
+            author: None,
+            content_type: ContentType::Highlight,
+            status: DocumentStatus::Inbox,
+            content_text: Some("hl text".to_owned()),
+            excerpt: None,
+            published_at: None,
+            created_at: now(),
+            updated_at: now(),
+        };
+        db.insert_content_item(&hl)
+            .unwrap_or_else(|e| unreachable!("insert hl: {e}"));
+
+        let meta = HighlightMeta {
+            content_item_id: hl.id,
+            source_item_id: Some(source.id),
+            quote_text: "hl text".to_owned(),
+            note: None,
+            position_start: None,
+            position_end: None,
+            color: None,
+        };
+        db.insert_highlight_meta(&meta)
+            .unwrap_or_else(|e| unreachable!("insert hl meta: {e}"));
+
+        let card = pergamon_core::model::ReviewCard {
+            id: Uuid::new_v4(),
+            content_item_id: hl.id,
+            state: pergamon_core::fsrs::CardState::New,
+            stability: None,
+            difficulty: None,
+            due_at: now(),
+            last_reviewed_at: None,
+            review_count: 0,
+            lapse_count: 0,
+            scheduled_days: None,
+            created_at: now(),
+            updated_at: now(),
+        };
+        db.insert_review_card(&card)
+            .unwrap_or_else(|e| unreachable!("insert card: {e}"));
+
+        (source.id, hl.id, card.id)
+    }
+
+    /// Insert a review log at a specific timestamp.
+    fn insert_log_at(
+        db: &Database,
+        card_id: Uuid,
+        at: OffsetDateTime,
+        rating: pergamon_core::fsrs::Rating,
+    ) {
+        use pergamon_core::fsrs::CardState;
+        let log = pergamon_core::model::ReviewLog {
+            id: Uuid::new_v4(),
+            card_id,
+            rating,
+            state_before: CardState::New,
+            stability_before: None,
+            difficulty_before: None,
+            state_after: CardState::Review,
+            stability_after: 3.0,
+            difficulty_after: 5.0,
+            elapsed_days: 0.0,
+            scheduled_days: 1.0,
+            reviewed_at: at,
+        };
+        db.insert_review_log(&log)
+            .unwrap_or_else(|e| unreachable!("insert log: {e}"));
+    }
+
+    #[test]
+    fn stats_streaks_empty_db() {
+        let db = test_db();
+        let stats = db.review_stats(now()).unwrap();
+        assert_eq!(stats.current_streak, 0);
+        assert_eq!(stats.longest_streak, 0);
+        assert_eq!(stats.reviews_today, 0);
+    }
+
+    #[test]
+    fn stats_streaks_consecutive_days() {
+        use pergamon_core::fsrs::Rating;
+        let db = test_db();
+        let (_, _, card_id) = create_review_scaffold(&db, None, false);
+
+        // Reviews on 3 consecutive days ending today.
+        let today = OffsetDateTime::now_utc();
+        let yesterday = today - time::Duration::days(1);
+        let day_before = today - time::Duration::days(2);
+
+        insert_log_at(&db, card_id, day_before, Rating::Good);
+        insert_log_at(&db, card_id, yesterday, Rating::Hard);
+        insert_log_at(&db, card_id, today, Rating::Easy);
+
+        let stats = db.review_stats(today).unwrap();
+        assert_eq!(
+            stats.current_streak, 3,
+            "3 consecutive days including today"
+        );
+        assert_eq!(stats.longest_streak, 3);
+        assert_eq!(stats.reviews_today, 1);
+    }
+
+    #[test]
+    fn stats_streak_yesterday_no_today() {
+        use pergamon_core::fsrs::Rating;
+        let db = test_db();
+        let (_, _, card_id) = create_review_scaffold(&db, None, false);
+
+        let today = OffsetDateTime::now_utc();
+        let yesterday = today - time::Duration::days(1);
+        let day_before = today - time::Duration::days(2);
+
+        insert_log_at(&db, card_id, day_before, Rating::Good);
+        insert_log_at(&db, card_id, yesterday, Rating::Good);
+        // No review today — streak should still be preserved (counted from yesterday).
+
+        let stats = db.review_stats(today).unwrap();
+        assert_eq!(stats.current_streak, 2, "streak preserved from yesterday");
+        assert_eq!(stats.longest_streak, 2);
+        assert_eq!(stats.reviews_today, 0);
+    }
+
+    #[test]
+    fn stats_streak_gap_resets() {
+        use pergamon_core::fsrs::Rating;
+        let db = test_db();
+        let (_, _, card_id) = create_review_scaffold(&db, None, false);
+
+        let today = OffsetDateTime::now_utc();
+        // Reviews 3 days ago and today, but NOT yesterday → gap resets streak.
+        insert_log_at(&db, card_id, today - time::Duration::days(3), Rating::Good);
+        insert_log_at(&db, card_id, today, Rating::Good);
+
+        let stats = db.review_stats(today).unwrap();
+        assert_eq!(stats.current_streak, 1, "gap resets to 1 (today only)");
+        assert_eq!(stats.longest_streak, 1);
+    }
+
+    #[test]
+    fn stats_longest_streak_exceeds_current() {
+        use pergamon_core::fsrs::Rating;
+        let db = test_db();
+        let (_, _, card_id) = create_review_scaffold(&db, None, false);
+
+        let today = OffsetDateTime::now_utc();
+        // Old 5-day streak (10-14 days ago), then gap, then single day today.
+        for i in (10..=14).rev() {
+            insert_log_at(&db, card_id, today - time::Duration::days(i), Rating::Good);
+        }
+        insert_log_at(&db, card_id, today, Rating::Easy);
+
+        let stats = db.review_stats(today).unwrap();
+        assert_eq!(stats.current_streak, 1, "only today");
+        assert_eq!(stats.longest_streak, 5, "old 5-day streak is longest");
+    }
+
+    #[test]
+    fn stats_source_breakdown_manual() {
+        let db = test_db();
+        let _ = create_review_scaffold(&db, Some("https://example.com/article"), false);
+
+        let breakdown = db.review_source_breakdown().unwrap();
+        assert_eq!(breakdown.len(), 1);
+        assert_eq!(breakdown[0].origin, "Manual");
+        assert_eq!(breakdown[0].count, 1);
+    }
+
+    #[test]
+    fn stats_source_breakdown_kindle() {
+        let db = test_db();
+        let _ = create_review_scaffold(&db, Some("kindle://book/abc123"), false);
+
+        let breakdown = db.review_source_breakdown().unwrap();
+        assert_eq!(breakdown.len(), 1);
+        assert_eq!(breakdown[0].origin, "Kindle");
+    }
+
+    #[test]
+    fn stats_source_breakdown_readwise() {
+        let db = test_db();
+        let _ = create_review_scaffold(&db, Some("readwise://source/xyz"), false);
+
+        let breakdown = db.review_source_breakdown().unwrap();
+        assert_eq!(breakdown.len(), 1);
+        assert_eq!(breakdown[0].origin, "Readwise");
+    }
+
+    #[test]
+    fn stats_source_breakdown_feed() {
+        let db = test_db();
+        let _ = create_review_scaffold(&db, Some("https://blog.example.com/post"), true);
+
+        let breakdown = db.review_source_breakdown().unwrap();
+        assert_eq!(breakdown.len(), 1);
+        assert_eq!(breakdown[0].origin, "Feed");
+    }
+
+    #[test]
+    fn stats_source_breakdown_mixed() {
+        let db = test_db();
+        let _ = create_review_scaffold(&db, Some("kindle://book/a"), false);
+        let _ = create_review_scaffold(&db, Some("kindle://book/b"), false);
+        let _ = create_review_scaffold(&db, Some("readwise://source/x"), false);
+        let _ = create_review_scaffold(&db, Some("https://manual.com"), false);
+
+        let breakdown = db.review_source_breakdown().unwrap();
+        let kindle = breakdown.iter().find(|s| s.origin == "Kindle");
+        let readwise = breakdown.iter().find(|s| s.origin == "Readwise");
+        let manual = breakdown.iter().find(|s| s.origin == "Manual");
+
+        assert_eq!(kindle.map(|s| s.count), Some(2));
+        assert_eq!(readwise.map(|s| s.count), Some(1));
+        assert_eq!(manual.map(|s| s.count), Some(1));
+    }
+
+    #[test]
+    fn stats_daily_history() {
+        use pergamon_core::fsrs::Rating;
+        let db = test_db();
+        let (_, _, card_id) = create_review_scaffold(&db, None, false);
+
+        let today = OffsetDateTime::now_utc();
+        // 2 reviews today, 1 yesterday.
+        insert_log_at(&db, card_id, today, Rating::Good);
+        insert_log_at(
+            &db,
+            card_id,
+            today - time::Duration::seconds(60),
+            Rating::Again,
+        );
+        insert_log_at(&db, card_id, today - time::Duration::days(1), Rating::Hard);
+
+        let daily = db.review_daily_history(30, today).unwrap();
+        assert!(daily.len() >= 2, "at least 2 days");
+
+        let today_entry = daily.iter().find(|d| {
+            let t = time::format_description::well_known::Rfc3339;
+            let s = today.format(&t).unwrap_or_default();
+            d.date == s[..10]
+        });
+        assert!(today_entry.is_some(), "today should be in daily history");
+        let te = today_entry.unwrap();
+        assert_eq!(te.reviews, 2);
+        assert_eq!(te.successes, 1); // Good is success, Again is not
+    }
+
+    #[test]
+    fn stats_weekly_history() {
+        use pergamon_core::fsrs::Rating;
+        let db = test_db();
+        let (_, _, card_id) = create_review_scaffold(&db, None, false);
+
+        let today = OffsetDateTime::now_utc();
+        insert_log_at(&db, card_id, today, Rating::Easy);
+        insert_log_at(&db, card_id, today - time::Duration::days(8), Rating::Good);
+
+        let weekly = db.review_weekly_history(12, today).unwrap();
+        assert!(!weekly.is_empty(), "should have at least 1 week");
+    }
+
+    #[test]
+    fn stats_report_combines_all() {
+        use pergamon_core::fsrs::Rating;
+        let db = test_db();
+        let (_, _, card_id) = create_review_scaffold(&db, Some("kindle://book/test"), false);
+
+        let today = OffsetDateTime::now_utc();
+        insert_log_at(&db, card_id, today, Rating::Good);
+
+        let report = db.review_stats_report(today).unwrap();
+        assert_eq!(report.stats.total_cards, 1);
+        assert_eq!(report.stats.total_reviews, 1);
+        assert_eq!(report.stats.reviews_today, 1);
+        assert_eq!(report.stats.current_streak, 1);
+        assert!(!report.source_breakdown.is_empty());
+        assert_eq!(report.source_breakdown[0].origin, "Kindle");
+        assert!(!report.daily_history.is_empty());
+    }
+
+    #[test]
+    fn stats_report_json_serializable() {
+        let db = test_db();
+        let report = db.review_stats_report(now()).unwrap();
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(json.contains("total_cards"));
+        assert!(json.contains("source_breakdown"));
+        assert!(json.contains("daily_history"));
+        assert!(json.contains("weekly_history"));
+    }
+} // mod review_stats_tests

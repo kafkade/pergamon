@@ -15,8 +15,9 @@ use uuid::Uuid;
 use pergamon_core::content_type::ContentType;
 use pergamon_core::fsrs::{CardState, Rating};
 use pergamon_core::model::{
-    BookmarkMeta, Collection, ContentItem, Feed, FeedFolder, FeedItemMeta, HighlightMeta,
-    LinkHealth, Note, ReviewCard, ReviewLog, ReviewStats, SearchHit, SearchResult, Tag,
+    BookmarkMeta, Collection, ContentItem, DailyReviewSummary, Feed, FeedFolder, FeedItemMeta,
+    HighlightMeta, LinkHealth, Note, ReviewCard, ReviewLog, ReviewStats, ReviewStatsReport,
+    SearchHit, SearchResult, SourceBreakdown, Tag, WeeklyReviewSummary,
 };
 use pergamon_core::status::DocumentStatus;
 
@@ -1369,6 +1370,16 @@ impl Database {
             |row| row.get(0),
         )?;
 
+        let today_str = fmt_time(now);
+        let today_date = &today_str[..10]; // "YYYY-MM-DD"
+        let reviews_today: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM review_logs WHERE date(reviewed_at) = ?1",
+            params![today_date],
+            |row| row.get(0),
+        )?;
+
+        let (current_streak, longest_streak) = self.compute_streaks(today_date)?;
+
         Ok(ReviewStats {
             total_cards,
             due_count,
@@ -1379,6 +1390,184 @@ impl Database {
             learning_count,
             review_count,
             relearning_count,
+            reviews_today,
+            current_streak,
+            longest_streak,
+        })
+    }
+
+    /// Compute current and longest review streaks from review logs.
+    ///
+    /// A streak is a run of consecutive calendar days (UTC) with at least
+    /// one review. The current streak counts backwards from today; if there
+    /// are no reviews today, the streak is counted from yesterday so that
+    /// users who haven't reviewed yet today don't see their streak reset.
+    fn compute_streaks(&self, today_date: &str) -> Result<(i64, i64), StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT date(reviewed_at) AS d
+             FROM review_logs
+             ORDER BY d DESC",
+        )?;
+        let dates: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .filter_map(std::result::Result::ok)
+            .collect();
+
+        if dates.is_empty() {
+            return Ok((0, 0));
+        }
+
+        // Current streak: walk backwards from today (or yesterday if no reviews today).
+        let mut current_streak: i64 = 0;
+        let expect_date = |offset: i64| -> String {
+            // Simple date arithmetic: parse today, subtract days.
+            let year: i32 = today_date[..4].parse().unwrap_or(2026);
+            let month: u32 = today_date[5..7].parse().unwrap_or(1);
+            let day: u32 = today_date[8..10].parse().unwrap_or(1);
+
+            // Convert to a simple day count and back (Julian day approximation).
+            #[allow(clippy::cast_possible_truncation)]
+            let jd = julian_day(year, month, day) - offset as i32;
+            let (y, m, d) = from_julian_day(jd);
+            format!("{y:04}-{m:02}-{d:02}")
+        };
+
+        // Determine where to start: today or yesterday.
+        let start_offset: i64 = if dates.first().is_some_and(|d| d == today_date) {
+            0
+        } else if dates.first().is_some_and(|d| d == &expect_date(1)) {
+            1
+        } else {
+            // Last review was more than a day ago — no active streak.
+            // Still need to compute longest streak below.
+            let longest = compute_longest_streak(&dates);
+            return Ok((0, longest));
+        };
+
+        for i in 0.. {
+            let expected = expect_date(start_offset + i);
+            if dates.iter().any(|d| d == &expected) {
+                current_streak += 1;
+            } else {
+                break;
+            }
+        }
+
+        let longest = compute_longest_streak(&dates).max(current_streak);
+        Ok((current_streak, longest))
+    }
+
+    /// Source breakdown: count review cards by provenance origin.
+    ///
+    /// Provenance is inferred from the source item's URL scheme:
+    /// - `kindle://` → "Kindle"
+    /// - `readwise://` → "Readwise"
+    /// - Items with a feed subscription → "Feed"
+    /// - Everything else → "Manual"
+    pub fn review_source_breakdown(&self) -> Result<Vec<SourceBreakdown>, StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT
+                CASE
+                    WHEN ci.url LIKE 'kindle://%' THEN 'Kindle'
+                    WHEN ci.url LIKE 'readwise://%' THEN 'Readwise'
+                    WHEN fi.content_item_id IS NOT NULL THEN 'Feed'
+                    ELSE 'Manual'
+                END AS origin,
+                COUNT(*) AS cnt
+             FROM review_cards rc
+             JOIN highlight_meta hm ON hm.content_item_id = rc.content_item_id
+             LEFT JOIN content_items ci ON ci.id = hm.source_item_id
+             LEFT JOIN feed_item_meta fi ON fi.content_item_id = hm.source_item_id
+             GROUP BY origin
+             ORDER BY cnt DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(SourceBreakdown {
+                origin: row.get(0)?,
+                count: row.get(1)?,
+            })
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
+    /// Daily review activity for the last `days` calendar days.
+    pub fn review_daily_history(
+        &self,
+        days: i64,
+        now: OffsetDateTime,
+    ) -> Result<Vec<DailyReviewSummary>, StorageError> {
+        let cutoff = now - time::Duration::days(days);
+        let mut stmt = self.conn.prepare(
+            "SELECT date(reviewed_at) AS d,
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN rating >= 2 THEN 1 ELSE 0 END) AS good
+             FROM review_logs
+             WHERE reviewed_at >= ?1
+             GROUP BY d
+             ORDER BY d ASC",
+        )?;
+        let rows = stmt.query_map(params![fmt_time(cutoff)], |row| {
+            Ok(DailyReviewSummary {
+                date: row.get(0)?,
+                reviews: row.get(1)?,
+                successes: row.get(2)?,
+            })
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
+    /// Weekly review activity for the last `weeks` calendar weeks.
+    pub fn review_weekly_history(
+        &self,
+        weeks: i64,
+        now: OffsetDateTime,
+    ) -> Result<Vec<WeeklyReviewSummary>, StorageError> {
+        let cutoff = now - time::Duration::days(weeks * 7);
+        let mut stmt = self.conn.prepare(
+            "SELECT strftime('%Y-W%W', reviewed_at) AS w,
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN rating >= 2 THEN 1 ELSE 0 END) AS good
+             FROM review_logs
+             WHERE reviewed_at >= ?1
+             GROUP BY w
+             ORDER BY w ASC",
+        )?;
+        let rows = stmt.query_map(params![fmt_time(cutoff)], |row| {
+            Ok(WeeklyReviewSummary {
+                week: row.get(0)?,
+                reviews: row.get(1)?,
+                successes: row.get(2)?,
+            })
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
+    /// Build a full review stats report with all dimensions.
+    pub fn review_stats_report(
+        &self,
+        now: OffsetDateTime,
+    ) -> Result<ReviewStatsReport, StorageError> {
+        let stats = self.review_stats(now)?;
+        let source_breakdown = self.review_source_breakdown()?;
+        let daily_history = self.review_daily_history(30, now)?;
+        let weekly_history = self.review_weekly_history(12, now)?;
+        Ok(ReviewStatsReport {
+            stats,
+            source_breakdown,
+            daily_history,
+            weekly_history,
         })
     }
 
@@ -2931,6 +3120,70 @@ fn parse_uuid(s: &str) -> Uuid {
 fn parse_time(s: &str) -> OffsetDateTime {
     OffsetDateTime::parse(s, &Rfc3339)
         .unwrap_or_else(|_| unreachable!("invalid timestamp in database: {s:?}"))
+}
+
+/// Convert a calendar date to a Julian Day Number for simple date arithmetic.
+#[allow(clippy::many_single_char_names, clippy::cast_possible_wrap)]
+const fn julian_day(year: i32, month: u32, day: u32) -> i32 {
+    let a = 14_i32.wrapping_sub(month as i32) / 12;
+    let y = year + 4800 - a;
+    let m = month as i32 + 12 * a - 3;
+    day as i32 + (153 * m + 2) / 5 + 365 * y + y / 4 - y / 100 + y / 400 - 32_045
+}
+
+/// Convert a Julian Day Number back to (year, month, day).
+#[allow(clippy::many_single_char_names, clippy::cast_sign_loss)]
+const fn from_julian_day(jd: i32) -> (i32, u32, u32) {
+    let a = jd + 32_044;
+    let b = (4 * a + 3) / 146_097;
+    let c = a - (146_097 * b) / 4;
+    let d = (4 * c + 3) / 1461;
+    let e = c - (1461 * d) / 4;
+    let m = (5 * e + 2) / 153;
+    let day = (e - (153 * m + 2) / 5 + 1) as u32;
+    let month = (m + 3 - 12 * (m / 10)) as u32;
+    let year = 100 * b + d - 4800 + m / 10;
+    (year, month, day)
+}
+
+/// Compute the longest consecutive-day streak from a sorted (descending) list of date strings.
+fn compute_longest_streak(dates: &[String]) -> i64 {
+    if dates.is_empty() {
+        return 0;
+    }
+    // Parse all dates into Julian Day Numbers for arithmetic.
+    let jds: Vec<i32> = dates
+        .iter()
+        .filter_map(|d| {
+            let y: i32 = d.get(..4)?.parse().ok()?;
+            let m: u32 = d.get(5..7)?.parse().ok()?;
+            let day: u32 = d.get(8..10)?.parse().ok()?;
+            Some(julian_day(y, m, day))
+        })
+        .collect();
+
+    if jds.is_empty() {
+        return 0;
+    }
+
+    // Sort ascending for forward walk.
+    let mut sorted = jds;
+    sorted.sort_unstable();
+    sorted.dedup();
+
+    let mut longest: i64 = 1;
+    let mut current: i64 = 1;
+    for window in sorted.windows(2) {
+        if window[1] - window[0] == 1 {
+            current += 1;
+            if current > longest {
+                longest = current;
+            }
+        } else {
+            current = 1;
+        }
+    }
+    longest
 }
 
 /// Map a rusqlite `Row` to a `ContentItem`.
