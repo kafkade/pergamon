@@ -1177,6 +1177,7 @@ fn backup_round_trip() {
         &[],
         &[],
         &[],
+        &[],
     )
     .unwrap_or_else(|e| unreachable!("restore failed: {e}"));
 
@@ -1249,6 +1250,7 @@ fn restore_rejects_nonempty_database() {
         &[],
         &[],
         &[],
+        &[],
     );
     match result {
         Ok(()) => unreachable!("expected restore to fail on non-empty DB"),
@@ -1265,8 +1267,8 @@ fn schema_version_returns_latest() {
     let version = db
         .schema_version()
         .unwrap_or_else(|e| unreachable!("version: {e}"));
-    // We have 9 migrations (V1–V9).
-    assert_eq!(version, 9);
+    // We have 10 migrations (V1–V10).
+    assert_eq!(version, 10);
 }
 
 #[test]
@@ -2281,6 +2283,7 @@ fn backup_restore_includes_notes() {
         &notes_out,
         &[],
         &[],
+        &[],
     )
     .unwrap_or_else(|e| unreachable!("restore: {e}"));
 
@@ -3166,3 +3169,158 @@ mod review_stats_tests {
         assert!(json.contains("weekly_history"));
     }
 } // mod review_stats_tests
+
+// ======================================================================
+// Content rules
+// ======================================================================
+
+#[test]
+fn content_rule_crud() {
+    use pergamon_core::rule::{ContentRule, RuleAction};
+
+    let db = test_db();
+    let now = now();
+
+    let rule = ContentRule {
+        id: Uuid::new_v4(),
+        name: "Auto-tag Rust".to_owned(),
+        enabled: true,
+        priority: 10,
+        filter_query: "tag:programming".to_owned(),
+        actions: vec![RuleAction::AddTag("rust".to_owned())],
+        created_at: now,
+        updated_at: now,
+    };
+
+    db.insert_rule(&rule)
+        .unwrap_or_else(|e| unreachable!("insert rule: {e}"));
+
+    let fetched = db
+        .get_rule(rule.id)
+        .unwrap_or_else(|e| unreachable!("get rule: {e}"));
+    assert_eq!(fetched.name, "Auto-tag Rust");
+    assert_eq!(fetched.priority, 10);
+    assert!(fetched.enabled);
+    assert_eq!(fetched.actions.len(), 1);
+
+    let by_name = db
+        .get_rule_by_name("auto-tag rust")
+        .unwrap_or_else(|e| unreachable!("get by name: {e}"));
+    assert!(by_name.is_some());
+    assert_eq!(
+        by_name.as_ref().map(|r| &r.name),
+        Some(&"Auto-tag Rust".to_owned())
+    );
+
+    let all = db
+        .list_rules()
+        .unwrap_or_else(|e| unreachable!("list rules: {e}"));
+    assert_eq!(all.len(), 1);
+
+    db.set_rule_enabled(rule.id, false)
+        .unwrap_or_else(|e| unreachable!("disable rule: {e}"));
+    let disabled = db
+        .get_rule(rule.id)
+        .unwrap_or_else(|e| unreachable!("get disabled: {e}"));
+    assert!(!disabled.enabled);
+
+    db.delete_rule(rule.id)
+        .unwrap_or_else(|e| unreachable!("delete rule: {e}"));
+    let empty = db
+        .list_rules()
+        .unwrap_or_else(|e| unreachable!("list after delete: {e}"));
+    assert!(empty.is_empty());
+}
+
+#[test]
+fn content_rule_backup_restore() {
+    use pergamon_core::rule::{ContentRule, RuleAction};
+
+    let src = test_db();
+    let now = now();
+
+    let rule = ContentRule {
+        id: Uuid::new_v4(),
+        name: "Mute noisy".to_owned(),
+        enabled: true,
+        priority: 50,
+        filter_query: "source:Noisy".to_owned(),
+        actions: vec![RuleAction::Mute],
+        created_at: now,
+        updated_at: now,
+    };
+    src.insert_rule(&rule)
+        .unwrap_or_else(|e| unreachable!("insert rule: {e}"));
+
+    let rules = src
+        .list_rules()
+        .unwrap_or_else(|e| unreachable!("list rules: {e}"));
+    assert_eq!(rules.len(), 1);
+
+    let dst = test_db();
+    dst.restore_backup(
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &rules,
+    )
+    .unwrap_or_else(|e| unreachable!("restore: {e}"));
+
+    let dst_rules = dst
+        .list_rules()
+        .unwrap_or_else(|e| unreachable!("dst list rules: {e}"));
+    assert_eq!(dst_rules.len(), 1);
+    assert_eq!(dst_rules[0].name, "Mute noisy");
+    assert_eq!(dst_rules[0].actions, vec![RuleAction::Mute]);
+}
+
+#[test]
+fn content_rule_multiple_actions() {
+    use pergamon_core::rule::{ContentRule, RuleAction};
+    use pergamon_core::status::DocumentStatus;
+
+    let db = test_db();
+    let now = now();
+
+    let rule = ContentRule {
+        id: Uuid::new_v4(),
+        name: "Multi-action".to_owned(),
+        enabled: true,
+        priority: 0,
+        filter_query: "type:article".to_owned(),
+        actions: vec![
+            RuleAction::AddTag("auto".to_owned()),
+            RuleAction::SetStatus(DocumentStatus::Later),
+            RuleAction::AddToCollection("reading-list".to_owned()),
+        ],
+        created_at: now,
+        updated_at: now,
+    };
+
+    db.insert_rule(&rule)
+        .unwrap_or_else(|e| unreachable!("insert: {e}"));
+
+    let fetched = db
+        .get_rule(rule.id)
+        .unwrap_or_else(|e| unreachable!("get: {e}"));
+    assert_eq!(fetched.actions.len(), 3);
+    assert_eq!(fetched.actions[0], RuleAction::AddTag("auto".to_owned()));
+    assert_eq!(
+        fetched.actions[1],
+        RuleAction::SetStatus(DocumentStatus::Later)
+    );
+    assert_eq!(
+        fetched.actions[2],
+        RuleAction::AddToCollection("reading-list".to_owned())
+    );
+}

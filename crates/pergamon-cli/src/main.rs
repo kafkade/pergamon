@@ -162,6 +162,11 @@ enum Command {
         #[command(subcommand)]
         action: StatsAction,
     },
+    /// Manage content rules (auto-tag, auto-archive, source muting).
+    Rules {
+        #[command(subcommand)]
+        action: RulesAction,
+    },
     /// Generate shell completions.
     Completions {
         /// Shell to generate completions for.
@@ -662,6 +667,58 @@ enum StatsAction {
     },
 }
 
+/// Content rule management subcommands.
+#[derive(Debug, Subcommand)]
+enum RulesAction {
+    /// List all content rules.
+    List,
+    /// Add a new content rule.
+    Add {
+        /// Rule name.
+        name: String,
+        /// Smart-filter query (e.g. `source:HN tag:rust`).
+        #[arg(long)]
+        filter: String,
+        /// Actions to apply (repeatable). Formats: `tag:<name>`,
+        /// `status:<status>`, `collection:<name>`, `mute`.
+        #[arg(long = "action", short = 'a')]
+        actions: Vec<String>,
+        /// Rule priority (lower = evaluated first, default: 100).
+        #[arg(long, default_value = "100")]
+        priority: i32,
+    },
+    /// Remove a content rule (by name or UUID).
+    Remove {
+        /// Rule name or UUID.
+        id: String,
+    },
+    /// Enable a content rule.
+    Enable {
+        /// Rule name or UUID.
+        id: String,
+    },
+    /// Disable a content rule (keeps definition but stops matching).
+    Disable {
+        /// Rule name or UUID.
+        id: String,
+    },
+    /// Test a filter against existing items (read-only).
+    Test {
+        /// Smart-filter query to test.
+        #[arg(long)]
+        filter: String,
+        /// Maximum number of matching items to show.
+        #[arg(long, default_value = "10")]
+        limit: u32,
+    },
+    /// Run all enabled rules against current inbox items.
+    Run {
+        /// Show what would happen without making changes.
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
 /// CLI output format for commands supporting structured output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 enum OutputFormat {
@@ -763,6 +820,7 @@ fn main() -> Result<()> {
         Command::Note { action } => handle_note(&db, action),
         Command::Review { action } => handle_review(&db, action),
         Command::Stats { action } => handle_stats(&db, &action),
+        Command::Rules { action } => handle_rules(&db, action),
         // Already handled above — unreachable at runtime.
         Command::Config | Command::Completions { .. } => Ok(()),
     }
@@ -1043,6 +1101,11 @@ fn ingest_entries(
 
         db.insert_feed_item_meta(&meta)
             .context("failed to insert feed item meta")?;
+
+        // Apply content rules to the newly ingested item.
+        if let Err(e) = apply_rules_to_item(db, &item, Some(&feed.title)) {
+            eprintln!("warning: rule application failed for {}: {e}", item.id);
+        }
 
         count += 1;
     }
@@ -2736,6 +2799,11 @@ fn save_url(db: &Database, raw_url: Option<&str>, tags: &[String], bookmark: boo
         .context("failed to save bookmark metadata")?;
 
     let applied = apply_tags(db, item.id, tags)?;
+
+    // Apply content rules to the saved item.
+    if let Err(e) = apply_rules_to_item(db, &item, None) {
+        eprintln!("warning: rule application failed for {}: {e}", item.id);
+    }
 
     let type_label = item.content_type.as_str();
     if applied.is_empty() {
@@ -4843,6 +4911,300 @@ fn fmt_relative(t: OffsetDateTime) -> String {
 }
 
 // ------------------------------------------------------------------
+// Content rules
+// ------------------------------------------------------------------
+
+fn handle_rules(db: &Database, action: RulesAction) -> Result<()> {
+    match action {
+        RulesAction::List => rules_list(db),
+        RulesAction::Add {
+            name,
+            filter,
+            actions,
+            priority,
+        } => rules_add(db, &name, &filter, &actions, priority),
+        RulesAction::Remove { id } => rules_remove(db, &id),
+        RulesAction::Enable { id } => rules_set_enabled(db, &id, true),
+        RulesAction::Disable { id } => rules_set_enabled(db, &id, false),
+        RulesAction::Test { filter, limit } => rules_test(db, &filter, limit),
+        RulesAction::Run { dry_run } => rules_run(db, dry_run),
+    }
+}
+
+fn rules_list(db: &Database) -> Result<()> {
+    let rules = db.list_rules().context("listing rules")?;
+    if rules.is_empty() {
+        println!("No content rules defined.");
+        println!("Add one with: pergamon rules add <name> --filter \"...\" --action \"tag:foo\"");
+        return Ok(());
+    }
+    for r in &rules {
+        let status = if r.enabled { "on" } else { "off" };
+        let actions: Vec<String> = r.actions.iter().map(ToString::to_string).collect();
+        println!(
+            "  [{}] {} (priority {}) filter={:?} actions=[{}]",
+            status,
+            r.name,
+            r.priority,
+            r.filter_query,
+            actions.join(", ")
+        );
+    }
+    println!("{} rule(s)", rules.len());
+    Ok(())
+}
+
+fn rules_add(
+    db: &Database,
+    name: &str,
+    filter: &str,
+    action_strs: &[String],
+    priority: i32,
+) -> Result<()> {
+    use pergamon_core::rule::{ContentRule, RuleAction};
+    use pergamon_core::smart_filter::SmartFilter;
+
+    SmartFilter::parse(filter).context("invalid filter syntax")?;
+
+    if action_strs.is_empty() {
+        bail!("at least one --action is required");
+    }
+
+    let mut actions = Vec::new();
+    for s in action_strs {
+        let action: RuleAction = s
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid action {s:?}: {e}"))?;
+        actions.push(action);
+    }
+
+    let now = OffsetDateTime::now_utc();
+    let rule = ContentRule {
+        id: Uuid::new_v4(),
+        name: name.to_owned(),
+        enabled: true,
+        priority,
+        filter_query: filter.to_owned(),
+        actions,
+        created_at: now,
+        updated_at: now,
+    };
+
+    db.insert_rule(&rule).context("inserting rule")?;
+    println!("Rule added: {} [{}]", rule.name, rule.id);
+    Ok(())
+}
+
+fn rules_remove(db: &Database, id_or_name: &str) -> Result<()> {
+    let rule = resolve_rule(db, id_or_name)?;
+    db.delete_rule(rule.id).context("deleting rule")?;
+    println!("Removed rule: {}", rule.name);
+    Ok(())
+}
+
+fn rules_set_enabled(db: &Database, id_or_name: &str, enabled: bool) -> Result<()> {
+    let rule = resolve_rule(db, id_or_name)?;
+    db.set_rule_enabled(rule.id, enabled)
+        .context("updating rule")?;
+    let word = if enabled { "Enabled" } else { "Disabled" };
+    println!("{word} rule: {}", rule.name);
+    Ok(())
+}
+
+fn resolve_rule(db: &Database, id_or_name: &str) -> Result<pergamon_core::rule::ContentRule> {
+    if let Ok(id) = Uuid::parse_str(id_or_name) {
+        return db.get_rule(id).context("rule not found");
+    }
+    db.get_rule_by_name(id_or_name)
+        .context("looking up rule")?
+        .ok_or_else(|| anyhow::anyhow!("no rule named {id_or_name:?}"))
+}
+
+fn rules_test(db: &Database, filter_str: &str, limit: u32) -> Result<()> {
+    use pergamon_core::rule::MatchContext;
+    use pergamon_core::smart_filter::SmartFilter;
+
+    let filter = SmartFilter::parse(filter_str).context("invalid filter")?;
+    let items = db.list_all_content_items().context("listing items")?;
+
+    let mut matched = 0u32;
+    for item in &items {
+        let tags = db
+            .tags_for_item(item.id)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|t| t.name)
+            .collect::<Vec<_>>();
+        let feed_title = feed_title_for_item(db, item);
+        let ctx = MatchContext {
+            item,
+            tags,
+            feed_title,
+        };
+        if pergamon_core::rule::matches_filter(&ctx, &filter) {
+            println!("  {} — {}", item.id, item.title);
+            matched += 1;
+            if matched >= limit {
+                break;
+            }
+        }
+    }
+    println!("{matched} item(s) matched");
+    Ok(())
+}
+
+fn rules_run(db: &Database, dry_run: bool) -> Result<()> {
+    use pergamon_core::rule::{MatchContext, evaluate_rules};
+
+    let rules = db.list_rules().context("listing rules")?;
+    let enabled: Vec<_> = rules.into_iter().filter(|r| r.enabled).collect();
+    if enabled.is_empty() {
+        println!("No enabled rules.");
+        return Ok(());
+    }
+
+    let items = db
+        .list_content_items(
+            None,
+            Some(pergamon_core::status::DocumentStatus::Inbox),
+            None,
+            None,
+        )
+        .context("listing inbox items")?;
+
+    let mut total_actions = 0u32;
+    for item in &items {
+        let tags = db
+            .tags_for_item(item.id)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|t| t.name)
+            .collect::<Vec<_>>();
+        let feed_title = feed_title_for_item(db, item);
+        let mut ctx = MatchContext {
+            item,
+            tags,
+            feed_title,
+        };
+        let planned = evaluate_rules(&mut ctx, &enabled);
+        if planned.is_empty() {
+            continue;
+        }
+        for pa in &planned {
+            if dry_run {
+                println!(
+                    "  [dry-run] {} → {} (rule: {})",
+                    item.title, pa.action, pa.rule_name
+                );
+            } else {
+                apply_rule_action(db, item.id, &pa.action)?;
+                println!("  {} → {} (rule: {})", item.title, pa.action, pa.rule_name);
+            }
+            total_actions += 1;
+        }
+    }
+
+    let mode = if dry_run { " (dry run)" } else { "" };
+    println!(
+        "{total_actions} action(s) applied to {} item(s){mode}",
+        items.len()
+    );
+    Ok(())
+}
+
+fn apply_rule_action(
+    db: &Database,
+    item_id: Uuid,
+    action: &pergamon_core::rule::RuleAction,
+) -> Result<()> {
+    use pergamon_core::rule::RuleAction;
+
+    match action {
+        RuleAction::AddTag(name) => {
+            let tag = get_or_create_tag(db, name)?;
+            db.tag_content_item(item_id, tag.id)
+                .context("tagging item")?;
+        }
+        RuleAction::SetStatus(status) => {
+            db.update_content_item_status(item_id, *status)
+                .context("updating status")?;
+        }
+        RuleAction::AddToCollection(name) => {
+            let coll = get_or_create_collection(db, name)?;
+            let pos = db
+                .list_collection_items(coll.id)
+                .map(|v| i32::try_from(v.len()).unwrap_or(0))
+                .unwrap_or(0);
+            db.add_to_collection(coll.id, item_id, pos)
+                .context("adding to collection")?;
+        }
+        RuleAction::Mute => {
+            db.update_content_item_status(item_id, pergamon_core::status::DocumentStatus::Archived)
+                .context("muting (archiving) item")?;
+        }
+    }
+    Ok(())
+}
+
+fn feed_title_for_item(db: &Database, item: &ContentItem) -> Option<String> {
+    let meta = db.get_feed_item_meta(item.id).ok()?;
+    let feed = db.get_feed(meta.feed_id).ok()?;
+    Some(feed.title)
+}
+
+fn get_or_create_tag(db: &Database, name: &str) -> Result<pergamon_core::model::Tag> {
+    db.get_or_create_tag(name).context("creating tag")
+}
+
+fn get_or_create_collection(db: &Database, name: &str) -> Result<pergamon_core::model::Collection> {
+    if let Some(c) = db.get_collection_by_name(name)? {
+        return Ok(c);
+    }
+    let coll = pergamon_core::model::Collection {
+        id: Uuid::new_v4(),
+        name: name.to_owned(),
+        parent_id: None,
+        sort_order: 0,
+        is_smart: false,
+        filter_query: None,
+        created_at: OffsetDateTime::now_utc(),
+        updated_at: OffsetDateTime::now_utc(),
+    };
+    db.insert_collection(&coll).context("creating collection")?;
+    Ok(coll)
+}
+
+/// Apply content rules to a newly ingested/saved item.
+fn apply_rules_to_item(db: &Database, item: &ContentItem, feed_title: Option<&str>) -> Result<()> {
+    use pergamon_core::rule::{MatchContext, evaluate_rules};
+
+    let rules = db.list_rules().context("listing rules")?;
+    let enabled: Vec<_> = rules.into_iter().filter(|r| r.enabled).collect();
+    if enabled.is_empty() {
+        return Ok(());
+    }
+
+    let tags = db
+        .tags_for_item(item.id)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|t| t.name)
+        .collect::<Vec<_>>();
+
+    let mut ctx = MatchContext {
+        item,
+        tags,
+        feed_title: feed_title.map(ToOwned::to_owned),
+    };
+
+    let planned = evaluate_rules(&mut ctx, &enabled);
+    for pa in &planned {
+        apply_rule_action(db, item.id, &pa.action)?;
+    }
+    Ok(())
+}
+
+// ------------------------------------------------------------------
 // Backup export
 // ------------------------------------------------------------------
 
@@ -4887,6 +5249,7 @@ fn export_backup(db: &Database, output: &std::path::Path) -> Result<()> {
     let notes = db.list_all_notes().context("listing notes")?;
     let review_cards = db.list_all_review_cards().context("listing review cards")?;
     let review_logs = db.list_all_review_logs().context("listing review logs")?;
+    let rules = db.list_rules().context("listing content rules")?;
     let content_item_tags = db
         .list_all_content_item_tags()
         .context("listing content item tags")?;
@@ -4915,6 +5278,7 @@ fn export_backup(db: &Database, output: &std::path::Path) -> Result<()> {
     write_json_entry(&mut zip, &opts, "notes.json", &notes)?;
     write_json_entry(&mut zip, &opts, "review_cards.json", &review_cards)?;
     write_json_entry(&mut zip, &opts, "review_logs.json", &review_logs)?;
+    write_json_entry(&mut zip, &opts, "content_rules.json", &rules)?;
     write_json_entry(
         &mut zip,
         &opts,
@@ -4936,18 +5300,20 @@ fn export_backup(db: &Database, output: &std::path::Path) -> Result<()> {
         + notes.len()
         + review_cards.len()
         + review_logs.len()
+        + rules.len()
         + content_item_tags.len()
         + collection_items.len();
 
     println!("Backup written to {}", output.display());
     println!(
-        "  {} feeds, {} items, {} tags, {} collections, {} notes, {} review cards ({total} records total)",
+        "  {} feeds, {} items, {} tags, {} collections, {} notes, {} review cards, {} rules ({total} records total)",
         feeds.len(),
         content_items.len(),
         tags.len(),
         collections.len(),
         notes.len(),
         review_cards.len(),
+        rules.len(),
     );
 
     Ok(())
@@ -5015,6 +5381,8 @@ fn restore_backup(db: &Database, path: &std::path::Path) -> Result<()> {
         read_json_entry(&mut archive, "review_cards.json").unwrap_or_default();
     let review_logs: Vec<ReviewLogModel> =
         read_json_entry(&mut archive, "review_logs.json").unwrap_or_default();
+    let rules: Vec<pergamon_core::rule::ContentRule> =
+        read_json_entry(&mut archive, "content_rules.json").unwrap_or_default();
     let content_item_tags: Vec<(Uuid, Uuid)> =
         read_json_entry(&mut archive, "content_item_tags.json")?;
     let collection_items: Vec<(Uuid, Uuid, i32)> =
@@ -5034,6 +5402,7 @@ fn restore_backup(db: &Database, path: &std::path::Path) -> Result<()> {
         &notes,
         &review_cards,
         &review_logs,
+        &rules,
     )
     .context("failed to restore backup into database")?;
 
@@ -5048,18 +5417,20 @@ fn restore_backup(db: &Database, path: &std::path::Path) -> Result<()> {
         + notes.len()
         + review_cards.len()
         + review_logs.len()
+        + rules.len()
         + content_item_tags.len()
         + collection_items.len();
 
     println!("Backup restored from {}", path.display());
     println!(
-        "  {} feeds, {} items, {} tags, {} collections, {} notes, {} review cards ({total} records total)",
+        "  {} feeds, {} items, {} tags, {} collections, {} notes, {} review cards, {} rules ({total} records total)",
         feeds.len(),
         content_items.len(),
         tags.len(),
         collections.len(),
         notes.len(),
         review_cards.len(),
+        rules.len(),
     );
 
     Ok(())

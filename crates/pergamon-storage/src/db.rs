@@ -19,6 +19,7 @@ use pergamon_core::model::{
     HighlightMeta, LinkHealth, Note, ReviewCard, ReviewLog, ReviewStats, ReviewStatsReport,
     SearchHit, SearchResult, SourceBreakdown, Tag, WeeklyReviewSummary,
 };
+use pergamon_core::rule::{ContentRule, RuleAction};
 use pergamon_core::status::DocumentStatus;
 
 use crate::error::StorageError;
@@ -121,6 +122,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         9,
         "smart_collections",
         include_str!("../migrations/V9__smart_collections.sql"),
+    ),
+    (
+        10,
+        "content_rules",
+        include_str!("../migrations/V10__content_rules.sql"),
     ),
 ];
 
@@ -2138,6 +2144,93 @@ impl Database {
         Ok(())
     }
 
+    // ==================================================================
+    // Content rules
+    // ==================================================================
+
+    /// Insert a new content rule.
+    pub fn insert_rule(&self, rule: &ContentRule) -> Result<(), StorageError> {
+        let actions_json = serde_json::to_string(&rule.actions)
+            .map_err(|e| StorageError::Generic(format!("failed to serialize actions: {e}")))?;
+        self.conn.execute(
+            "INSERT INTO content_rules (id, name, enabled, priority, filter_query, actions_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                rule.id.to_string(),
+                rule.name,
+                i32::from(rule.enabled),
+                rule.priority,
+                rule.filter_query,
+                actions_json,
+                fmt_time(rule.created_at),
+                fmt_time(rule.updated_at),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Get a content rule by ID.
+    pub fn get_rule(&self, id: Uuid) -> Result<ContentRule, StorageError> {
+        self.conn
+            .query_row(
+                "SELECT id, name, enabled, priority, filter_query, actions_json, created_at, updated_at
+                 FROM content_rules WHERE id = ?1",
+                params![id.to_string()],
+                |row| Ok(row_to_rule(row)),
+            )
+            .optional()?
+            .ok_or(StorageError::NotFound {
+                entity: "content_rule",
+                id: id.to_string(),
+            })
+    }
+
+    /// Get a content rule by name (case-insensitive).
+    pub fn get_rule_by_name(&self, name: &str) -> Result<Option<ContentRule>, StorageError> {
+        self.conn
+            .query_row(
+                "SELECT id, name, enabled, priority, filter_query, actions_json, created_at, updated_at
+                 FROM content_rules WHERE name = ?1 COLLATE NOCASE",
+                params![name],
+                |row| Ok(row_to_rule(row)),
+            )
+            .optional()
+            .map_err(StorageError::from)
+    }
+
+    /// List all content rules, ordered by priority then name.
+    pub fn list_rules(&self) -> Result<Vec<ContentRule>, StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, enabled, priority, filter_query, actions_json, created_at, updated_at
+             FROM content_rules ORDER BY priority, name",
+        )?;
+        let rows = stmt.query_map([], |row| Ok(row_to_rule(row)))?;
+        let mut rules = Vec::new();
+        for row in rows {
+            rules.push(row?);
+        }
+        Ok(rules)
+    }
+
+    /// Delete a content rule by ID. Returns true if a row was deleted.
+    pub fn delete_rule(&self, id: Uuid) -> Result<bool, StorageError> {
+        let count = self.conn.execute(
+            "DELETE FROM content_rules WHERE id = ?1",
+            params![id.to_string()],
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Enable or disable a content rule.
+    pub fn set_rule_enabled(&self, id: Uuid, enabled: bool) -> Result<(), StorageError> {
+        self.conn.execute(
+            "UPDATE content_rules SET enabled = ?1, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+             WHERE id = ?2",
+            params![i32::from(enabled), id.to_string()],
+        )?;
+        Ok(())
+    }
+
     /// List all feed item metadata rows.
     #[allow(clippy::missing_errors_doc)]
     pub fn list_all_feed_item_meta(&self) -> Result<Vec<FeedItemMeta>, StorageError> {
@@ -2294,6 +2387,7 @@ impl Database {
         notes: &[Note],
         review_cards: &[ReviewCard],
         review_logs: &[ReviewLog],
+        rules: &[ContentRule],
     ) -> Result<(), StorageError> {
         if !self.is_empty()? {
             return Err(StorageError::Generic(
@@ -2317,6 +2411,7 @@ impl Database {
             notes,
             review_cards,
             review_logs,
+            rules,
         );
         // Re-enable FK checks regardless of success.
         self.conn.execute_batch("PRAGMA foreign_keys = ON;")?;
@@ -2340,6 +2435,7 @@ impl Database {
         notes: &[Note],
         review_cards: &[ReviewCard],
         review_logs: &[ReviewLog],
+        rules: &[ContentRule],
     ) -> Result<(), StorageError> {
         self.conn.execute_batch("BEGIN;")?;
 
@@ -2385,6 +2481,9 @@ impl Database {
             }
             for log in review_logs {
                 self.insert_review_log(log)?;
+            }
+            for rule in rules {
+                self.insert_rule(rule)?;
             }
             for &(item_id, tag_id) in content_item_tags {
                 self.conn.execute(
@@ -3600,5 +3699,20 @@ fn row_to_review_log(row: &rusqlite::Row<'_>) -> ReviewLog {
         elapsed_days: row.get(9).unwrap_or_default(),
         scheduled_days: row.get(10).unwrap_or_default(),
         reviewed_at: parse_time(&row.get::<_, String>(11).unwrap_or_default()),
+    }
+}
+
+fn row_to_rule(row: &rusqlite::Row<'_>) -> ContentRule {
+    let actions_json: String = row.get(5).unwrap_or_default();
+    let actions: Vec<RuleAction> = serde_json::from_str(&actions_json).unwrap_or_default();
+    ContentRule {
+        id: parse_uuid(&row.get::<_, String>(0).unwrap_or_default()),
+        name: row.get(1).unwrap_or_default(),
+        enabled: row.get::<_, i32>(2).unwrap_or(1) != 0,
+        priority: row.get(3).unwrap_or_default(),
+        filter_query: row.get(4).unwrap_or_default(),
+        actions,
+        created_at: parse_time(&row.get::<_, String>(6).unwrap_or_default()),
+        updated_at: parse_time(&row.get::<_, String>(7).unwrap_or_default()),
     }
 }

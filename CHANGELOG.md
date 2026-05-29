@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Content rules engine for automatic organization of incoming and existing items
+- `rules add <name> --filter "..." --action "tag:foo"` command to create rules using the smart-filter DSL
+- `rules list` command to display all defined rules with status, priority, and actions
+- `rules remove <name-or-id>` command to delete rules
+- `rules enable/disable <name-or-id>` commands to toggle rules without removing them
+- `rules test --filter "..."` command to preview which items match a filter (read-only)
+- `rules run [--dry-run]` command to apply all enabled rules against current inbox items
+- Rule actions: `tag:<name>`, `status:<status>`, `collection:<name>`, `mute`
+- Auto-tag, auto-archive, and source muting via rule definitions
+- Rules automatically applied to newly ingested feed items and saved URLs
+- Rule chaining: tag additions from earlier rules are visible to subsequent rules
+- Protected status safety: auto-archive skips items marked as Later, Reference, or Reading
+- Content rules included in backup/restore cycle
+
 ## [0.4.0] - 2026-05-29
 
 ### Added
