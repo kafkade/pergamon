@@ -1544,7 +1544,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "pergamon-cli"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1570,7 +1570,7 @@ dependencies = [
 
 [[package]]
 name = "pergamon-core"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -1580,7 +1580,7 @@ dependencies = [
 
 [[package]]
 name = "pergamon-export"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "pergamon-core",
  "serde",
@@ -1592,7 +1592,7 @@ dependencies = [
 
 [[package]]
 name = "pergamon-extract"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "ammonia",
  "lopdf",
@@ -1607,7 +1607,7 @@ dependencies = [
 
 [[package]]
 name = "pergamon-feed"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "feed-rs",
  "pergamon-core",
@@ -1619,7 +1619,7 @@ dependencies = [
 
 [[package]]
 name = "pergamon-import"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "csv",
  "scraper 0.22.0",
@@ -1630,7 +1630,7 @@ dependencies = [
 
 [[package]]
 name = "pergamon-storage"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "pergamon-core",
  "rusqlite",
