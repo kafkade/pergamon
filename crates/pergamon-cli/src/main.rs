@@ -2904,7 +2904,7 @@ fn list_saved_searches(db: &Database) -> Result<()> {
     }
     for coll in &smart {
         let count = db.count_smart_collection_items(coll.id).unwrap_or(0);
-        println!("  {} [{}, {} result(s)]", coll.name, coll.id, count,);
+        println!("  {} [{}, {} result(s)]", coll.name, coll.id, count);
         if let Some(ref fq) = coll.filter_query {
             println!("    Filter: {fq}");
         }
