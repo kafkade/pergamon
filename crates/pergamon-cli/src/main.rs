@@ -665,6 +665,15 @@ enum StatsAction {
         #[arg(long)]
         tui: bool,
     },
+    /// Show usage statistics and reading analytics.
+    Usage {
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
+        /// Show stats in a TUI dashboard instead of text/JSON output.
+        #[arg(long)]
+        tui: bool,
+    },
 }
 
 /// Content rule management subcommands.
@@ -1087,6 +1096,7 @@ fn ingest_entries(
             published_at: entry.published_at,
             created_at: now,
             updated_at: now,
+            read_at: None,
         };
 
         db.insert_content_item(&item)
@@ -1513,6 +1523,7 @@ fn import_raindrop(db: &Database, path: &std::path::Path, dry_run: bool) -> Resu
             published_at: None,
             created_at,
             updated_at: now,
+            read_at: None,
         };
 
         db.insert_content_item(&content_item)
@@ -1624,6 +1635,7 @@ fn import_pocket(db: &Database, path: &std::path::Path, dry_run: bool) -> Result
             published_at: None,
             created_at,
             updated_at: now,
+            read_at: None,
         };
 
         db.insert_content_item(&content_item)
@@ -1772,6 +1784,7 @@ fn import_kindle(
                     published_at: None,
                     created_at,
                     updated_at: now,
+                    read_at: None,
                 };
                 db.insert_content_item(&book_item).with_context(|| {
                     format!("failed to create source book: {}", clipping.book_title)
@@ -1824,6 +1837,7 @@ fn import_kindle(
                         published_at: None,
                         created_at,
                         updated_at: now,
+                        read_at: None,
                     };
                     db.insert_content_item(&highlight_item)
                         .context("failed to insert highlight")?;
@@ -2000,6 +2014,7 @@ fn import_readwise(
                     published_at: None,
                     created_at,
                     updated_at: now,
+                    read_at: None,
                 };
                 db.insert_content_item(&source_item)
                     .with_context(|| format!("failed to create source: {}", item.title))?;
@@ -2056,6 +2071,7 @@ fn import_readwise(
                 published_at: None,
                 created_at,
                 updated_at: now,
+                read_at: None,
             };
             db.insert_content_item(&highlight_item)
                 .context("failed to insert highlight")?;
@@ -2788,6 +2804,7 @@ fn save_url(db: &Database, raw_url: Option<&str>, tags: &[String], bookmark: boo
         published_at,
         created_at: now,
         updated_at: now,
+        read_at: None,
     };
 
     db.insert_content_item(&item)
@@ -4634,6 +4651,7 @@ fn review_due(db: &Database, limit: usize, format: &str) -> Result<()> {
 fn handle_stats(db: &Database, action: &StatsAction) -> Result<()> {
     match action {
         StatsAction::Review { format, tui } => review_stats_cmd(db, *format, *tui),
+        StatsAction::Usage { format, tui } => usage_stats_cmd(db, *format, *tui),
     }
 }
 
@@ -4728,6 +4746,118 @@ fn review_stats_cmd(db: &Database, format: OutputFormat, tui: bool) -> Result<()
             let bar_len = ((week.reviews as f64 / max_reviews as f64) * 20.0) as usize;
             let bar: String = "█".repeat(bar_len);
             println!("  {} {:>3}  {}", week.week, week.reviews, bar);
+        }
+    }
+
+    Ok(())
+}
+
+/// Show usage statistics and reading analytics.
+#[allow(clippy::too_many_lines)]
+fn usage_stats_cmd(db: &Database, format: OutputFormat, tui: bool) -> Result<()> {
+    if tui {
+        return tui::run_usage_stats_tui(db);
+    }
+    let now = OffsetDateTime::now_utc();
+    let report = db
+        .usage_stats_report(now)
+        .context("failed to get usage stats")?;
+
+    if format == OutputFormat::Json {
+        let json = serde_json::to_string_pretty(&report).context("failed to serialize stats")?;
+        println!("{json}");
+        return Ok(());
+    }
+
+    let o = &report.overview;
+
+    println!("Usage Statistics");
+    println!("────────────────");
+    println!("Total items:     {}", o.total_items);
+    println!("  Inbox:         {}", o.inbox_count);
+    println!("  Archived:      {}", o.archived_count);
+    println!("  Highlights:    {}", o.total_highlights);
+    println!("  Feeds:         {}", o.total_feeds);
+
+    println!();
+    println!("Save Rate");
+    println!("─────────");
+    println!("  Today:         {}", o.items_saved_today);
+    println!("  This week:     {}", o.items_saved_this_week);
+    println!("  This month:    {}", o.items_saved_this_month);
+    println!("  30-day avg:    {:.1}/day", o.saves_per_day_30d);
+    println!("  Highlight rate: {:.1}%", o.highlight_rate * 100.0);
+
+    println!();
+    println!("Reading");
+    println!("───────");
+    println!(
+        "  Total time:    {} hr {} min",
+        o.total_reading_minutes / 60,
+        o.total_reading_minutes % 60
+    );
+    println!(
+        "  Streak:        {} day{}",
+        o.reading_streak_days,
+        if o.reading_streak_days == 1 { "" } else { "s" }
+    );
+    println!(
+        "  Longest:       {} day{}",
+        o.longest_reading_streak,
+        if o.longest_reading_streak == 1 {
+            ""
+        } else {
+            "s"
+        }
+    );
+
+    if !report.reading_activity.daily.is_empty() {
+        println!();
+        println!("Last 7 Days (articles read)");
+        println!("───────────────────────────");
+        let recent: Vec<_> = report.reading_activity.daily.iter().rev().take(7).collect();
+        let max_read = recent
+            .iter()
+            .map(|d| d.items_read)
+            .max()
+            .unwrap_or(1)
+            .max(1);
+        for day in recent.into_iter().rev() {
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                clippy::cast_precision_loss
+            )]
+            let bar_len = ((day.items_read as f64 / max_read as f64) * 20.0) as usize;
+            let bar: String = "█".repeat(bar_len);
+            let date_short = day.date.get(5..).unwrap_or(&day.date);
+            println!(
+                "  {} {:>3} read {:>3} min  {}",
+                date_short, day.items_read, day.reading_minutes, bar
+            );
+        }
+    }
+
+    if !report.top_sources.is_empty() {
+        println!();
+        println!("Top Sources");
+        println!("───────────");
+        for src in report.top_sources.iter().take(10) {
+            println!(
+                "  {:<30} {:>3}/{} read",
+                truncate_display(&src.source_name, 30),
+                src.items_read,
+                src.total_items
+            );
+        }
+    }
+
+    if !report.tag_distribution.is_empty() {
+        println!();
+        println!("Tag Distribution");
+        println!("────────────────");
+        for tag in report.tag_distribution.iter().take(10) {
+            println!("  {:<20} {}", tag.tag_name, tag.count);
         }
     }
 

@@ -79,6 +79,7 @@ fn content_item_insert_and_get() {
         published_at: Some(now()),
         created_at: now(),
         updated_at: now(),
+        read_at: None,
     };
 
     db.insert_content_item(&item)
@@ -127,6 +128,7 @@ fn all_content_types_round_trip() {
             published_at: None,
             created_at: now(),
             updated_at: now(),
+            read_at: None,
         };
         db.insert_content_item(&item)
             .unwrap_or_else(|e| unreachable!("insert failed for {ct}: {e}"));
@@ -157,6 +159,7 @@ fn list_content_items_with_filters() {
         published_at: None,
         created_at: now(),
         updated_at: now(),
+        read_at: None,
     };
     let bookmark = ContentItem {
         id: Uuid::new_v4(),
@@ -170,6 +173,7 @@ fn list_content_items_with_filters() {
         published_at: None,
         created_at: now(),
         updated_at: now(),
+        read_at: None,
     };
 
     db.insert_content_item(&article)
@@ -233,6 +237,7 @@ fn feed_item_meta_round_trip() {
         published_at: Some(now()),
         created_at: now(),
         updated_at: now(),
+        read_at: None,
     };
     db.insert_content_item(&item)
         .unwrap_or_else(|e| unreachable!("insert_content_item failed: {e}"));
@@ -274,6 +279,7 @@ fn bookmark_meta_round_trip() {
         published_at: None,
         created_at: now(),
         updated_at: now(),
+        read_at: None,
     };
     db.insert_content_item(&item)
         .unwrap_or_else(|e| unreachable!("insert_content_item failed: {e}"));
@@ -320,6 +326,7 @@ fn highlight_meta_round_trip() {
         published_at: None,
         created_at: now(),
         updated_at: now(),
+        read_at: None,
     };
     db.insert_content_item(&source)
         .unwrap_or_else(|e| unreachable!("insert source failed: {e}"));
@@ -336,6 +343,7 @@ fn highlight_meta_round_trip() {
         published_at: None,
         created_at: now(),
         updated_at: now(),
+        read_at: None,
     };
     db.insert_content_item(&highlight)
         .unwrap_or_else(|e| unreachable!("insert highlight failed: {e}"));
@@ -398,6 +406,7 @@ fn tag_insert_get_and_associate() {
         published_at: None,
         created_at: now(),
         updated_at: now(),
+        read_at: None,
     };
     db.insert_content_item(&item)
         .unwrap_or_else(|e| unreachable!("insert_content_item failed: {e}"));
@@ -468,6 +477,7 @@ fn collection_insert_get_and_associate() {
         published_at: None,
         created_at: now(),
         updated_at: now(),
+        read_at: None,
     };
     db.insert_content_item(&item)
         .unwrap_or_else(|e| unreachable!("insert_content_item failed: {e}"));
@@ -497,6 +507,7 @@ fn fts_search_by_title() {
         published_at: None,
         created_at: now(),
         updated_at: now(),
+        read_at: None,
     };
     db.insert_content_item(&item)
         .unwrap_or_else(|e| unreachable!("insert_content_item failed: {e}"));
@@ -523,6 +534,7 @@ fn fts_search_by_author() {
         published_at: None,
         created_at: now(),
         updated_at: now(),
+        read_at: None,
     };
     db.insert_content_item(&item)
         .unwrap_or_else(|e| unreachable!("insert_content_item failed: {e}"));
@@ -549,6 +561,7 @@ fn fts_search_by_content() {
         published_at: None,
         created_at: now(),
         updated_at: now(),
+        read_at: None,
     };
     db.insert_content_item(&item)
         .unwrap_or_else(|e| unreachable!("insert_content_item failed: {e}"));
@@ -576,6 +589,7 @@ fn fts_search_by_tags() {
         published_at: None,
         created_at: now(),
         updated_at: now(),
+        read_at: None,
     };
     db.insert_content_item(&item)
         .unwrap_or_else(|e| unreachable!("insert_content_item failed: {e}"));
@@ -620,6 +634,7 @@ fn fts_search_no_results() {
         published_at: None,
         created_at: now(),
         updated_at: now(),
+        read_at: None,
     };
     db.insert_content_item(&item)
         .unwrap_or_else(|e| unreachable!("insert_content_item failed: {e}"));
@@ -695,6 +710,7 @@ fn insert_item(db: &Database, title: &str, ct: ContentType, status: DocumentStat
         published_at: None,
         created_at: now(),
         updated_at: now(),
+        read_at: None,
     };
     db.insert_content_item(&item)
         .unwrap_or_else(|e| unreachable!("insert failed: {e}"));
@@ -842,6 +858,7 @@ fn fts_search_filtered_by_date() {
         created_at: OffsetDateTime::from_unix_timestamp(1_600_000_000)
             .unwrap_or_else(|_| unreachable!("valid timestamp")),
         updated_at: now(),
+        read_at: None,
     };
     let recent = ContentItem {
         id: Uuid::new_v4(),
@@ -855,6 +872,7 @@ fn fts_search_filtered_by_date() {
         published_at: Some(now()),
         created_at: now(),
         updated_at: now(),
+        read_at: None,
     };
     db.insert_content_item(&old)
         .unwrap_or_else(|e| unreachable!("insert failed: {e}"));
@@ -948,6 +966,7 @@ fn fts_search_filtered_snippet_returned() {
         published_at: None,
         created_at: now(),
         updated_at: now(),
+        read_at: None,
     };
     db.insert_content_item(&item)
         .unwrap_or_else(|e| unreachable!("insert failed: {e}"));
@@ -1067,6 +1086,7 @@ fn backup_round_trip() {
         published_at: Some(now()),
         created_at: now(),
         updated_at: now(),
+        read_at: None,
     };
     src.insert_content_item(&item)
         .unwrap_or_else(|e| unreachable!("insert item failed: {e}"));
@@ -1267,8 +1287,8 @@ fn schema_version_returns_latest() {
     let version = db
         .schema_version()
         .unwrap_or_else(|e| unreachable!("version: {e}"));
-    // We have 10 migrations (V1–V10).
-    assert_eq!(version, 10);
+    // We have 11 migrations (V1–V11).
+    assert_eq!(version, 11);
 }
 
 #[test]
@@ -1301,6 +1321,7 @@ mod collection_tag_bulk {
             published_at: None,
             created_at: now(),
             updated_at: now(),
+            read_at: None,
         };
         db.insert_content_item(&item).unwrap();
         item
@@ -1465,6 +1486,7 @@ mod collection_tag_bulk {
             published_at: None,
             created_at: now(),
             updated_at: now(),
+            read_at: None,
         };
         db.insert_content_item(&feed_item).unwrap();
 
@@ -1918,6 +1940,7 @@ fn note_insert_and_get() {
         published_at: None,
         created_at: now(),
         updated_at: now(),
+        read_at: None,
     };
     db.insert_content_item(&item)
         .unwrap_or_else(|e| unreachable!("insert item: {e}"));
@@ -1955,6 +1978,7 @@ fn note_list_for_item() {
         published_at: None,
         created_at: now(),
         updated_at: now(),
+        read_at: None,
     };
     db.insert_content_item(&item)
         .unwrap_or_else(|e| unreachable!("insert: {e}"));
@@ -1992,6 +2016,7 @@ fn note_update_and_delete() {
         published_at: None,
         created_at: now(),
         updated_at: now(),
+        read_at: None,
     };
     db.insert_content_item(&item)
         .unwrap_or_else(|e| unreachable!("insert: {e}"));
@@ -2039,6 +2064,7 @@ fn notes_cascade_on_content_item_delete() {
         published_at: None,
         created_at: now(),
         updated_at: now(),
+        read_at: None,
     };
     db.insert_content_item(&item)
         .unwrap_or_else(|e| unreachable!("insert: {e}"));
@@ -2080,6 +2106,7 @@ fn create_highlight_with_auto_position() {
         published_at: None,
         created_at: now(),
         updated_at: now(),
+        read_at: None,
     };
     db.insert_content_item(&source)
         .unwrap_or_else(|e| unreachable!("insert source: {e}"));
@@ -2121,6 +2148,7 @@ fn create_highlight_ambiguous_position() {
         published_at: None,
         created_at: now(),
         updated_at: now(),
+        read_at: None,
     };
     db.insert_content_item(&source)
         .unwrap_or_else(|e| unreachable!("insert: {e}"));
@@ -2154,6 +2182,7 @@ fn list_highlights_with_filters() {
         published_at: None,
         created_at: now(),
         updated_at: now(),
+        read_at: None,
     };
     let source2 = ContentItem {
         id: Uuid::new_v4(),
@@ -2167,6 +2196,7 @@ fn list_highlights_with_filters() {
         published_at: None,
         created_at: now(),
         updated_at: now(),
+        read_at: None,
     };
     db.insert_content_item(&source1)
         .unwrap_or_else(|e| unreachable!("insert s1: {e}"));
@@ -2214,6 +2244,7 @@ fn highlight_searchable_via_fts() {
         published_at: None,
         created_at: now(),
         updated_at: now(),
+        read_at: None,
     };
     db.insert_content_item(&source)
         .unwrap_or_else(|e| unreachable!("insert: {e}"));
@@ -2245,6 +2276,7 @@ fn backup_restore_includes_notes() {
         published_at: None,
         created_at: now(),
         updated_at: now(),
+        read_at: None,
     };
     db.insert_content_item(&item)
         .unwrap_or_else(|e| unreachable!("insert: {e}"));
@@ -2299,6 +2331,7 @@ fn backup_restore_includes_notes() {
 // ======================================================================
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn review_card_insert_get_and_update() {
     use pergamon_core::fsrs::CardState;
     use pergamon_core::model::ReviewCard;
@@ -2318,6 +2351,7 @@ fn review_card_insert_get_and_update() {
         published_at: None,
         created_at: now(),
         updated_at: now(),
+        read_at: None,
     };
     db.insert_content_item(&source)
         .unwrap_or_else(|e| unreachable!("insert source: {e}"));
@@ -2334,6 +2368,7 @@ fn review_card_insert_get_and_update() {
         published_at: None,
         created_at: now(),
         updated_at: now(),
+        read_at: None,
     };
     db.insert_content_item(&highlight)
         .unwrap_or_else(|e| unreachable!("insert highlight: {e}"));
@@ -2438,6 +2473,7 @@ fn review_card_list_due() {
                 published_at: None,
                 created_at: now(),
                 updated_at: now(),
+                read_at: None,
             };
             db.insert_content_item(&source)
                 .unwrap_or_else(|e| unreachable!("insert source {i}: {e}"));
@@ -2453,6 +2489,7 @@ fn review_card_list_due() {
                 published_at: None,
                 created_at: now(),
                 updated_at: now(),
+                read_at: None,
             };
             db.insert_content_item(&hl)
                 .unwrap_or_else(|e| unreachable!("insert hl {i}: {e}"));
@@ -2541,6 +2578,7 @@ fn review_card_delete_and_cascade() {
         published_at: None,
         created_at: now(),
         updated_at: now(),
+        read_at: None,
     };
     db.insert_content_item(&source)
         .unwrap_or_else(|e| unreachable!("insert source: {e}"));
@@ -2557,6 +2595,7 @@ fn review_card_delete_and_cascade() {
         published_at: None,
         created_at: now(),
         updated_at: now(),
+        read_at: None,
     };
     db.insert_content_item(&hl)
         .unwrap_or_else(|e| unreachable!("insert hl: {e}"));
@@ -2616,6 +2655,7 @@ fn review_log_insert_and_list() {
         published_at: None,
         created_at: now(),
         updated_at: now(),
+        read_at: None,
     };
     db.insert_content_item(&source)
         .unwrap_or_else(|e| unreachable!("insert source: {e}"));
@@ -2632,6 +2672,7 @@ fn review_log_insert_and_list() {
         published_at: None,
         created_at: now(),
         updated_at: now(),
+        read_at: None,
     };
     db.insert_content_item(&hl)
         .unwrap_or_else(|e| unreachable!("insert hl: {e}"));
@@ -2721,6 +2762,7 @@ fn review_stats_computed_correctly() {
         published_at: None,
         created_at: now(),
         updated_at: now(),
+        read_at: None,
     };
     db.insert_content_item(&source)
         .unwrap_or_else(|e| unreachable!("insert source: {e}"));
@@ -2737,6 +2779,7 @@ fn review_stats_computed_correctly() {
         published_at: None,
         created_at: now(),
         updated_at: now(),
+        read_at: None,
     };
     db.insert_content_item(&hl)
         .unwrap_or_else(|e| unreachable!("insert hl: {e}"));
@@ -2842,6 +2885,7 @@ mod review_stats_tests {
             published_at: None,
             created_at: now(),
             updated_at: now(),
+            read_at: None,
         };
         db.insert_content_item(&source)
             .unwrap_or_else(|e| unreachable!("insert source: {e}"));
@@ -2886,6 +2930,7 @@ mod review_stats_tests {
             published_at: None,
             created_at: now(),
             updated_at: now(),
+            read_at: None,
         };
         db.insert_content_item(&hl)
             .unwrap_or_else(|e| unreachable!("insert hl: {e}"));
@@ -3323,4 +3368,199 @@ fn content_rule_multiple_actions() {
         fetched.actions[2],
         RuleAction::AddToCollection("reading-list".to_owned())
     );
+}
+
+// ── Usage stats ──────────────────────────────────────────────────
+
+#[test]
+fn usage_stats_report_empty_db() {
+    let db = test_db();
+    let report = db
+        .usage_stats_report(now())
+        .unwrap_or_else(|e| unreachable!("usage stats: {e}"));
+    assert_eq!(report.overview.total_items, 0);
+    assert_eq!(report.overview.archived_count, 0);
+    assert_eq!(report.overview.total_reading_minutes, 0);
+    assert_eq!(report.overview.reading_streak_days, 0);
+    assert!(report.top_sources.is_empty());
+    assert!(report.tag_distribution.is_empty());
+}
+
+#[test]
+fn usage_stats_counts_archived_items() {
+    let db = test_db();
+    let n = now();
+
+    // Insert 3 articles: 2 archived, 1 inbox.
+    for i in 0..3_u32 {
+        let item = ContentItem {
+            id: Uuid::new_v4(),
+            url: Some(format!("https://example.com/a{i}")),
+            title: format!("Article {i}"),
+            author: None,
+            content_type: ContentType::Article,
+            status: if i < 2 {
+                DocumentStatus::Archived
+            } else {
+                DocumentStatus::Inbox
+            },
+            content_text: Some("word ".repeat(238)),
+            excerpt: None,
+            published_at: None,
+            created_at: n,
+            updated_at: n,
+            read_at: if i < 2 { Some(n) } else { None },
+        };
+        db.insert_content_item(&item)
+            .unwrap_or_else(|e| unreachable!("insert {i}: {e}"));
+    }
+
+    let report = db
+        .usage_stats_report(n)
+        .unwrap_or_else(|e| unreachable!("usage stats: {e}"));
+    assert_eq!(report.overview.total_items, 3);
+    assert_eq!(report.overview.archived_count, 2);
+    assert!(report.overview.total_reading_minutes >= 2);
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn usage_stats_top_sources_from_feed() {
+    let db = test_db();
+    let n = now();
+
+    let feed = Feed {
+        id: Uuid::new_v4(),
+        title: "Example Blog".to_owned(),
+        url: "https://blog.example.com/feed.xml".to_owned(),
+        site_url: None,
+        description: None,
+        etag: None,
+        last_modified_header: None,
+        error_count: 0,
+        last_error: None,
+        last_fetched_at: None,
+        folder_id: None,
+        created_at: n,
+        updated_at: n,
+    };
+    db.insert_feed(&feed)
+        .unwrap_or_else(|e| unreachable!("insert feed: {e}"));
+
+    for i in 0..3_u32 {
+        let item_id = Uuid::new_v4();
+        let item = ContentItem {
+            id: item_id,
+            url: Some(format!("https://blog.example.com/post/{i}")),
+            title: format!("Post {i}"),
+            author: None,
+            content_type: ContentType::FeedItem,
+            status: DocumentStatus::Archived,
+            content_text: Some("hello world".to_owned()),
+            excerpt: None,
+            published_at: None,
+            created_at: n,
+            updated_at: n,
+            read_at: Some(n),
+        };
+        db.insert_content_item(&item)
+            .unwrap_or_else(|e| unreachable!("insert item {i}: {e}"));
+        let meta = FeedItemMeta {
+            content_item_id: item_id,
+            feed_id: feed.id,
+            guid: Some(format!("guid-{i}")),
+            summary: None,
+        };
+        db.insert_feed_item_meta(&meta)
+            .unwrap_or_else(|e| unreachable!("insert meta {i}: {e}"));
+    }
+
+    let report = db
+        .usage_stats_report(n)
+        .unwrap_or_else(|e| unreachable!("usage stats: {e}"));
+    assert!(!report.top_sources.is_empty());
+    assert_eq!(report.top_sources[0].source_name, "Example Blog");
+    assert_eq!(report.top_sources[0].items_read, 3);
+}
+
+#[test]
+fn usage_stats_tag_distribution() {
+    let db = test_db();
+    let n = now();
+
+    let item_id = Uuid::new_v4();
+    let item = ContentItem {
+        id: item_id,
+        url: Some("https://example.com/tagged".to_owned()),
+        title: "Tagged Article".to_owned(),
+        author: None,
+        content_type: ContentType::Article,
+        status: DocumentStatus::Archived,
+        content_text: Some("some text".to_owned()),
+        excerpt: None,
+        published_at: None,
+        created_at: n,
+        updated_at: n,
+        read_at: Some(n),
+    };
+    db.insert_content_item(&item)
+        .unwrap_or_else(|e| unreachable!("insert: {e}"));
+
+    let rust_tag = Tag {
+        id: Uuid::new_v4(),
+        name: "rust".to_owned(),
+        created_at: n,
+    };
+    db.insert_tag(&rust_tag)
+        .unwrap_or_else(|e| unreachable!("insert tag: {e}"));
+    db.tag_content_item(item_id, rust_tag.id)
+        .unwrap_or_else(|e| unreachable!("tag: {e}"));
+
+    let prog_tag = Tag {
+        id: Uuid::new_v4(),
+        name: "programming".to_owned(),
+        created_at: n,
+    };
+    db.insert_tag(&prog_tag)
+        .unwrap_or_else(|e| unreachable!("insert tag: {e}"));
+    db.tag_content_item(item_id, prog_tag.id)
+        .unwrap_or_else(|e| unreachable!("tag: {e}"));
+
+    let report = db
+        .usage_stats_report(n)
+        .unwrap_or_else(|e| unreachable!("usage stats: {e}"));
+    assert_eq!(report.tag_distribution.len(), 2);
+    let tag_names: Vec<&str> = report
+        .tag_distribution
+        .iter()
+        .map(|t| t.tag_name.as_str())
+        .collect();
+    assert!(tag_names.contains(&"rust"));
+    assert!(tag_names.contains(&"programming"));
+}
+
+#[test]
+fn usage_reading_streaks() {
+    use pergamon_storage::db::compute_reading_streaks;
+
+    // No dates → zero streaks.
+    let (current, longest) = compute_reading_streaks(&[], "2025-07-01");
+    assert_eq!(current, 0);
+    assert_eq!(longest, 0);
+
+    // 3 consecutive days ending today.
+    let dates = vec![
+        "2025-07-03".to_owned(),
+        "2025-07-02".to_owned(),
+        "2025-07-01".to_owned(),
+    ];
+    let (current, longest) = compute_reading_streaks(&dates, "2025-07-03");
+    assert_eq!(current, 3);
+    assert_eq!(longest, 3);
+
+    // Streak broken (gap at July 2).
+    let dates = vec!["2025-07-03".to_owned(), "2025-07-01".to_owned()];
+    let (current, longest) = compute_reading_streaks(&dates, "2025-07-03");
+    assert_eq!(current, 1);
+    assert_eq!(longest, 1);
 }

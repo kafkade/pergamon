@@ -15,9 +15,11 @@ use uuid::Uuid;
 use pergamon_core::content_type::ContentType;
 use pergamon_core::fsrs::{CardState, Rating};
 use pergamon_core::model::{
-    BookmarkMeta, Collection, ContentItem, DailyReviewSummary, Feed, FeedFolder, FeedItemMeta,
-    HighlightMeta, LinkHealth, Note, ReviewCard, ReviewLog, ReviewStats, ReviewStatsReport,
-    SearchHit, SearchResult, SourceBreakdown, Tag, WeeklyReviewSummary,
+    BookmarkMeta, Collection, ContentItem, DailyReviewSummary, DailyUsageSummary, Feed, FeedFolder,
+    FeedItemMeta, HighlightMeta, LinkHealth, MonthlyUsageSummary, Note, ReadingActivity,
+    ReviewCard, ReviewLog, ReviewStats, ReviewStatsReport, SearchHit, SearchResult,
+    SourceBreakdown, SourceRanking, Tag, TagCount, TagTrendPoint, UsageOverview, UsageStatsReport,
+    WeeklyReviewSummary, WeeklyUsageSummary,
 };
 use pergamon_core::rule::{ContentRule, RuleAction};
 use pergamon_core::status::DocumentStatus;
@@ -127,6 +129,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         10,
         "content_rules",
         include_str!("../migrations/V10__content_rules.sql"),
+    ),
+    (
+        11,
+        "read_at_column",
+        include_str!("../migrations/V11__read_at_column.sql"),
     ),
 ];
 
@@ -493,8 +500,8 @@ impl Database {
     pub fn insert_content_item(&self, item: &ContentItem) -> Result<(), StorageError> {
         self.conn.execute(
             "INSERT INTO content_items
-                (id, url, title, author, content_type, status, content_text, excerpt, published_at, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                (id, url, title, author, content_type, status, content_text, excerpt, published_at, created_at, updated_at, read_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 item.id.to_string(),
                 item.url,
@@ -507,6 +514,7 @@ impl Database {
                 item.published_at.map(fmt_time),
                 fmt_time(item.created_at),
                 fmt_time(item.updated_at),
+                item.read_at.map(fmt_time),
             ],
         )?;
 
@@ -519,7 +527,7 @@ impl Database {
         self.conn
             .query_row(
                 "SELECT id, url, title, author, content_type, status,
-                        content_text, excerpt, published_at, created_at, updated_at
+                        content_text, excerpt, published_at, created_at, updated_at, read_at
                  FROM content_items WHERE id = ?1",
                 params![id.to_string()],
                 |row| Ok(row_to_content_item(row)),
@@ -539,7 +547,7 @@ impl Database {
             .conn
             .query_row(
                 "SELECT id, url, title, author, content_type, status,
-                        content_text, excerpt, published_at, created_at, updated_at
+                        content_text, excerpt, published_at, created_at, updated_at, read_at
                  FROM content_items WHERE url = ?1",
                 params![url],
                 |row| Ok(row_to_content_item(row)),
@@ -561,7 +569,7 @@ impl Database {
     ) -> Result<Vec<ContentItem>, StorageError> {
         let mut sql = String::from(
             "SELECT id, url, title, author, content_type, status,
-                    content_text, excerpt, published_at, created_at, updated_at
+                    content_text, excerpt, published_at, created_at, updated_at, read_at
              FROM content_items WHERE 1=1",
         );
         let mut param_values: Vec<String> = Vec::new();
@@ -598,16 +606,25 @@ impl Database {
     }
 
     /// Update the status of a content item.
+    ///
+    /// When transitioning to `Archived`, also sets `read_at` to the current time.
     pub fn update_content_item_status(
         &self,
         id: Uuid,
         status: DocumentStatus,
     ) -> Result<(), StorageError> {
         let now = fmt_time(OffsetDateTime::now_utc());
-        let affected = self.conn.execute(
-            "UPDATE content_items SET status = ?1, updated_at = ?2 WHERE id = ?3",
-            params![status.as_str(), now, id.to_string()],
-        )?;
+        let affected = if status == DocumentStatus::Archived {
+            self.conn.execute(
+                "UPDATE content_items SET status = ?1, updated_at = ?2, read_at = COALESCE(read_at, ?2) WHERE id = ?3",
+                params![status.as_str(), now, id.to_string()],
+            )?
+        } else {
+            self.conn.execute(
+                "UPDATE content_items SET status = ?1, updated_at = ?2 WHERE id = ?3",
+                params![status.as_str(), now, id.to_string()],
+            )?
+        };
         if affected == 0 {
             return Err(StorageError::NotFound {
                 entity: "content_item",
@@ -647,7 +664,7 @@ impl Database {
     ) -> Result<Vec<ContentItem>, StorageError> {
         let (sql, param_values) = build_content_item_query(
             "SELECT DISTINCT ci.id, ci.url, ci.title, ci.author, ci.content_type, ci.status,
-                    ci.content_text, ci.excerpt, ci.published_at, ci.created_at, ci.updated_at",
+                    ci.content_text, ci.excerpt, ci.published_at, ci.created_at, ci.updated_at, ci.read_at",
             filter,
             limit,
             offset,
@@ -887,7 +904,7 @@ impl Database {
     ) -> Result<Vec<(ContentItem, HighlightMeta)>, StorageError> {
         let mut sql = String::from(
             "SELECT ci.id, ci.url, ci.title, ci.author, ci.content_type, ci.status,
-                    ci.content_text, ci.excerpt, ci.published_at, ci.created_at, ci.updated_at,
+                    ci.content_text, ci.excerpt, ci.published_at, ci.created_at, ci.updated_at, ci.read_at,
                     hm.content_item_id, hm.source_item_id, hm.quote_text, hm.note,
                     hm.position_start, hm.position_end, hm.color
              FROM content_items ci
@@ -936,13 +953,13 @@ impl Database {
         let rows = stmt.query_map(param_refs.as_slice(), |row| {
             let item = row_to_content_item(row);
             let meta = HighlightMeta {
-                content_item_id: parse_uuid(&row.get::<_, String>(11)?),
-                source_item_id: row.get::<_, Option<String>>(12)?.map(|s| parse_uuid(&s)),
-                quote_text: row.get(13)?,
-                note: row.get(14)?,
-                position_start: row.get(15)?,
-                position_end: row.get(16)?,
-                color: row.get(17)?,
+                content_item_id: parse_uuid(&row.get::<_, String>(12)?),
+                source_item_id: row.get::<_, Option<String>>(13)?.map(|s| parse_uuid(&s)),
+                quote_text: row.get(14)?,
+                note: row.get(15)?,
+                position_start: row.get(16)?,
+                position_end: row.get(17)?,
+                color: row.get(18)?,
             };
             Ok((item, meta))
         })?;
@@ -1002,6 +1019,7 @@ impl Database {
             published_at: None,
             created_at: now,
             updated_at: now,
+            read_at: None,
         };
 
         self.insert_content_item(&item)?;
@@ -1583,6 +1601,392 @@ impl Database {
     }
 
     // ------------------------------------------------------------------
+    // Usage statistics
+    // ------------------------------------------------------------------
+
+    /// Build a complete usage statistics report.
+    pub fn usage_stats_report(
+        &self,
+        now: OffsetDateTime,
+    ) -> Result<UsageStatsReport, StorageError> {
+        let overview = self.usage_overview(now)?;
+        let daily = self.usage_daily(30, now)?;
+        let weekly = self.usage_weekly(12, now)?;
+        let monthly = self.usage_monthly(12, now)?;
+        let top_sources = self.usage_top_sources(15)?;
+        let tag_distribution = self.usage_tag_distribution(20)?;
+        let tag_trends = self.usage_tag_trends(6)?;
+        Ok(UsageStatsReport {
+            overview,
+            reading_activity: ReadingActivity {
+                daily,
+                weekly,
+                monthly,
+            },
+            top_sources,
+            tag_distribution,
+            tag_trends,
+        })
+    }
+
+    fn usage_overview(&self, now: OffsetDateTime) -> Result<UsageOverview, StorageError> {
+        let total_items: u64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM content_items", [], |r| r.get(0))?;
+        let inbox_count: u64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM content_items WHERE status = 'inbox'",
+            [],
+            |r| r.get(0),
+        )?;
+        let archived_count: u64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM content_items WHERE status = 'archived'",
+            [],
+            |r| r.get(0),
+        )?;
+        let total_highlights: u64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM content_items WHERE content_type = 'highlight'",
+            [],
+            |r| r.get(0),
+        )?;
+        let total_feeds: u64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM feeds", [], |r| r.get(0))?;
+
+        let now_str = fmt_time(now);
+        let today_start = &now_str[..10];
+
+        let items_saved_today: u64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM content_items \
+             WHERE created_at >= ?1 || 'T00:00:00Z'",
+            params![today_start],
+            |r| r.get(0),
+        )?;
+
+        let week_ago = now - time::Duration::days(7);
+        let week_str = fmt_time(week_ago);
+        let items_saved_this_week: u64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM content_items WHERE created_at >= ?1",
+            params![week_str],
+            |r| r.get(0),
+        )?;
+
+        let month_ago = now - time::Duration::days(30);
+        let month_str = fmt_time(month_ago);
+        let items_saved_this_month: u64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM content_items WHERE created_at >= ?1",
+            params![month_str],
+            |r| r.get(0),
+        )?;
+
+        #[allow(clippy::cast_precision_loss)]
+        let saves_per_day_30d = items_saved_this_month as f64 / 30.0;
+
+        let highlight_rate = if total_items > 0 {
+            #[allow(clippy::cast_precision_loss)]
+            let rate = total_highlights as f64 / total_items as f64;
+            rate
+        } else {
+            0.0
+        };
+
+        // Total reading time from archived readable items.
+        let total_reading_minutes: u64 = self.conn.query_row(
+            "SELECT COALESCE(SUM(LENGTH(content_text) - LENGTH(REPLACE(content_text, ' ', '')) + 1), 0) \
+             FROM content_items \
+             WHERE status = 'archived' \
+               AND content_type IN ('article', 'feed_item', 'pdf') \
+               AND content_text IS NOT NULL AND content_text != ''",
+            [],
+            |r| {
+                let total_words: i64 = r.get(0)?;
+                #[allow(clippy::cast_sign_loss)]
+                let mins = words_to_minutes(total_words) as u64;
+                Ok(mins)
+            },
+        )?;
+
+        // Reading streaks (consecutive days with archived items).
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT DATE(read_at) FROM content_items \
+             WHERE read_at IS NOT NULL \
+               AND content_type IN ('article', 'feed_item', 'pdf') \
+             ORDER BY read_at",
+        )?;
+        let dates: Vec<String> = stmt
+            .query_map([], |r| r.get(0))?
+            .filter_map(Result::ok)
+            .collect();
+
+        let today_date = &now_str[..10];
+        let (reading_streak_days, longest_reading_streak) =
+            compute_reading_streaks(&dates, today_date);
+
+        Ok(UsageOverview {
+            total_items,
+            inbox_count,
+            archived_count,
+            total_highlights,
+            total_feeds,
+            items_saved_today,
+            items_saved_this_week,
+            items_saved_this_month,
+            saves_per_day_30d,
+            highlight_rate,
+            total_reading_minutes,
+            reading_streak_days,
+            longest_reading_streak,
+        })
+    }
+
+    fn usage_daily(
+        &self,
+        days: u32,
+        now: OffsetDateTime,
+    ) -> Result<Vec<DailyUsageSummary>, StorageError> {
+        let start = now - time::Duration::days(i64::from(days));
+        let start_str = fmt_time(start);
+
+        let mut saved_map = std::collections::HashMap::new();
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT DATE(created_at) AS d, COUNT(*) \
+                 FROM content_items \
+                 WHERE created_at >= ?1 \
+                 GROUP BY d",
+            )?;
+            let rows = stmt.query_map(params![start_str], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })?;
+            for row in rows {
+                let (date, count) = row?;
+                saved_map.insert(date, count);
+            }
+        }
+
+        let mut read_map = std::collections::HashMap::new();
+        let mut read_minutes_map = std::collections::HashMap::new();
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT DATE(read_at) AS d, COUNT(*), \
+                 COALESCE(SUM(CASE WHEN content_text IS NOT NULL AND content_text != '' \
+                   THEN LENGTH(content_text) - LENGTH(REPLACE(content_text, ' ', '')) + 1 \
+                   ELSE 0 END), 0) \
+                 FROM content_items \
+                 WHERE read_at IS NOT NULL AND read_at >= ?1 \
+                   AND content_type IN ('article', 'feed_item', 'pdf') \
+                 GROUP BY d",
+            )?;
+            let rows = stmt.query_map(params![start_str], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (date, count, words) = row?;
+                read_map.insert(date.clone(), count);
+                read_minutes_map.insert(date, words_to_minutes(words));
+            }
+        }
+
+        let mut result = Vec::with_capacity(days as usize);
+        for i in 0..i64::from(days) {
+            let day = now - time::Duration::days(i64::from(days) - 1 - i);
+            let date = fmt_time(day)[..10].to_owned();
+            result.push(DailyUsageSummary {
+                items_saved: *saved_map.get(&date).unwrap_or(&0),
+                items_read: *read_map.get(&date).unwrap_or(&0),
+                reading_minutes: *read_minutes_map.get(&date).unwrap_or(&0),
+                date,
+            });
+        }
+        Ok(result)
+    }
+
+    fn usage_weekly(
+        &self,
+        weeks: u32,
+        now: OffsetDateTime,
+    ) -> Result<Vec<WeeklyUsageSummary>, StorageError> {
+        let start = now - time::Duration::weeks(i64::from(weeks));
+        let start_str = fmt_time(start);
+        let total_days = i64::from(weeks) * 7;
+
+        let mut stmt = self.conn.prepare(
+            "WITH weeks AS ( \
+               SELECT DISTINCT STRFTIME('%Y-W%W', d) AS w FROM ( \
+                 SELECT DATE(?1, '+' || n || ' days') AS d \
+                 FROM (WITH RECURSIVE cnt(n) AS ( \
+                   SELECT 0 UNION ALL SELECT n+1 FROM cnt WHERE n < ?2 \
+                 ) SELECT n FROM cnt) \
+               ) \
+             ) \
+             SELECT w.w, \
+               COALESCE(s.cnt, 0), \
+               COALESCE(r.cnt, 0), \
+               COALESCE(r.wds, 0) \
+             FROM weeks w \
+             LEFT JOIN ( \
+               SELECT STRFTIME('%Y-W%W', created_at) AS w, COUNT(*) AS cnt \
+               FROM content_items WHERE created_at >= ?1 GROUP BY w \
+             ) s ON s.w = w.w \
+             LEFT JOIN ( \
+               SELECT STRFTIME('%Y-W%W', read_at) AS w, COUNT(*) AS cnt, \
+                 COALESCE(SUM(CASE WHEN content_text IS NOT NULL AND content_text != '' \
+                   THEN LENGTH(content_text) - LENGTH(REPLACE(content_text, ' ', '')) + 1 \
+                   ELSE 0 END), 0) AS wds \
+               FROM content_items WHERE read_at IS NOT NULL AND read_at >= ?1 \
+                 AND content_type IN ('article', 'feed_item', 'pdf') GROUP BY w \
+             ) r ON r.w = w.w \
+             ORDER BY w.w",
+        )?;
+        let rows = stmt.query_map(params![start_str, total_days], |r| {
+            let words: i64 = r.get(3)?;
+            Ok(WeeklyUsageSummary {
+                week: r.get(0)?,
+                items_saved: r.get(1)?,
+                items_read: r.get(2)?,
+                reading_minutes: words_to_minutes(words),
+            })
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
+    fn usage_monthly(
+        &self,
+        months: u32,
+        now: OffsetDateTime,
+    ) -> Result<Vec<MonthlyUsageSummary>, StorageError> {
+        let start = now - time::Duration::days(i64::from(months) * 30);
+        let start_str = fmt_time(start);
+
+        let mut result = Vec::new();
+        let mut stmt = self.conn.prepare(
+            "WITH months AS ( \
+               SELECT DISTINCT STRFTIME('%Y-%m', d) AS m FROM ( \
+                 SELECT DATE(?1, '+' || n || ' days') AS d \
+                 FROM (WITH RECURSIVE cnt(n) AS (SELECT 0 UNION ALL SELECT n+1 FROM cnt WHERE n < ?2) SELECT n FROM cnt) \
+               ) \
+             ) \
+             SELECT mo.m, \
+               COALESCE(s.cnt, 0), \
+               COALESCE(r.cnt, 0), \
+               COALESCE(r.mins, 0) \
+             FROM months mo \
+             LEFT JOIN ( \
+               SELECT STRFTIME('%Y-%m', created_at) AS m, COUNT(*) AS cnt \
+               FROM content_items WHERE created_at >= ?1 GROUP BY m \
+             ) s ON s.m = mo.m \
+             LEFT JOIN ( \
+               SELECT STRFTIME('%Y-%m', read_at) AS m, COUNT(*) AS cnt, \
+                 COALESCE(SUM(CASE WHEN content_text IS NOT NULL AND content_text != '' \
+                   THEN LENGTH(content_text) - LENGTH(REPLACE(content_text, ' ', '')) + 1 \
+                   ELSE 0 END), 0) AS mins \
+               FROM content_items WHERE read_at IS NOT NULL AND read_at >= ?1 \
+                 AND content_type IN ('article', 'feed_item', 'pdf') GROUP BY m \
+             ) r ON r.m = mo.m \
+             ORDER BY mo.m",
+        )?;
+        let total_days = i64::from(months) * 31;
+        let rows = stmt.query_map(params![start_str, total_days], |r| {
+            let words: i64 = r.get(3)?;
+            Ok(MonthlyUsageSummary {
+                month: r.get(0)?,
+                items_saved: r.get(1)?,
+                items_read: r.get(2)?,
+                reading_minutes: words_to_minutes(words),
+            })
+        })?;
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
+    fn usage_top_sources(&self, limit: u32) -> Result<Vec<SourceRanking>, StorageError> {
+        let mut result = Vec::new();
+        let mut stmt = self.conn.prepare(
+            "SELECT \
+               COALESCE(f.title, \
+                 CASE WHEN ci.url IS NOT NULL AND ci.url != '' \
+                   THEN REPLACE(REPLACE(REPLACE(ci.url, 'https://', ''), 'http://', ''), 'www.', '') \
+                   ELSE '(unknown)' END \
+               ) AS source_name, \
+               SUM(CASE WHEN ci.status = 'archived' THEN 1 ELSE 0 END) AS read_count, \
+               COUNT(*) AS total \
+             FROM content_items ci \
+             LEFT JOIN feed_item_meta fim ON fim.content_item_id = ci.id \
+             LEFT JOIN feeds f ON f.id = fim.feed_id \
+             WHERE ci.content_type IN ('article', 'feed_item', 'pdf') \
+             GROUP BY source_name \
+             ORDER BY read_count DESC, total DESC \
+             LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit], |r| {
+            Ok(SourceRanking {
+                source_name: r.get(0)?,
+                items_read: r.get(1)?,
+                total_items: r.get(2)?,
+            })
+        })?;
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
+    fn usage_tag_distribution(&self, limit: u32) -> Result<Vec<TagCount>, StorageError> {
+        let mut result = Vec::new();
+        let mut stmt = self.conn.prepare(
+            "SELECT t.name, COUNT(*) AS cnt \
+             FROM tags t \
+             JOIN content_item_tags cit ON cit.tag_id = t.id \
+             GROUP BY t.name \
+             ORDER BY cnt DESC \
+             LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit], |r| {
+            Ok(TagCount {
+                tag_name: r.get(0)?,
+                count: r.get(1)?,
+            })
+        })?;
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
+    fn usage_tag_trends(&self, months: u32) -> Result<Vec<TagTrendPoint>, StorageError> {
+        let mut result = Vec::new();
+        let mut stmt = self.conn.prepare(
+            "SELECT STRFTIME('%Y-%m', ci.created_at) AS m, t.name, COUNT(*) AS cnt \
+             FROM content_item_tags cit \
+             JOIN content_items ci ON ci.id = cit.content_item_id \
+             JOIN tags t ON t.id = cit.tag_id \
+             WHERE ci.created_at >= DATE('now', '-' || ?1 || ' months') \
+             GROUP BY m, t.name \
+             ORDER BY m, cnt DESC",
+        )?;
+        let rows = stmt.query_map(params![months], |r| {
+            Ok(TagTrendPoint {
+                month: r.get(0)?,
+                tag_name: r.get(1)?,
+                count: r.get(2)?,
+            })
+        })?;
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
+    // ------------------------------------------------------------------
     // Tags
     // ------------------------------------------------------------------
 
@@ -1782,7 +2186,7 @@ impl Database {
     pub fn list_items_by_tag(&self, tag_id: Uuid) -> Result<Vec<ContentItem>, StorageError> {
         let mut stmt = self.conn.prepare(
             "SELECT ci.id, ci.url, ci.title, ci.author, ci.content_type, ci.status,
-                    ci.content_text, ci.excerpt, ci.published_at, ci.created_at, ci.updated_at
+                    ci.content_text, ci.excerpt, ci.published_at, ci.created_at, ci.updated_at, ci.read_at
              FROM content_items ci
              JOIN content_item_tags ct ON ct.content_item_id = ci.id
              WHERE ct.tag_id = ?1
@@ -2010,7 +2414,7 @@ impl Database {
     ) -> Result<Vec<ContentItem>, StorageError> {
         let mut stmt = self.conn.prepare(
             "SELECT ci.id, ci.url, ci.title, ci.author, ci.content_type, ci.status,
-                    ci.content_text, ci.excerpt, ci.published_at, ci.created_at, ci.updated_at
+                    ci.content_text, ci.excerpt, ci.published_at, ci.created_at, ci.updated_at, ci.read_at
              FROM content_items ci
              JOIN content_item_collections cic ON cic.content_item_id = ci.id
              WHERE cic.collection_id = ?1
@@ -2035,7 +2439,7 @@ impl Database {
     pub fn list_all_content_items(&self) -> Result<Vec<ContentItem>, StorageError> {
         let mut stmt = self.conn.prepare(
             "SELECT id, url, title, author, content_type, status,
-                    content_text, excerpt, published_at, created_at, updated_at
+                    content_text, excerpt, published_at, created_at, updated_at, read_at
              FROM content_items ORDER BY created_at",
         )?;
         let rows = stmt.query_map([], |row| Ok(row_to_content_item(row)))?;
@@ -2576,8 +2980,8 @@ impl Database {
         let rows = stmt.query_map(param_refs.as_slice(), |row| {
             Ok(SearchHit {
                 item: row_to_content_item(row),
-                rank: row.get(11)?,
-                snippet: row.get(12)?,
+                rank: row.get(12)?,
+                snippet: row.get(13)?,
             })
         })?;
 
@@ -3180,7 +3584,7 @@ fn build_smart_filter_query(
     let mut param_values: Vec<String> = Vec::new();
     let mut sql = String::from(
         "SELECT ci.id, ci.url, ci.title, ci.author, ci.content_type, ci.status,
-                ci.content_text, ci.excerpt, ci.published_at, ci.created_at, ci.updated_at
+                ci.content_text, ci.excerpt, ci.published_at, ci.created_at, ci.updated_at, ci.read_at
          FROM content_items ci",
     );
 
@@ -3393,7 +3797,7 @@ fn build_search_query(
 
     let mut sql = String::from(
         "SELECT ci.id, ci.url, ci.title, ci.author, ci.content_type, ci.status,
-                ci.content_text, ci.excerpt, ci.published_at, ci.created_at, ci.updated_at,
+                ci.content_text, ci.excerpt, ci.published_at, ci.created_at, ci.updated_at, ci.read_at,
                 fts.rank,
                 snippet(content_items_fts, -1, '»', '«', '…', 20) AS snip
          FROM content_items_fts fts
@@ -3503,6 +3907,19 @@ const fn from_julian_day(jd: i32) -> (i32, u32, u32) {
     (year, month, day)
 }
 
+/// Convert a word count to estimated reading minutes at 238 WPM.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+fn words_to_minutes(words: i64) -> i64 {
+    if words <= 0 {
+        return 0;
+    }
+    (words as f64 / 238.0).ceil() as i64
+}
+
 /// Compute the longest consecutive-day streak from a sorted (descending) list of date strings.
 fn compute_longest_streak(dates: &[String]) -> i64 {
     if dates.is_empty() {
@@ -3543,6 +3960,64 @@ fn compute_longest_streak(dates: &[String]) -> i64 {
     longest
 }
 
+/// Compute current and longest reading streaks from a sorted list of date strings.
+///
+/// Returns `(current_streak, longest_streak)`. The current streak counts
+/// backwards from `today`; it is 0 if the user didn't read today or yesterday.
+#[must_use]
+pub fn compute_reading_streaks(dates: &[String], today: &str) -> (i64, i64) {
+    if dates.is_empty() {
+        return (0, 0);
+    }
+
+    let parse_jd = |d: &str| -> Option<i32> {
+        let y: i32 = d.get(..4)?.parse().ok()?;
+        let m: u32 = d.get(5..7)?.parse().ok()?;
+        let day: u32 = d.get(8..10)?.parse().ok()?;
+        Some(julian_day(y, m, day))
+    };
+
+    let mut jds: Vec<i32> = dates.iter().filter_map(|d| parse_jd(d)).collect();
+    if jds.is_empty() {
+        return (0, 0);
+    }
+    jds.sort_unstable();
+    jds.dedup();
+
+    // Longest streak.
+    let mut longest: i64 = 1;
+    let mut current: i64 = 1;
+    for window in jds.windows(2) {
+        if window[1] - window[0] == 1 {
+            current += 1;
+            if current > longest {
+                longest = current;
+            }
+        } else {
+            current = 1;
+        }
+    }
+
+    // Current streak: walk backwards from today.
+    let today_jd = parse_jd(today).unwrap_or(0);
+    let last = *jds.last().unwrap_or(&0);
+    // The streak is alive if the last read date is today or yesterday.
+    if today_jd - last > 1 {
+        return (0, longest);
+    }
+    let mut cur: i64 = 1;
+    let mut prev = last;
+    for &jd in jds.iter().rev().skip(1) {
+        if prev - jd == 1 {
+            cur += 1;
+            prev = jd;
+        } else {
+            break;
+        }
+    }
+    (cur, longest)
+}
+
 /// Map a rusqlite `Row` to a `ContentItem`.
 fn row_to_content_item(row: &rusqlite::Row<'_>) -> ContentItem {
     ContentItem {
@@ -3568,6 +4043,10 @@ fn row_to_content_item(row: &rusqlite::Row<'_>) -> ContentItem {
             .map(|s| parse_time(&s)),
         created_at: parse_time(&row.get::<_, String>(9).unwrap_or_default()),
         updated_at: parse_time(&row.get::<_, String>(10).unwrap_or_default()),
+        read_at: row
+            .get::<_, Option<String>>(11)
+            .unwrap_or_default()
+            .map(|s| parse_time(&s)),
     }
 }
 

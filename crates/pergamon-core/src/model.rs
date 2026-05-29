@@ -40,6 +40,8 @@ pub struct ContentItem {
     pub created_at: OffsetDateTime,
     /// When this item was last updated.
     pub updated_at: OffsetDateTime,
+    /// When this item was read (status transitioned to archived).
+    pub read_at: Option<OffsetDateTime>,
 }
 
 /// An RSS/Atom feed subscription.
@@ -374,4 +376,138 @@ pub struct WeeklyReviewSummary {
     pub reviews: i64,
     /// Reviews rated Hard or above (successful).
     pub successes: i64,
+}
+
+// ======================================================================
+// Usage & reading analytics
+// ======================================================================
+
+/// Composite usage statistics report.
+///
+/// Bundles all reading and content analytics into a single struct for
+/// JSON serialisation and shared use between CLI and TUI.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UsageStatsReport {
+    /// High-level overview counts and rates.
+    pub overview: UsageOverview,
+    /// Reading activity broken down by day, week, and month.
+    pub reading_activity: ReadingActivity,
+    /// Top content sources ranked by read count.
+    pub top_sources: Vec<SourceRanking>,
+    /// Tag distribution: most-used tags with counts.
+    pub tag_distribution: Vec<TagCount>,
+    /// Tag usage over time (monthly buckets).
+    pub tag_trends: Vec<TagTrendPoint>,
+}
+
+/// High-level usage overview.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UsageOverview {
+    /// Total content items in the library.
+    pub total_items: u64,
+    /// Items currently in inbox.
+    pub inbox_count: u64,
+    /// Items marked as archived (completed reading).
+    pub archived_count: u64,
+    /// Total highlights created.
+    pub total_highlights: u64,
+    /// Total feed subscriptions.
+    pub total_feeds: u64,
+    /// Items saved today.
+    pub items_saved_today: u64,
+    /// Items saved this week.
+    pub items_saved_this_week: u64,
+    /// Items saved this month.
+    pub items_saved_this_month: u64,
+    /// Average items saved per day over the last 30 days.
+    pub saves_per_day_30d: f64,
+    /// Highlights per content item (highlight rate).
+    pub highlight_rate: f64,
+    /// Estimated total reading minutes (archived items only).
+    pub total_reading_minutes: u64,
+    /// Current consecutive-day reading streak.
+    pub reading_streak_days: i64,
+    /// Longest consecutive-day reading streak ever.
+    pub longest_reading_streak: i64,
+}
+
+/// Reading activity broken down by time period.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadingActivity {
+    /// Daily activity for the last 30 days (zero-filled).
+    pub daily: Vec<DailyUsageSummary>,
+    /// Weekly activity for the last 12 weeks (zero-filled).
+    pub weekly: Vec<WeeklyUsageSummary>,
+    /// Monthly activity for the last 12 months (zero-filled).
+    pub monthly: Vec<MonthlyUsageSummary>,
+}
+
+/// Daily usage and reading activity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DailyUsageSummary {
+    /// Date in YYYY-MM-DD format.
+    pub date: String,
+    /// Items saved (created) that day.
+    pub items_saved: i64,
+    /// Items read (archived) that day.
+    pub items_read: i64,
+    /// Estimated reading time in minutes.
+    pub reading_minutes: i64,
+}
+
+/// Weekly usage and reading activity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WeeklyUsageSummary {
+    /// ISO week label (e.g. "2026-W22").
+    pub week: String,
+    /// Items saved that week.
+    pub items_saved: i64,
+    /// Items read that week.
+    pub items_read: i64,
+    /// Estimated reading time in minutes.
+    pub reading_minutes: i64,
+}
+
+/// Monthly usage and reading activity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MonthlyUsageSummary {
+    /// Month label (e.g. "2026-05").
+    pub month: String,
+    /// Items saved that month.
+    pub items_saved: i64,
+    /// Items read that month.
+    pub items_read: i64,
+    /// Estimated reading time in minutes.
+    pub reading_minutes: i64,
+}
+
+/// A content source ranked by read count.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceRanking {
+    /// Source name (feed title or domain).
+    pub source_name: String,
+    /// Number of items read from this source.
+    pub items_read: i64,
+    /// Total items from this source.
+    pub total_items: i64,
+}
+
+/// Tag usage count.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TagCount {
+    /// Tag name.
+    pub tag_name: String,
+    /// Number of items with this tag.
+    pub count: i64,
+}
+
+/// Tag usage at a point in time (for trend charts).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TagTrendPoint {
+    /// Month label (e.g. "2026-05").
+    pub month: String,
+    /// Tag name.
+    pub tag_name: String,
+    /// Number of items tagged in this month.
+    pub count: i64,
 }

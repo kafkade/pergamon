@@ -18,6 +18,7 @@ pub mod content_type;
 pub mod error;
 pub mod fsrs;
 pub mod model;
+pub mod reading_time;
 pub mod rule;
 pub mod smart_filter;
 pub mod status;
