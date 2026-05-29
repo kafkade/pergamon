@@ -21,7 +21,7 @@ Current schema version: **1**.
 
 ## Markdown export
 
-### CLI usage
+### Markdown CLI usage
 
 ```sh
 # Export all items as Markdown files
@@ -148,7 +148,7 @@ Wikilink format: `[[filename-stem|Display Title]]`
 
 ## JSON export
 
-### CLI usage
+### JSON CLI usage
 
 ```sh
 # Export to stdout (compact)
