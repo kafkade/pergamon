@@ -1,0 +1,19 @@
+.pergamon-browse-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.pergamon-browse-item .title {
+  font-weight: 600;
+}
+
+.pergamon-browse-item .meta {
+  font-size: 0.85em;
+  color: var(--text-muted);
+}
+
+.pergamon-browse-item .tags {
+  font-size: 0.8em;
+  color: var(--text-accent);
+}

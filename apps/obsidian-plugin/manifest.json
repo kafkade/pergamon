@@ -1,0 +1,10 @@
+{
+  "id": "pergamon",
+  "name": "Pergamon",
+  "version": "0.3.0",
+  "minAppVersion": "1.0.0",
+  "description": "Browse, insert, and sync highlights from your pergamon library into your Obsidian vault.",
+  "author": "kafkade",
+  "authorUrl": "https://github.com/kafkade",
+  "isDesktopOnly": false
+}

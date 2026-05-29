@@ -1553,6 +1553,7 @@ dependencies = [
  "dirs",
  "open",
  "pergamon-core",
+ "pergamon-export",
  "pergamon-extract",
  "pergamon-feed",
  "pergamon-import",
@@ -1572,6 +1573,18 @@ name = "pergamon-core"
 version = "0.3.0"
 dependencies = [
  "serde",
+ "thiserror 2.0.18",
+ "time",
+ "uuid",
+]
+
+[[package]]
+name = "pergamon-export"
+version = "0.3.0"
+dependencies = [
+ "pergamon-core",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "time",
  "uuid",
