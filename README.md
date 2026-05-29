@@ -26,7 +26,7 @@ pergamon import readwise ~/readwise-export.csv   # Bring your Readwise highlight
 pergamon export backup -o library.zip            # Full backup
 ```
 
-> **Status**: Active development — Phase 3 (Knowledge Retention). Core reading, bookmarking, and organization features are complete. Highlights, spaced repetition, and import from Kindle/Readwise are implemented.
+> **Status**: Active development — Phase 3 complete. Core reading, bookmarking, organization, highlights, spaced repetition, Kindle/Readwise import, Obsidian integration, and stable export contracts are implemented.
 
 ---
 
@@ -90,13 +90,14 @@ The name captures what this project is about:
 - 📥 Readwise CSV import with tags, source grouping, and provenance tracking
 - 📥 Import from OPML, Raindrop.io (CSV), and Pocket (HTML) with dry-run and idempotent re-import
 - 📤 Export: OPML feeds, full backup (ZIP with JSON), highlight export (Markdown/JSON)
+- 📝 Stable export contracts: general-purpose Markdown (frontmatter, backlinks, slug templates) and versioned JSON
+- 🔌 Obsidian plugin for syncing highlights and notes to your vault
 - 🔗 URL canonicalization, duplicate detection, and link health checking
 - 🏗️ TUI with vim-style keybindings for reading, triage, highlighting, and reviewing
 - ⚙️ Configuration file (TOML), shell completions (bash/zsh/fish/PowerShell)
 
 ### Planned
 
-- 🔌 Obsidian plugin for syncing highlights and notes to your vault
 - 📧 Newsletter ingestion (IMAP, `.eml` import)
 - 🤖 Smart collections, content rules, and analytics
 - 🌐 Web interface (Axum + WASM)
