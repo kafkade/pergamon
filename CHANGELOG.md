@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `pergamon stats review` top-level command: view retention and review statistics dashboard
+- `review stats --format json` flag: machine-readable JSON output for review statistics
+- `review stats --tui` / `stats review --tui` flag: launch a standalone TUI stats dashboard
+- Review streak tracking: current and longest consecutive-day review streaks
+- Source breakdown: review cards grouped by provenance (Kindle, Readwise, Feed, Manual)
+- Daily review history: last 30 days of review activity with bar charts
+- Weekly review trend: last 12 weeks of review activity with bar charts
+- TUI stats dashboard: cards overview, retention/streaks panel, source breakdown, daily and weekly charts
+- Review summary screen now shows `[s] Stats dashboard` option after completing a review session
+
 ## [0.3.0] - 2026-05-28
 
 ### Added
