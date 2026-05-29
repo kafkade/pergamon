@@ -541,7 +541,7 @@ That policy matters because not every item deserves permanent raw retention. A s
 
 ### 2.4 Platform compilation targets table
 
-**Status**: [Validated] on Rust + UniFFI + WASM; [Validation Required] on the exact web shell implementation.
+**Status**: [Validated] on Rust + UniFFI + WASM; [Validated] on web shell implementation (ADR-016: Axum + server-rendered HTML + HTMX).
 
 | Platform | Rust target(s) | Primary UI shell | Local storage backend | Notes | Phase |
 |---|---|---|---|---|---|
@@ -2726,7 +2726,7 @@ Core components:
 | **Serialization** | `serde`, `serde_json`, `toml` | Standard Rust ecosystem choices; no reason to diverge. **[Validated]** |
 | **IDs** | UUIDv7 or ULID | Stable, sortable identifiers work well for sync, exports, and item provenance. **[Validated]** |
 | **Sync server** | `axum` + encrypted blob/event storage | Clean Rust fit, easy middleware, good ecosystem, aligns with existing kafkade server playbook. **[Validated]** |
-| **Web client** | WASM-compiled core + thin TypeScript shell | Keep domain logic in Rust, keep web UI iteration speed reasonable, avoid committing to a heavy all-Rust frontend too early. **[Validation Required]** |
+| **Web client** | Axum server-rendered HTML + HTMX (Askama templates) | Server-side Rust reuse, no JS build pipeline, progressive enhancement, simple Docker deployment. WASM deferred to future offline PWA (ADR-016). **[Validated]** |
 | **iOS** | UniFFI-generated bindings + SwiftUI wrapper | Cleanest path from shared Rust logic to native iOS UX without hand-maintaining C FFI everywhere. **[Validated]** |
 | **Obsidian plugin** | TypeScript using the official Obsidian API | Obsidian plugins are TypeScript-native; keep the plugin thin and drive integration through files and stable APIs. **[Validated]** |
 | **Observability** | `tracing` + structured logs in adapters only | Core stays pure; shells and server get diagnostics. **[Validated]** |
@@ -3013,7 +3013,7 @@ Predictable, portable, well-maintained, and aligned with the rest of the Rust ec
 **Deliverables**
 
 1. Axum-served web application with authentication/session handling and Docker packaging. **[Validated]**
-2. Web inbox, reader, bookmarks, highlights, search, and review views powered by the same core logic via WASM or shared validation. **[Validation Required]**
+2. Web inbox, reader, bookmarks, highlights, search, and review views powered by server-side Rust logic with HTMX-enhanced server-rendered HTML (ADR-016). **[Validated]**
 3. Docker image / compose setup for self-hosted deployment. **[Validated]**
 4. Progressive enhancement and basic offline caching where practical. **[Validation Required]**
 5. Admin diagnostics for feed status, extraction failures, and import logs. **[Validated]**
@@ -3027,12 +3027,12 @@ Predictable, portable, well-maintained, and aligned with the rest of the Rust ec
 **Dependencies**
 
 - Phase 4 complete.
-- WASM footprint and shared-core boundary validated.
+- Web architecture decided (ADR-016): server-rendered HTML + HTMX, no client-side WASM.
 - Basic auth/session model defined.
 
 **Risks**
 
-- Web build complexity explodes. **Mitigation:** keep the client thin and reuse Rust logic aggressively. **[Validation Required]**
+- Web build complexity explodes. **Mitigation:** server-rendered HTML with no JS build pipeline; one Rust binary (ADR-016). **[Validated]**
 - Browser storage/offline semantics tempt an early sync rewrite. **Mitigation:** keep Phase 5 scoped to a deployable web app, not full multi-device sync. **[Validated]**
 
 **Cut line**
@@ -3336,7 +3336,7 @@ These can move alongside the main path without destabilizing it. **[Validated]**
 | Reader extraction quality | reader mode works on most pages via `readability` | fall back to original URL or minimally cleaned content when extraction is weak | weaker “all in one” feel on edge cases | **Ship with fallback.** Do not build a custom extractor early. **[Validated]** |
 | Bookmark dedupe | canonical URL + source provenance + safe merges | exact-URL dedupe only in MVP | more duplicate cleanup for users | **Start conservative, then expand.** **[Validated]** |
 | Cross-platform parity | one Rust domain model across CLI/web/iOS | UI-specific behaviors diverge slightly while data model stays shared | some UX inconsistency | **Protect the model, tolerate shell differences.** **[Validated]** |
-| Web stack simplicity | Rust core + thin TS shell | server-rendered admin + lighter client until WASM is ready | web UX is less ambitious early | **Prefer fewer moving parts.** **[Validation Required]** |
+| Web stack simplicity | Rust core + thin TS shell | Axum + server-rendered HTML + HTMX; no client-side WASM or TypeScript (ADR-016) | web UX is less ambitious early but deployment is maximally simple | **Decided: server-rendered with HTMX.** **[Validated]** |
 | Obsidian integration | stable, thin plugin using exports and APIs | export-only workflows before full plugin features | less seamless note insertion early | **File contract first.** **[Validated]** |
 | Kindle migration | clean file import with preserved metadata | import text only, weaker context for some clippings | lower retention fidelity | **Support best-effort import, preserve raw source.** **[Validated]** |
 | Readwise migration | near-full export fidelity | partial import of highlights + notes first | some cleanup on user side | **Good enough migration beats waiting for perfect.** **[Validation Required]** |
@@ -3440,7 +3440,7 @@ If the answer is no, vanity metrics do not matter. **[Validated]**
 | 8 | Highlight data model | **source-agnostic highlight/note schema linked to canonical items** | Avoids per-source fragmentation later | **Decided [Validated]** |
 | 9 | Review scheduler | **FSRS** | Modern retention model; better than inventing a custom heuristic | **Decided [Validated]** |
 | 10 | Obsidian integration style | **export/plugin-first, not vault-as-source-of-truth** | Keeps pergamon as ingestion engine and avoids sync chaos | **Decided [Validated]** |
-| 11 | Web app architecture | **Axum server + WASM core + thin TypeScript UI shell** | Balances Rust reuse with practical UI iteration speed | **Deferred to Phase 5 [Validation Required]** |
+| 11 | Web app architecture | **Axum server + server-rendered HTML (Askama) + HTMX** | Maximizes Rust reuse and deployment simplicity for a solo-developer self-hosted app (ADR-016) | **Decided [Validated]** |
 | 12 | iOS architecture | **SwiftUI consuming Rust via UniFFI** | Best blend of native UX and shared business logic | **Decided [Validated]** |
 | 13 | Sync protocol | **encrypted blobs/events with typed merge policies; server never sees plaintext** | Matches local-first trust model while enabling optional hosting | **Deferred to Phase 7 [Validation Required]** |
 | 14 | License / commercialization model | **Apache-2.0 for app/core, AGPL-3.0 for server, Sponsors + optional managed sync** | Maximizes openness while protecting the hosted server boundary | **Decided [Validated]** |
@@ -3449,7 +3449,7 @@ If the answer is no, vanity metrics do not matter. **[Validated]**
 **Open questions that still deserve explicit validation**
 
 - Is `readability` strong enough on the actual corpus pergamon users will save? **[Validation Required]**
-- Does the web shell need more TypeScript than planned, or can the Rust/WASM boundary stay thin? **[Validation Required]**
+- ~~Does the web shell need more TypeScript than planned, or can the Rust/WASM boundary stay thin?~~ Resolved by ADR-016: no TypeScript, no client-side WASM in Phase 5. Server-rendered HTML + HTMX. **[Validated]**
 - Can the iOS share extension ingest enough metadata to feel magical without building a background service? **[Validation Required]**
 - How aggressive should sync auto-merge be for tags, notes, and read state before the product starts surprising users? **[Validation Required]**
 

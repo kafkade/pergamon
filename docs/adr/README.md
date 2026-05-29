@@ -19,3 +19,5 @@ They follow the [MADR](https://adr.github.io/madr/) format.
 | [ADR-008](008-licensing-apache-20-agpl-30.md) | Licensing — Apache-2.0 + AGPL-3.0 | Accepted |
 | [ADR-009](009-clitui-design-and-command-structure.md) | CLI/TUI Design and Command Structure | Accepted |
 | [ADR-010](010-bookmark-vs-article-unified-content-model.md) | Bookmark vs Article — Unified Content Model | Accepted |
+| [ADR-016](016-web-architecture-and-wasm-boundary.md) | Web Architecture and WASM Boundary | Accepted |
+| [ADR-017](017-auth-session-model.md) | Auth and Session Model for Web App | Accepted |
