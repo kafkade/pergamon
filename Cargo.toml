@@ -51,7 +51,7 @@ crossterm = "0.28"
 open = "5"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 dirs = "6"
-toml = "0.8"
+toml = "1.1"
 
 # Mandatory lint set. Members opt in with `[lints] workspace = true`.
 [workspace.lints.rust]
