@@ -46,7 +46,7 @@ scraper = "0.25"
 csv = "1"
 url = "2"
 lopdf = "0.34"
-ratatui = "0.29"
+ratatui = "0.30"
 crossterm = "0.28"
 open = "5"
 zip = { version = "2", default-features = false, features = ["deflate"] }
