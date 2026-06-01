@@ -38,7 +38,7 @@ clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
 anyhow = "1"
 feed-rs = "2"
-quick-xml = "0.37"
+quick-xml = "0.40"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 readabilityrs = "0.1"
 ammonia = "4"
