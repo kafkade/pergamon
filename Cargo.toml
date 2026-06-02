@@ -49,7 +49,7 @@ lopdf = "0.40"
 ratatui = "0.30"
 crossterm = "0.29"
 open = "5"
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }
 dirs = "6"
 toml = "1.1"
 
