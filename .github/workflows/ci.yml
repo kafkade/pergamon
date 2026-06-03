@@ -6,13 +6,46 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
 
 jobs:
+  # ── Change detection ──────────────────────────────────────────────────────────
+  # Determines which component groups were modified so downstream jobs can skip
+  # irrelevant work on PRs. Push-to-main always runs everything.
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      docs: ${{ steps.filter.outputs.docs }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            rust:
+              - 'crates/**'
+              - 'Cargo.*'
+              - 'rust-toolchain.toml'
+            docs:
+              - '**/*.md'
+              - '.markdownlint-cli2.jsonc'
+
+  # ── Documentation ─────────────────────────────────────────────────────────────
+
   markdown:
     name: Markdown lint
+    needs: changes
+    if: github.event_name == 'push' || needs.changes.outputs.docs == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -20,8 +53,12 @@ jobs:
         with:
           globs: "**/*.md"
 
+  # ── Rust checks ───────────────────────────────────────────────────────────────
+
   check:
     name: Check
+    needs: changes
+    if: github.event_name == 'push' || needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -31,6 +68,8 @@ jobs:
 
   test:
     name: Test
+    needs: changes
+    if: github.event_name == 'push' || needs.changes.outputs.rust == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -44,6 +83,8 @@ jobs:
 
   clippy:
     name: Clippy
+    needs: changes
+    if: github.event_name == 'push' || needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -55,6 +96,8 @@ jobs:
 
   fmt:
     name: Formatting
+    needs: changes
+    if: github.event_name == 'push' || needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -63,11 +106,37 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
-  # Summary gate — single required status check for branch protection.
+  msrv:
+    name: MSRV (1.85)
+    needs: changes
+    if: github.event_name == 'push' || needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.85
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+      - run: cargo check --workspace --all-features
+
+  audit:
+    name: Security audit
+    needs: changes
+    if: github.event_name == 'push' || needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── Summary gate ──────────────────────────────────────────────────────────────
+  # Single required status check for branch protection. Downstream jobs may be
+  # skipped (path filters) — that is OK; only failures or cancellations block.
   ci:
     name: CI
     if: always()
-    needs: [markdown, check, test, clippy, fmt]
+    needs: [changes, markdown, check, test, clippy, fmt, msrv, audit]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any dependency failed
