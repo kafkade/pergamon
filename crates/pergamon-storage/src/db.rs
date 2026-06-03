@@ -1629,28 +1629,32 @@ impl Database {
         })
     }
 
+    #[allow(clippy::cast_sign_loss)] // COUNT(*) is always non-negative
     fn usage_overview(&self, now: OffsetDateTime) -> Result<UsageOverview, StorageError> {
         let total_items: u64 =
             self.conn
-                .query_row("SELECT COUNT(*) FROM content_items", [], |r| r.get(0))?;
+                .query_row("SELECT COUNT(*) FROM content_items", [], |r| {
+                    r.get::<_, i64>(0)
+                })? as u64;
         let inbox_count: u64 = self.conn.query_row(
             "SELECT COUNT(*) FROM content_items WHERE status = 'inbox'",
             [],
-            |r| r.get(0),
-        )?;
+            |r| r.get::<_, i64>(0),
+        )? as u64;
         let archived_count: u64 = self.conn.query_row(
             "SELECT COUNT(*) FROM content_items WHERE status = 'archived'",
             [],
-            |r| r.get(0),
-        )?;
+            |r| r.get::<_, i64>(0),
+        )? as u64;
         let total_highlights: u64 = self.conn.query_row(
             "SELECT COUNT(*) FROM content_items WHERE content_type = 'highlight'",
             [],
-            |r| r.get(0),
-        )?;
+            |r| r.get::<_, i64>(0),
+        )? as u64;
         let total_feeds: u64 = self
             .conn
-            .query_row("SELECT COUNT(*) FROM feeds", [], |r| r.get(0))?;
+            .query_row("SELECT COUNT(*) FROM feeds", [], |r| r.get::<_, i64>(0))?
+            as u64;
 
         let now_str = fmt_time(now);
         let today_start = &now_str[..10];
@@ -1659,24 +1663,24 @@ impl Database {
             "SELECT COUNT(*) FROM content_items \
              WHERE created_at >= ?1 || 'T00:00:00Z'",
             params![today_start],
-            |r| r.get(0),
-        )?;
+            |r| r.get::<_, i64>(0),
+        )? as u64;
 
         let week_ago = now - time::Duration::days(7);
         let week_str = fmt_time(week_ago);
         let items_saved_this_week: u64 = self.conn.query_row(
             "SELECT COUNT(*) FROM content_items WHERE created_at >= ?1",
             params![week_str],
-            |r| r.get(0),
-        )?;
+            |r| r.get::<_, i64>(0),
+        )? as u64;
 
         let month_ago = now - time::Duration::days(30);
         let month_str = fmt_time(month_ago);
         let items_saved_this_month: u64 = self.conn.query_row(
             "SELECT COUNT(*) FROM content_items WHERE created_at >= ?1",
             params![month_str],
-            |r| r.get(0),
-        )?;
+            |r| r.get::<_, i64>(0),
+        )? as u64;
 
         #[allow(clippy::cast_precision_loss)]
         let saves_per_day_30d = items_saved_this_month as f64 / 30.0;
