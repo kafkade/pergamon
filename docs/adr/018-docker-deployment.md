@@ -268,7 +268,7 @@ volumes:
 
 With `Caddyfile`:
 
-```
+```text
 pergamon.example.com {
     reverse_proxy pergamon:3000
 }
@@ -276,7 +276,7 @@ pergamon.example.com {
 
 ### .dockerignore
 
-```
+```text
 target/
 .git/
 docs/
