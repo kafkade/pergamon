@@ -1629,6 +1629,7 @@ impl Database {
         })
     }
 
+    #[allow(clippy::cast_sign_loss)] // COUNT(*) is always non-negative
     fn usage_overview(&self, now: OffsetDateTime) -> Result<UsageOverview, StorageError> {
         let total_items: u64 =
             self.conn
