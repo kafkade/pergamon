@@ -1632,8 +1632,9 @@ impl Database {
     fn usage_overview(&self, now: OffsetDateTime) -> Result<UsageOverview, StorageError> {
         let total_items: u64 =
             self.conn
-                .query_row("SELECT COUNT(*) FROM content_items", [], |r| r.get::<_, i64>(0))?
-                as u64;
+                .query_row("SELECT COUNT(*) FROM content_items", [], |r| {
+                    r.get::<_, i64>(0)
+                })? as u64;
         let inbox_count: u64 = self.conn.query_row(
             "SELECT COUNT(*) FROM content_items WHERE status = 'inbox'",
             [],
