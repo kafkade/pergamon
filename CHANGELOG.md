@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `pergamon-server` crate: Axum-based web server for pergamon (AGPL-3.0-only)
+- REST API for content items: list, save URL, update status/tags, delete (`/api/items`)
+- REST API for feeds: subscribe, list, delete, sync all, OPML import (`/api/feeds`)
+- REST API for tags: list with item counts, add/remove tags on items (`/api/tags`)
+- REST API for collections: create, list, view/add items (`/api/collections`)
+- Paginated list responses with `Link` headers and `X-Total-Count`
+- Consistent JSON error responses with machine-readable error codes
+- Health check endpoint at `/health` with database status
+- Configurable host, port, database path, and static asset directory via CLI flags or environment variables
+- Graceful shutdown on SIGINT/SIGTERM (Unix) or Ctrl+C (Windows)
+- Gzip response compression and request tracing middleware
+- URL save workflow with article extraction, metadata enrichment, and duplicate detection
+- SSRF protection: HTTP/HTTPS-only URL validation, redirect limits, response size caps
+
 ## [0.6.1] - 2026-05-29
 
 ### Fixed
