@@ -377,10 +377,10 @@ fn render_bookmark_note(bundle: &BookmarkBundle) -> String {
         let _ = writeln!(out, "> {desc}\n");
     }
 
-    if let Some(ref excerpt) = bundle.item.excerpt {
-        if bundle.description.is_none() {
-            let _ = writeln!(out, "> {excerpt}\n");
-        }
+    if let Some(ref excerpt) = bundle.item.excerpt
+        && bundle.description.is_none()
+    {
+        let _ = writeln!(out, "> {excerpt}\n");
     }
 
     out

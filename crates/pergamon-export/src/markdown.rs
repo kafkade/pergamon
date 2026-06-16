@@ -351,12 +351,11 @@ fn render_item(
 
         // From highlights: link to the source item.
         for (_item, meta) in &ei.highlights {
-            if let Some(source_id) = meta.source_item_id {
-                if source_id != ei.item.id {
-                    if let Some(target) = backlink_index.get(&source_id) {
-                        related.push(target);
-                    }
-                }
+            if let Some(source_id) = meta.source_item_id
+                && source_id != ei.item.id
+                && let Some(target) = backlink_index.get(&source_id)
+            {
+                related.push(target);
             }
         }
 
