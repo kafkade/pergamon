@@ -14,7 +14,7 @@ members = [
 [workspace.package]
 version = "0.6.1"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.95"
 license = "Apache-2.0"
 repository = "https://github.com/kafkade/pergamon"
 homepage = "https://github.com/kafkade/pergamon"
