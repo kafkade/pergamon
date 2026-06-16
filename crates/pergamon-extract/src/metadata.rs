@@ -112,14 +112,13 @@ fn extract_favicon(doc: &Html) -> Option<String> {
     // Try standard favicon link tags in priority order.
     for rel in &["icon", "shortcut icon", "apple-touch-icon"] {
         let selector_str = format!("link[rel=\"{rel}\"]");
-        if let Ok(selector) = Selector::parse(&selector_str) {
-            if let Some(el) = doc.select(&selector).next() {
-                if let Some(href) = el.value().attr("href") {
-                    let href = href.trim();
-                    if !href.is_empty() {
-                        return Some(href.to_owned());
-                    }
-                }
+        if let Ok(selector) = Selector::parse(&selector_str)
+            && let Some(el) = doc.select(&selector).next()
+            && let Some(href) = el.value().attr("href")
+        {
+            let href = href.trim();
+            if !href.is_empty() {
+                return Some(href.to_owned());
             }
         }
     }
@@ -142,10 +141,10 @@ fn extract_jsonld_author(doc: &Html) -> Option<String> {
             continue;
         }
 
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
-            if let Some(author) = find_author_in_jsonld(&value) {
-                return Some(author);
-            }
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(text)
+            && let Some(author) = find_author_in_jsonld(&value)
+        {
+            return Some(author);
         }
     }
     None
@@ -164,17 +163,17 @@ fn find_author_in_jsonld(value: &serde_json::Value) -> Option<String> {
         }
         serde_json::Value::Object(obj) => {
             // Check @graph arrays.
-            if let Some(graph) = obj.get("@graph") {
-                if let Some(author) = find_author_in_jsonld(graph) {
-                    return Some(author);
-                }
+            if let Some(graph) = obj.get("@graph")
+                && let Some(author) = find_author_in_jsonld(graph)
+            {
+                return Some(author);
             }
 
             // Check if this object is an article-like type.
-            if let Some(type_val) = obj.get("@type") {
-                if is_article_type(type_val) {
-                    return extract_author_from_object(obj);
-                }
+            if let Some(type_val) = obj.get("@type")
+                && is_article_type(type_val)
+            {
+                return extract_author_from_object(obj);
             }
 
             None

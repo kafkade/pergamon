@@ -214,14 +214,14 @@ pub fn run_review(db: &Database, cards: Vec<ReviewCard>) -> Result<()> {
             })
             .context("failed to draw summary")?;
 
-        if crossterm::event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = crossterm::event::read()? {
-                match key.code {
-                    KeyCode::Char('s') if !show_stats => {
-                        show_stats = true;
-                    }
-                    _ => break,
+        if crossterm::event::poll(Duration::from_millis(100))?
+            && let Event::Key(key) = crossterm::event::read()?
+        {
+            match key.code {
+                KeyCode::Char('s') if !show_stats => {
+                    show_stats = true;
                 }
+                _ => break,
             }
         }
     }
@@ -403,16 +403,14 @@ pub fn run_stats_tui(db: &Database) -> Result<()> {
             })
             .context("failed to draw stats")?;
 
-        if crossterm::event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = crossterm::event::read()? {
-                if key.code == KeyCode::Char('q')
-                    || key.code == KeyCode::Esc
-                    || (key.modifiers.contains(KeyModifiers::CONTROL)
-                        && key.code == KeyCode::Char('c'))
-                {
-                    break;
-                }
-            }
+        if crossterm::event::poll(Duration::from_millis(100))?
+            && let Event::Key(key) = crossterm::event::read()?
+            && (key.code == KeyCode::Char('q')
+                || key.code == KeyCode::Esc
+                || (key.modifiers.contains(KeyModifiers::CONTROL)
+                    && key.code == KeyCode::Char('c')))
+        {
+            break;
         }
     }
 
@@ -653,16 +651,14 @@ pub fn run_usage_stats_tui(db: &Database) -> Result<()> {
             })
             .context("failed to draw usage stats")?;
 
-        if crossterm::event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = crossterm::event::read()? {
-                if key.code == KeyCode::Char('q')
-                    || key.code == KeyCode::Esc
-                    || (key.modifiers.contains(KeyModifiers::CONTROL)
-                        && key.code == KeyCode::Char('c'))
-                {
-                    break;
-                }
-            }
+        if crossterm::event::poll(Duration::from_millis(100))?
+            && let Event::Key(key) = crossterm::event::read()?
+            && (key.code == KeyCode::Char('q')
+                || key.code == KeyCode::Esc
+                || (key.modifiers.contains(KeyModifiers::CONTROL)
+                    && key.code == KeyCode::Char('c')))
+        {
+            break;
         }
     }
 
