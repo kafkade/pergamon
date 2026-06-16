@@ -3832,21 +3832,22 @@ fn doctor_merge(db: &Database, keep_str: &str, discard_str: &str, yes: bool) -> 
         .context("transferring collections")?;
 
     // 3. Upsert bookmark_meta if discard has one and keep doesn't.
-    if discard_has_bookmark && !keep_has_bookmark {
-        if let Ok(bm) = db.get_bookmark_meta(discard_id) {
-            let merged = BookmarkMeta {
-                content_item_id: keep_id,
-                original_url: bm.original_url,
-                saved_from: bm.saved_from,
-                thumbnail_url: bm.thumbnail_url,
-                description: bm.description,
-                site_name: bm.site_name,
-                favicon_url: bm.favicon_url,
-            };
-            db.upsert_bookmark_meta(&merged)
-                .context("merging bookmark_meta")?;
-            println!("Merged bookmark metadata.");
-        }
+    if discard_has_bookmark
+        && !keep_has_bookmark
+        && let Ok(bm) = db.get_bookmark_meta(discard_id)
+    {
+        let merged = BookmarkMeta {
+            content_item_id: keep_id,
+            original_url: bm.original_url,
+            saved_from: bm.saved_from,
+            thumbnail_url: bm.thumbnail_url,
+            description: bm.description,
+            site_name: bm.site_name,
+            favicon_url: bm.favicon_url,
+        };
+        db.upsert_bookmark_meta(&merged)
+            .context("merging bookmark_meta")?;
+        println!("Merged bookmark metadata.");
     }
 
     // 4. Backdate created_at to the earliest of the two.
@@ -3915,17 +3916,17 @@ fn doctor_links(db: &Database, stale_days: Option<u32>) -> Result<()> {
         }
 
         // Rate-limit per domain.
-        if let Ok(parsed) = reqwest::Url::parse(url) {
-            if let Some(host) = parsed.host_str() {
-                let host_key = host.to_lowercase();
-                if let Some(last) = domain_last.get(&host_key) {
-                    let elapsed = last.elapsed();
-                    if elapsed < rate_limit {
-                        std::thread::sleep(rate_limit.checked_sub(elapsed).unwrap_or_default());
-                    }
+        if let Ok(parsed) = reqwest::Url::parse(url)
+            && let Some(host) = parsed.host_str()
+        {
+            let host_key = host.to_lowercase();
+            if let Some(last) = domain_last.get(&host_key) {
+                let elapsed = last.elapsed();
+                if elapsed < rate_limit {
+                    std::thread::sleep(rate_limit.checked_sub(elapsed).unwrap_or_default());
                 }
-                domain_last.insert(host_key, std::time::Instant::now());
             }
+            domain_last.insert(host_key, std::time::Instant::now());
         }
 
         let health = check_url(&client, *item_id, url);
@@ -4009,24 +4010,24 @@ fn check_url(client: &reqwest::blocking::Client, item_id: Uuid, url: &str) -> Li
 
         // Follow 3xx redirects.
         if (300..400).contains(&status) {
-            if let Some(loc) = resp.headers().get("location") {
-                if let Ok(loc_str) = loc.to_str() {
-                    // Resolve relative redirects.
-                    current_url = reqwest::Url::parse(loc_str).map_or_else(
-                        |_| {
-                            reqwest::Url::parse(&current_url).map_or_else(
-                                |_| loc_str.to_string(),
-                                |base| {
-                                    base.join(loc_str)
-                                        .map_or_else(|_| loc_str.to_string(), |u| u.to_string())
-                                },
-                            )
-                        },
-                        |abs| abs.to_string(),
-                    );
-                    redirect_count += 1;
-                    continue;
-                }
+            if let Some(loc) = resp.headers().get("location")
+                && let Ok(loc_str) = loc.to_str()
+            {
+                // Resolve relative redirects.
+                current_url = reqwest::Url::parse(loc_str).map_or_else(
+                    |_| {
+                        reqwest::Url::parse(&current_url).map_or_else(
+                            |_| loc_str.to_string(),
+                            |base| {
+                                base.join(loc_str)
+                                    .map_or_else(|_| loc_str.to_string(), |u| u.to_string())
+                            },
+                        )
+                    },
+                    |abs| abs.to_string(),
+                );
+                redirect_count += 1;
+                continue;
             }
             // No valid location header — treat as error.
             return LinkHealth {

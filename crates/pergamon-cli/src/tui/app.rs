@@ -152,14 +152,14 @@ impl App {
     }
 
     /// Move selection down in the list.
-    pub fn move_down(&mut self) {
+    pub const fn move_down(&mut self) {
         if !self.items.is_empty() && self.selected < self.items.len() - 1 {
             self.selected += 1;
         }
     }
 
     /// Open the selected item in the reader.
-    pub fn open_reader(&mut self) {
+    pub const fn open_reader(&mut self) {
         if !self.items.is_empty() {
             self.view = View::Reader;
             self.scroll = 0;
@@ -212,7 +212,7 @@ impl App {
     }
 
     /// Clamp the selected index to the current items length.
-    pub fn clamp_selection(&mut self) {
+    pub const fn clamp_selection(&mut self) {
         if self.items.is_empty() {
             self.selected = 0;
         } else if self.selected >= self.items.len() {

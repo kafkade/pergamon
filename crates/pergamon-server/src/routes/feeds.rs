@@ -440,10 +440,10 @@ fn import_outlines(
 
             let folder_id = get_or_create_folder(db, folder_name, parent_folder_id)?;
 
-            if let Some(existing) = db.get_feed_folder_by_name(folder_name, parent_folder_id)? {
-                if existing.id == folder_id {
-                    stats.folders_existing += 1;
-                }
+            if let Some(existing) = db.get_feed_folder_by_name(folder_name, parent_folder_id)?
+                && existing.id == folder_id
+            {
+                stats.folders_existing += 1;
             }
 
             import_outlines(db, &outline.children, Some(folder_id), stats)?;

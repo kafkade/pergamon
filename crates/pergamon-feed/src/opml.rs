@@ -123,12 +123,12 @@ pub fn parse_opml(bytes: &[u8]) -> Result<OpmlDocument, FeedError> {
                 b"body" => in_body = false,
                 b"outline" if in_body => {
                     // Pop the folder from the stack.
-                    if let Some(mut children) = outline_stack.pop() {
-                        if let Some(mut folder) = children.first().cloned() {
-                            children.remove(0);
-                            folder.children = children;
-                            push_outline(&mut outline_stack, &mut root_outlines, folder);
-                        }
+                    if let Some(mut children) = outline_stack.pop()
+                        && let Some(mut folder) = children.first().cloned()
+                    {
+                        children.remove(0);
+                        folder.children = children;
+                        push_outline(&mut outline_stack, &mut root_outlines, folder);
                     }
                 }
                 _ => {}
