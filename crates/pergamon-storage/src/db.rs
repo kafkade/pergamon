@@ -3041,6 +3041,35 @@ impl Database {
         Ok(tags)
     }
 
+    /// List all tags with their item counts, ordered by count descending.
+    ///
+    /// Returns a [`TagCount`] for every tag that has at least one associated
+    /// content item. Tags with zero items are excluded.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails.
+    pub fn list_tags_with_counts(&self) -> Result<Vec<TagCount>, StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT t.name, COUNT(*) AS cnt \
+             FROM tags t \
+             JOIN content_item_tags cit ON cit.tag_id = t.id \
+             GROUP BY t.name \
+             ORDER BY cnt DESC, t.name COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(TagCount {
+                tag_name: r.get(0)?,
+                count: r.get(1)?,
+            })
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
     // ------------------------------------------------------------------
     // Bulk operations
     // ------------------------------------------------------------------

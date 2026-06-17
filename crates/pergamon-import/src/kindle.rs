@@ -111,15 +111,16 @@ fn parse_title_author(line: &str) -> (String, Option<String>) {
     // Some Kindle files have a Unicode BOM per-line or invisible chars
     let line = line.trim_start_matches('\u{feff}');
 
-    if let Some(paren_pos) = line.rfind('(') {
-        if line.ends_with(')') && paren_pos > 0 {
-            let title = line[..paren_pos].trim().to_owned();
-            let author = line[paren_pos + 1..line.len() - 1].trim().to_owned();
-            if !author.is_empty() {
-                return (title, Some(author));
-            }
-            return (title, None);
+    if let Some(paren_pos) = line.rfind('(')
+        && line.ends_with(')')
+        && paren_pos > 0
+    {
+        let title = line[..paren_pos].trim().to_owned();
+        let author = line[paren_pos + 1..line.len() - 1].trim().to_owned();
+        if !author.is_empty() {
+            return (title, Some(author));
         }
+        return (title, None);
     }
     (line.to_owned(), None)
 }

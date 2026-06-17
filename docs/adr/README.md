@@ -21,3 +21,4 @@ They follow the [MADR](https://adr.github.io/madr/) format.
 | [ADR-010](010-bookmark-vs-article-unified-content-model.md) | Bookmark vs Article — Unified Content Model | Accepted |
 | [ADR-016](016-web-architecture-and-wasm-boundary.md) | Web Architecture and WASM Boundary | Accepted |
 | [ADR-017](017-auth-session-model.md) | Auth and Session Model for Web App | Accepted |
+| [ADR-018](018-docker-deployment.md) | Docker Deployment and Server Persistence | Accepted |

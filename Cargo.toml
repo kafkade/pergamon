@@ -8,12 +8,13 @@ members = [
     "crates/pergamon-import",
     "crates/pergamon-export",
     "crates/pergamon-cli",
+    "crates/pergamon-server",
 ]
 
 [workspace.package]
 version = "0.6.1"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.95"
 license = "Apache-2.0"
 repository = "https://github.com/kafkade/pergamon"
 homepage = "https://github.com/kafkade/pergamon"
@@ -27,6 +28,15 @@ pergamon-feed = { path = "crates/pergamon-feed", version = "0.6.1" }
 pergamon-extract = { path = "crates/pergamon-extract", version = "0.6.1" }
 pergamon-import = { path = "crates/pergamon-import", version = "0.6.1" }
 pergamon-export = { path = "crates/pergamon-export", version = "0.6.1" }
+
+pergamon-server = { path = "crates/pergamon-server", version = "0.6.1" }
+
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["compression-gzip", "cors", "trace", "fs"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
@@ -42,10 +52,10 @@ quick-xml = "0.40"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 readabilityrs = "0.1"
 ammonia = "4"
-scraper = "0.25"
+scraper = "0.27"
 csv = "1"
 url = "2"
-lopdf = "0.40"
+lopdf = "0.41"
 ratatui = "0.30"
 crossterm = "0.29"
 open = "5"
