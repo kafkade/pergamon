@@ -127,7 +127,7 @@ impl SmartFilter {
 
     /// Whether this filter has no predicates.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.predicates.is_empty()
     }
 
@@ -216,16 +216,15 @@ fn tokenize(query: &str) -> Vec<&str> {
             }
             chars.next();
             // If we hit a quote after ':', consume until closing quote.
-            if c == ':' {
-                if let Some(&(_, q)) = chars.peek() {
-                    if q == '"' || q == '\'' {
-                        chars.next(); // skip opening quote
-                        while let Some(&(_, ch)) = chars.peek() {
-                            chars.next();
-                            if ch == q {
-                                break;
-                            }
-                        }
+            if c == ':'
+                && let Some(&(_, q)) = chars.peek()
+                && (q == '"' || q == '\'')
+            {
+                chars.next(); // skip opening quote
+                while let Some(&(_, ch)) = chars.peek() {
+                    chars.next();
+                    if ch == q {
+                        break;
                     }
                 }
             }
