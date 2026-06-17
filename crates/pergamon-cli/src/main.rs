@@ -3071,9 +3071,8 @@ fn resolve_source(db: &Database, source: &str) -> Result<Uuid> {
 
 /// Parse a YYYY-MM-DD date argument into an `OffsetDateTime` at midnight UTC.
 fn parse_date_arg(s: &str) -> Result<OffsetDateTime> {
-    let format =
-        time::format_description::parse("[year]-[month]-[day]").context("invalid date format")?;
-    let date = time::Date::parse(s, &format)
+    let format = time::macros::format_description!("[year]-[month]-[day]");
+    let date = time::Date::parse(s, format)
         .with_context(|| format!("invalid date: {s} (expected YYYY-MM-DD)"))?;
     Ok(date
         .with_hms(0, 0, 0)
