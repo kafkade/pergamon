@@ -132,10 +132,10 @@ pub fn evaluate_rules(ctx: &mut MatchContext<'_>, rules: &[ContentRule]) -> Vec<
             for action in &rule.actions {
                 // Update context for chaining: tag additions are visible
                 // to subsequent rules.
-                if let RuleAction::AddTag(tag) = action {
-                    if !ctx.tags.iter().any(|t| t.eq_ignore_ascii_case(tag)) {
-                        ctx.tags.push(tag.clone());
-                    }
+                if let RuleAction::AddTag(tag) = action
+                    && !ctx.tags.iter().any(|t| t.eq_ignore_ascii_case(tag))
+                {
+                    ctx.tags.push(tag.clone());
                 }
 
                 planned.push(PlannedAction {
