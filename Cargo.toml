@@ -34,7 +34,7 @@ pergamon-server = { path = "crates/pergamon-server", version = "0.6.1" }
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net"] }
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.6", features = ["compression-gzip", "cors", "trace", "fs"] }
+tower-http = { version = "0.7", features = ["compression-gzip", "cors", "trace", "fs"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
