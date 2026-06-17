@@ -75,7 +75,12 @@ impl OpmlOutline {
 /// elements.
 pub fn parse_opml(bytes: &[u8]) -> Result<OpmlDocument, FeedError> {
     let mut reader = Reader::from_reader(bytes);
-    reader.config_mut().trim_text(true);
+    // NOTE: text is intentionally not trimmed here. Since quick-xml 0.40,
+    // entity references inside text (e.g. `&amp;`) are emitted as separate
+    // `Event::GeneralRef` events, splitting the surrounding text into multiple
+    // `Event::Text` events. Trimming each fragment would drop the whitespace
+    // adjacent to entities, so we accumulate raw fragments and trim the final
+    // title instead.
 
     let mut title = String::new();
     let mut in_head = false;
@@ -134,10 +139,25 @@ pub fn parse_opml(bytes: &[u8]) -> Result<OpmlDocument, FeedError> {
                 _ => {}
             },
             Ok(Event::Text(ref e)) if in_title => {
-                title = e
-                    .unescape()
-                    .map_err(|err| FeedError::Opml(format!("invalid title text: {err}")))?
-                    .into_owned();
+                let fragment = e
+                    .decode()
+                    .map_err(|err| FeedError::Opml(format!("invalid title text: {err}")))?;
+                title.push_str(&fragment);
+            }
+            Ok(Event::GeneralRef(ref e)) if in_title => {
+                if let Some(ch) = e
+                    .resolve_char_ref()
+                    .map_err(|err| FeedError::Opml(format!("invalid character reference: {err}")))?
+                {
+                    title.push(ch);
+                } else {
+                    let name = e.decode().map_err(|err| {
+                        FeedError::Opml(format!("invalid entity reference: {err}"))
+                    })?;
+                    let resolved = quick_xml::escape::resolve_predefined_entity(&name)
+                        .ok_or_else(|| FeedError::Opml(format!("unknown entity: &{name};")))?;
+                    title.push_str(resolved);
+                }
             }
             Ok(Event::Eof) => break,
             Err(e) => return Err(FeedError::Opml(format!("XML parse error: {e}"))),
@@ -147,7 +167,7 @@ pub fn parse_opml(bytes: &[u8]) -> Result<OpmlDocument, FeedError> {
     }
 
     Ok(OpmlDocument {
-        title,
+        title: title.trim().to_string(),
         outlines: root_outlines,
     })
 }
@@ -176,7 +196,7 @@ fn parse_outline_attrs(
         let attr = attr_result
             .map_err(|err| FeedError::Opml(format!("invalid outline attribute: {err}")))?;
         let value = attr
-            .decode_and_unescape_value(decoder)
+            .decoded_and_normalized_value(quick_xml::XmlVersion::Implicit1_0, decoder)
             .map_err(|err| FeedError::Opml(format!("invalid attribute value: {err}")))?
             .into_owned();
 
