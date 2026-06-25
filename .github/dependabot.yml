@@ -33,3 +33,9 @@ updates:
       github-actions:
         patterns:
           - "*"
+    ignore:
+      # The dtolnay/rust-toolchain ref pins our MSRV (e.g. @1.95), not an
+      # action release. Dependabot keeps "upgrading" it to non-existent Rust
+      # versions (see #89, #100), which breaks the MSRV CI job. Bump it
+      # manually when the MSRV changes.
+      - dependency-name: "dtolnay/rust-toolchain"
