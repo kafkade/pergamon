@@ -1837,6 +1837,36 @@ mod collection_tag_bulk {
         assert_eq!(items[0].id, uncollected.id);
     }
 
+    #[test]
+    fn sort_by_title_ascending() {
+        let db = test_db();
+        make_item(&db, "Charlie");
+        make_item(&db, "alpha");
+        make_item(&db, "Bravo");
+
+        let filter = pergamon_storage::ContentItemFilter {
+            sort: pergamon_storage::ContentItemSort::TitleAsc,
+            ..Default::default()
+        };
+        let items = db.list_content_items_filtered(&filter, None, None).unwrap();
+        let titles: Vec<&str> = items.iter().map(|i| i.title.as_str()).collect();
+        assert_eq!(titles, vec!["alpha", "Bravo", "Charlie"]);
+    }
+
+    #[test]
+    fn sort_default_is_created_desc() {
+        let db = test_db();
+        let first = make_item(&db, "First");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let second = make_item(&db, "Second");
+
+        let filter = pergamon_storage::ContentItemFilter::default();
+        let items = db.list_content_items_filtered(&filter, None, None).unwrap();
+        // Newest first.
+        assert_eq!(items[0].id, second.id);
+        assert_eq!(items[1].id, first.id);
+    }
+
     // ======================================================================
     // Bulk operation tests
     // ======================================================================

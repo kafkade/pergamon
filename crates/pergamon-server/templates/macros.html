@@ -1,0 +1,87 @@
+{#- Reusable markup fragments. Imported as `m` by page and fragment templates. -#}
+
+{% macro item_row(item) %}
+<li
+  class="item-row {% if item.is_read %}read{% else %}unread{% endif %}"
+  data-item-row
+  data-item-id="{{ item.id }}"
+  data-reader-url="{{ item.reader_url }}"
+  {% if item.has_url %}data-item-url="{{ item.url }}"{% endif %}
+>
+  <input class="select-box" type="checkbox" name="ids" value="{{ item.id }}" form="bulk-form" aria-label="Select item" />
+  {% if item.favicon_url != "" %}
+  <img class="item-favicon" src="{{ item.favicon_url }}" alt="" loading="lazy" />
+  {% else %}
+  <span class="item-favicon" aria-hidden="true">•</span>
+  {% endif %}
+  <div class="item-body">
+    <p class="item-title"><a href="{{ item.reader_url }}">{{ item.title }}</a></p>
+    <div class="item-meta">
+      <span class="item-source">{{ item.source }}</span>
+      <span class="item-type">{{ item.type_label }}</span>
+      {% if item.date != "" %}<span class="item-date">{{ item.date }}</span>{% endif %}
+      <span class="item-status">{{ item.status }}</span>
+    </div>
+    {% if item.excerpt != "" %}<p class="item-excerpt">{{ item.excerpt }}</p>{% endif %}
+  </div>
+  <div class="item-actions">
+    <form
+      method="post"
+      action="/items/{{ item.id }}/status"
+      hx-post="/items/{{ item.id }}/status"
+      hx-target="closest .item-row"
+      hx-swap="outerHTML"
+    >
+      <input type="hidden" name="action" value="read" />
+      <button type="submit" class="secondary outline" data-action="read" title="Mark read (r)">✓</button>
+    </form>
+    <form
+      method="post"
+      action="/items/{{ item.id }}/status"
+      hx-post="/items/{{ item.id }}/status"
+      hx-target="closest .item-row"
+      hx-swap="outerHTML"
+    >
+      <input type="hidden" name="action" value="later" />
+      <button type="submit" class="secondary outline" data-action="later" title="Read later (l)">⏰</button>
+    </form>
+    <form
+      method="post"
+      action="/items/{{ item.id }}/status"
+      hx-post="/items/{{ item.id }}/status"
+      hx-target="closest .item-row"
+      hx-swap="outerHTML"
+    >
+      <input type="hidden" name="action" value="archive" />
+      <button type="submit" class="secondary outline" data-action="archive" title="Archive (a)">📥</button>
+    </form>
+    {% if item.has_url %}
+    <a
+      class="secondary outline"
+      role="button"
+      href="{{ item.url }}"
+      target="_blank"
+      rel="noopener"
+      data-action="open"
+      title="Open original (o)"
+    >↗</a>
+    {% endif %}
+  </div>
+</li>
+{% endmacro %}
+
+{% macro tag_chip(item_id, tag) %}
+<span class="tag-chip">
+  #{{ tag }}
+  <form
+    method="post"
+    action="/items/{{ item_id }}/tags/{{ tag }}/delete"
+    hx-post="/items/{{ item_id }}/tags/{{ tag }}/delete"
+    hx-target="#tag-section"
+    hx-swap="outerHTML"
+    style="display:inline"
+  >
+    <button type="submit" aria-label="Remove tag {{ tag }}">×</button>
+  </form>
+</span>
+{% endmacro %}
