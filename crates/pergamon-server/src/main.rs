@@ -11,6 +11,7 @@ mod error;
 mod pagination;
 mod routes;
 mod state;
+mod util;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -735,5 +736,427 @@ mod tests {
             .unwrap();
         let response = app.oneshot(req).await.unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ── Test data helpers ──────────────────────────────────────────
+
+    /// Insert a content item directly into the database, returning its ID.
+    fn insert_item(state: &AppState, title: &str, content_text: Option<&str>) -> uuid::Uuid {
+        let now = time::OffsetDateTime::now_utc();
+        let id = uuid::Uuid::new_v4();
+        let item = pergamon_core::model::ContentItem {
+            id,
+            url: Some(format!("https://example.com/{id}")),
+            title: title.to_owned(),
+            author: None,
+            content_type: pergamon_core::content_type::ContentType::Article,
+            status: pergamon_core::status::DocumentStatus::Inbox,
+            content_text: content_text.map(str::to_owned),
+            excerpt: None,
+            published_at: None,
+            created_at: now,
+            updated_at: now,
+            read_at: None,
+        };
+        let db = state.db.lock().unwrap();
+        db.insert_content_item(&item).unwrap();
+        id
+    }
+
+    /// Read a response body as JSON.
+    async fn json_body(response: axum::response::Response) -> serde_json::Value {
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    // ── Search ─────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn search_requires_query() {
+        let app = test_app();
+        let req = Request::get("/api/search?q=").body(Body::empty()).unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn search_returns_ranked_hits() {
+        let state = test_state();
+        insert_item(&state, "Rust Async", Some("the quick brown fox jumps"));
+        let app = build_router(state, None);
+
+        let req = Request::get("/api/search?q=quick")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let hits = json_body(response).await;
+        let arr = hits.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert!(arr[0]["rank"].is_number());
+        assert_eq!(arr[0]["item"]["title"], "Rust Async");
+    }
+
+    #[tokio::test]
+    async fn search_invalid_date_is_bad_request() {
+        let app = test_app();
+        let req = Request::get("/api/search?q=foo&since=not-a-date")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // ── Saved searches ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn saved_searches_empty() {
+        let app = test_app();
+        let req = Request::get("/api/saved-searches")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let arr = json_body(response).await;
+        assert!(arr.as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn saved_search_create_and_list() {
+        let state = test_state();
+        let app = build_router(state, None);
+
+        let body = serde_json::json!({ "name": "Rust later", "filter_query": "status:later" });
+        let req = Request::post("/api/saved-searches")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let response = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let created = json_body(response).await;
+        assert_eq!(created["name"], "Rust later");
+        assert_eq!(created["is_smart"], true);
+
+        let req = Request::get("/api/saved-searches")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        let arr = json_body(response).await;
+        assert_eq!(arr.as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn saved_search_invalid_filter_rejected() {
+        let app = test_app();
+        let body = serde_json::json!({ "name": "Bad", "filter_query": "" });
+        let req = Request::post("/api/saved-searches")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // ── Highlights ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn highlights_empty() {
+        let app = test_app();
+        let req = Request::get("/api/highlights").body(Body::empty()).unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let arr = json_body(response).await;
+        assert!(arr.as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn highlight_create_list_patch_delete() {
+        let state = test_state();
+        let source_id = insert_item(&state, "Source", Some("a memorable passage here"));
+        let app = build_router(state, None);
+
+        // Create.
+        let body = serde_json::json!({ "quote_text": "memorable passage", "color": "yellow" });
+        let req = Request::post(format!("/api/items/{source_id}/highlights"))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let response = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let created = json_body(response).await;
+        let highlight_id = created["id"].as_str().unwrap().to_owned();
+        assert_eq!(created["highlight"]["color"], "yellow");
+
+        // List for the source item.
+        let req = Request::get(format!("/api/items/{source_id}/highlights"))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(req).await.unwrap();
+        let arr = json_body(response).await;
+        assert_eq!(arr.as_array().unwrap().len(), 1);
+
+        // Patch the note.
+        let body = serde_json::json!({ "note": "my thoughts" });
+        let req = Request::patch(format!("/api/highlights/{highlight_id}"))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let response = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let patched = json_body(response).await;
+        assert_eq!(patched["highlight"]["note"], "my thoughts");
+        // Color preserved across a note-only patch.
+        assert_eq!(patched["highlight"]["color"], "yellow");
+
+        // Delete.
+        let req = Request::delete(format!("/api/highlights/{highlight_id}"))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn create_highlight_missing_item() {
+        let app = test_app();
+        let id = uuid::Uuid::new_v4();
+        let body = serde_json::json!({ "quote_text": "x" });
+        let req = Request::post(format!("/api/items/{id}/highlights"))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn patch_highlight_not_found() {
+        let app = test_app();
+        let id = uuid::Uuid::new_v4();
+        let body = serde_json::json!({ "note": "x" });
+        let req = Request::patch(format!("/api/highlights/{id}"))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ── Notes ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn note_create_list_patch_delete() {
+        let state = test_state();
+        let item_id = insert_item(&state, "Item", None);
+        let app = build_router(state, None);
+
+        // Create.
+        let body = serde_json::json!({ "body": "first note" });
+        let req = Request::post(format!("/api/items/{item_id}/notes"))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let response = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let created = json_body(response).await;
+        let note_id = created["id"].as_str().unwrap().to_owned();
+        assert_eq!(created["body"], "first note");
+
+        // List.
+        let req = Request::get(format!("/api/items/{item_id}/notes"))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(req).await.unwrap();
+        let arr = json_body(response).await;
+        assert_eq!(arr.as_array().unwrap().len(), 1);
+
+        // Patch.
+        let body = serde_json::json!({ "body": "edited note" });
+        let req = Request::patch(format!("/api/notes/{note_id}"))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let response = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let patched = json_body(response).await;
+        assert_eq!(patched["body"], "edited note");
+
+        // Delete.
+        let req = Request::delete(format!("/api/notes/{note_id}"))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn create_note_missing_item() {
+        let app = test_app();
+        let id = uuid::Uuid::new_v4();
+        let body = serde_json::json!({ "body": "x" });
+        let req = Request::post(format!("/api/items/{id}/notes"))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn delete_note_not_found() {
+        let app = test_app();
+        let id = uuid::Uuid::new_v4();
+        let req = Request::delete(format!("/api/notes/{id}"))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ── Review ─────────────────────────────────────────────────────
+
+    /// Create a highlight with a review card, returning the card ID.
+    fn enable_review(state: &AppState) -> uuid::Uuid {
+        let source_id = insert_item(state, "Review Source", Some("the studied fact"));
+        let db = state.db.lock().unwrap();
+        let highlight = db
+            .create_highlight(source_id, "the studied fact", None, None)
+            .unwrap();
+        let now = time::OffsetDateTime::now_utc();
+        let card = pergamon_core::model::ReviewCard {
+            id: uuid::Uuid::new_v4(),
+            content_item_id: highlight.id,
+            state: pergamon_core::fsrs::CardState::New,
+            stability: None,
+            difficulty: None,
+            due_at: now,
+            last_reviewed_at: None,
+            review_count: 0,
+            lapse_count: 0,
+            scheduled_days: None,
+            created_at: now,
+            updated_at: now,
+        };
+        db.insert_review_card(&card).unwrap();
+        drop(db);
+        card.id
+    }
+
+    #[tokio::test]
+    async fn review_queue_empty() {
+        let app = test_app();
+        let req = Request::get("/api/review/queue")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let arr = json_body(response).await;
+        assert!(arr.as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn review_queue_and_submit() {
+        let state = test_state();
+        let card_id = enable_review(&state);
+        let app = build_router(state, None);
+
+        // Queue contains the new (due) card.
+        let req = Request::get("/api/review/queue")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(req).await.unwrap();
+        let arr = json_body(response).await;
+        assert_eq!(arr.as_array().unwrap().len(), 1);
+
+        // Submit a "good" rating; FSRS schedules it into the future.
+        let body = serde_json::json!({ "rating": "good" });
+        let req = Request::post(format!("/api/review/{card_id}"))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let response = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let updated = json_body(response).await;
+        assert_eq!(updated["review_count"], 1);
+        assert_eq!(updated["state"], "review");
+
+        // Card is no longer due.
+        let req = Request::get("/api/review/queue")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        let arr = json_body(response).await;
+        assert!(arr.as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn submit_review_unknown_card() {
+        let app = test_app();
+        let id = uuid::Uuid::new_v4();
+        let body = serde_json::json!({ "rating": "good" });
+        let req = Request::post(format!("/api/review/{id}"))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn submit_review_invalid_rating() {
+        let state = test_state();
+        let card_id = enable_review(&state);
+        let app = build_router(state, None);
+        let body = serde_json::json!({ "rating": "amazing" });
+        let req = Request::post(format!("/api/review/{card_id}"))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        // Invalid enum value fails JSON deserialization → 422.
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn review_stats_ok() {
+        let app = test_app();
+        let req = Request::get("/api/review/stats")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let report = json_body(response).await;
+        assert_eq!(report["stats"]["total_cards"], 0);
+    }
+
+    // ── Statistics ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn stats_usage_ok() {
+        let state = test_state();
+        insert_item(&state, "An Item", Some("body text"));
+        let app = build_router(state, None);
+        let req = Request::get("/api/stats/usage")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let report = json_body(response).await;
+        assert_eq!(report["overview"]["total_items"], 1);
+    }
+
+    #[tokio::test]
+    async fn stats_review_ok() {
+        let app = test_app();
+        let req = Request::get("/api/stats/review")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let report = json_body(response).await;
+        assert!(report["stats"].is_object());
     }
 }

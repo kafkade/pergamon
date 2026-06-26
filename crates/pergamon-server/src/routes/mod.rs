@@ -5,13 +5,18 @@
 pub mod collections;
 pub mod feeds;
 pub mod health;
+pub mod highlights;
 pub mod items;
+pub mod notes;
+pub mod review;
+pub mod search;
 pub mod static_assets;
+pub mod stats;
 pub mod tags;
 pub mod web;
 
 use axum::Router;
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, patch, post};
 
 use crate::state::AppState;
 
@@ -64,4 +69,36 @@ pub fn api_router() -> Router<AppState> {
             "/api/collections/{id}/items",
             get(collections::list_collection_items).post(collections::add_collection_items),
         )
+        // Search
+        .route("/api/search", get(search::search))
+        .route(
+            "/api/saved-searches",
+            get(search::list_saved_searches).post(search::create_saved_search),
+        )
+        // Highlights
+        .route("/api/highlights", get(highlights::list_highlights))
+        .route(
+            "/api/items/{id}/highlights",
+            get(highlights::list_item_highlights).post(highlights::create_highlight),
+        )
+        .route(
+            "/api/highlights/{id}",
+            patch(highlights::update_highlight).delete(highlights::delete_highlight),
+        )
+        // Notes
+        .route(
+            "/api/items/{id}/notes",
+            get(notes::list_item_notes).post(notes::create_note),
+        )
+        .route(
+            "/api/notes/{id}",
+            patch(notes::update_note).delete(notes::delete_note),
+        )
+        // Review (FSRS)
+        .route("/api/review/queue", get(review::review_queue))
+        .route("/api/review/{card_id}", post(review::submit_review))
+        .route("/api/review/stats", get(review::review_stats))
+        // Statistics
+        .route("/api/stats/usage", get(stats::usage_stats))
+        .route("/api/stats/review", get(stats::review_stats))
 }

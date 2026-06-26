@@ -906,6 +906,30 @@ impl Database {
         Ok(())
     }
 
+    /// Update the note and color fields on an existing highlight.
+    ///
+    /// Both fields are set to the provided values (which may be `None` to
+    /// clear them). Callers wanting PATCH semantics should read the existing
+    /// [`HighlightMeta`] first and merge in only the changed fields.
+    pub fn update_highlight_meta(
+        &self,
+        content_item_id: Uuid,
+        note: Option<&str>,
+        color: Option<&str>,
+    ) -> Result<(), StorageError> {
+        let affected = self.conn.execute(
+            "UPDATE highlight_meta SET note = ?1, color = ?2 WHERE content_item_id = ?3",
+            params![note, color, content_item_id.to_string()],
+        )?;
+        if affected == 0 {
+            return Err(StorageError::NotFound {
+                entity: "highlight_meta",
+                id: content_item_id.to_string(),
+            });
+        }
+        Ok(())
+    }
+
     /// List highlights with optional filters.
     ///
     /// Returns `(ContentItem, HighlightMeta)` pairs sorted by creation date
