@@ -1,0 +1,356 @@
+/*
+ * pergamon web UI — overrides on top of Pico CSS.
+ * SPDX-License-Identifier: AGPL-3.0-only
+ */
+
+:root {
+  --pergamon-sidebar-width: 16rem;
+  --pergamon-spacing-tight: 0.4rem;
+}
+
+/* ----------------------------------------------------------------- */
+/* Layout: sidebar + main                                            */
+/* ----------------------------------------------------------------- */
+
+body > header.app-header {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  margin: 0;
+  padding: 0.6rem 1rem;
+  border-bottom: 1px solid var(--pico-muted-border-color);
+  background: var(--pico-background-color);
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+body > header.app-header .brand {
+  font-weight: 700;
+  font-size: 1.1rem;
+  text-decoration: none;
+}
+
+.app-shell {
+  display: grid;
+  grid-template-columns: var(--pergamon-sidebar-width) 1fr;
+  gap: 0;
+  min-height: calc(100vh - 3.6rem);
+}
+
+.app-sidebar {
+  border-right: 1px solid var(--pico-muted-border-color);
+  padding: 1rem;
+  overflow-y: auto;
+  max-height: calc(100vh - 3.6rem);
+  position: sticky;
+  top: 3.6rem;
+}
+
+.app-main {
+  padding: 1rem 1.5rem;
+  min-width: 0;
+}
+
+/* Responsive: collapse the sidebar on narrow/tablet viewports. */
+@media (max-width: 768px) {
+  .app-shell {
+    grid-template-columns: 1fr;
+  }
+  .app-sidebar {
+    position: static;
+    max-height: none;
+    border-right: none;
+    border-bottom: 1px solid var(--pico-muted-border-color);
+  }
+}
+
+/* ----------------------------------------------------------------- */
+/* Sidebar navigation                                                 */
+/* ----------------------------------------------------------------- */
+
+.app-sidebar nav ul {
+  list-style: none;
+  margin: 0 0 1rem 0;
+  padding: 0;
+}
+
+.app-sidebar nav h6 {
+  margin: 0.8rem 0 0.3rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 0.7rem;
+  color: var(--pico-muted-color);
+}
+
+.app-sidebar nav a {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+  padding: 0.25rem 0.5rem;
+  border-radius: var(--pico-border-radius);
+  text-decoration: none;
+  color: inherit;
+}
+
+.app-sidebar nav a:hover {
+  background: var(--pico-secondary-background);
+}
+
+.app-sidebar nav a.active {
+  background: var(--pico-primary-background);
+  color: var(--pico-primary-inverse);
+}
+
+.app-sidebar nav a .count {
+  font-size: 0.75rem;
+  color: var(--pico-muted-color);
+}
+
+.app-sidebar .folder-feeds {
+  margin-left: 0.6rem;
+}
+
+/* ----------------------------------------------------------------- */
+/* Filter / sort bar                                                  */
+/* ----------------------------------------------------------------- */
+
+.filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.filter-bar form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0;
+}
+
+.filter-bar select,
+.filter-bar input {
+  margin: 0;
+  width: auto;
+  padding: 0.3rem 0.5rem;
+}
+
+/* ----------------------------------------------------------------- */
+/* Item list                                                          */
+/* ----------------------------------------------------------------- */
+
+ul.item-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+li.item-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.7rem;
+  padding: 0.7rem 0.5rem;
+  border-bottom: 1px solid var(--pico-muted-border-color);
+}
+
+li.item-row.selected {
+  background: var(--pico-secondary-background);
+  outline: 2px solid var(--pico-primary);
+  outline-offset: -2px;
+}
+
+li.item-row.read .item-title a {
+  color: var(--pico-muted-color);
+  font-weight: 400;
+}
+
+li.item-row.unread .item-title a {
+  font-weight: 600;
+}
+
+.item-row .item-favicon {
+  width: 16px;
+  height: 16px;
+  margin-top: 0.2rem;
+  flex: 0 0 16px;
+  object-fit: contain;
+}
+
+.item-row .item-body {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.item-row .item-title {
+  margin: 0;
+  font-size: 1rem;
+  line-height: 1.3;
+}
+
+.item-row .item-title a {
+  text-decoration: none;
+}
+
+.item-row .item-meta {
+  font-size: 0.78rem;
+  color: var(--pico-muted-color);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.15rem;
+}
+
+.item-row .item-excerpt {
+  font-size: 0.85rem;
+  color: var(--pico-muted-color);
+  margin: 0.3rem 0 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.item-row .item-actions {
+  display: flex;
+  gap: 0.3rem;
+  flex: 0 0 auto;
+}
+
+.item-row .item-actions button {
+  margin: 0;
+  padding: 0.2rem 0.5rem;
+  font-size: 0.78rem;
+  width: auto;
+}
+
+.item-row .select-box {
+  margin-top: 0.25rem;
+}
+
+/* ----------------------------------------------------------------- */
+/* Bulk action bar                                                    */
+/* ----------------------------------------------------------------- */
+
+.bulk-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.bulk-bar button {
+  margin: 0;
+  padding: 0.25rem 0.6rem;
+  width: auto;
+  font-size: 0.8rem;
+}
+
+/* ----------------------------------------------------------------- */
+/* Pagination                                                         */
+/* ----------------------------------------------------------------- */
+
+nav.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+nav.pagination a[aria-disabled="true"] {
+  pointer-events: none;
+  opacity: 0.4;
+}
+
+/* ----------------------------------------------------------------- */
+/* Reader                                                             */
+/* ----------------------------------------------------------------- */
+
+.reader {
+  max-width: 44rem;
+  margin: 0 auto;
+}
+
+.reader header.article-header {
+  margin-bottom: 1.5rem;
+}
+
+.reader header.article-header h1 {
+  margin-bottom: 0.4rem;
+}
+
+.reader .article-meta {
+  font-size: 0.85rem;
+  color: var(--pico-muted-color);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.reader .article-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 1rem 0;
+}
+
+.reader .article-controls button {
+  margin: 0;
+  width: auto;
+  padding: 0.3rem 0.7rem;
+  font-size: 0.85rem;
+}
+
+.reader .article-body {
+  line-height: 1.7;
+  font-size: 1.05rem;
+}
+
+.reader .article-body img {
+  max-width: 100%;
+  height: auto;
+}
+
+/* Tag chips */
+.tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-items: center;
+  margin: 0.5rem 0;
+}
+
+.tag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.1rem 0.5rem;
+  border-radius: 1rem;
+  background: var(--pico-secondary-background);
+  font-size: 0.78rem;
+}
+
+.tag-chip button {
+  margin: 0;
+  padding: 0;
+  width: auto;
+  background: none;
+  border: none;
+  color: var(--pico-muted-color);
+  font-size: 0.9rem;
+  line-height: 1;
+}
+
+/* Keyboard-help hint */
+.kbd-hint {
+  font-size: 0.75rem;
+  color: var(--pico-muted-color);
+}
+
+kbd {
+  font-size: 0.72rem;
+}

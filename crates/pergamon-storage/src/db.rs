@@ -30,6 +30,21 @@ use crate::error::StorageError;
 // Query filter
 // ======================================================================
 
+/// Sort order for content item listings.
+///
+/// Defaults to [`ContentItemSort::CreatedDesc`], matching the historical
+/// behaviour of the listing queries (newest first).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ContentItemSort {
+    /// Most recently captured first (default).
+    #[default]
+    CreatedDesc,
+    /// Alphabetical by title (case-insensitive).
+    TitleAsc,
+    /// Grouped by source feed title (case-insensitive), then newest first.
+    SourceAsc,
+}
+
 /// Filter criteria for querying content items.
 ///
 /// Combines multiple optional predicates. All specified predicates are
@@ -51,6 +66,8 @@ pub struct ContentItemFilter {
     pub collection_id: Option<Uuid>,
     /// Filter to items not in any collection.
     pub uncollected: bool,
+    /// Sort order for the results.
+    pub sort: ContentItemSort,
 }
 
 /// Filter criteria for full-text search queries.
@@ -3557,20 +3574,22 @@ fn build_content_item_query(
     offset: Option<u32>,
 ) -> (String, Vec<String>) {
     let mut param_values: Vec<String> = Vec::new();
-    let needs_join = filter.feed_id.is_some() || filter.folder_id.is_some();
+    let sort_by_source = filter.sort == ContentItemSort::SourceAsc;
+    let needs_fim = filter.feed_id.is_some() || filter.folder_id.is_some() || sort_by_source;
+    let needs_feeds = filter.folder_id.is_some() || sort_by_source;
 
-    let mut sql = if needs_join {
+    let mut sql = if needs_fim {
         format!(
             "{select_clause}
              FROM content_items ci
-             JOIN feed_item_meta fim ON fim.content_item_id = ci.id"
+             LEFT JOIN feed_item_meta fim ON fim.content_item_id = ci.id"
         )
     } else {
         format!("{select_clause} FROM content_items ci")
     };
 
-    if filter.folder_id.is_some() {
-        sql.push_str(" JOIN feeds f ON f.id = fim.feed_id");
+    if needs_feeds {
+        sql.push_str(" LEFT JOIN feeds f ON f.id = fim.feed_id");
     }
 
     sql.push_str(" WHERE 1=1");
@@ -3616,7 +3635,15 @@ fn build_content_item_query(
         );
     }
 
-    sql.push_str(" ORDER BY ci.created_at DESC");
+    match filter.sort {
+        ContentItemSort::CreatedDesc => sql.push_str(" ORDER BY ci.created_at DESC"),
+        ContentItemSort::TitleAsc => {
+            sql.push_str(" ORDER BY ci.title COLLATE NOCASE ASC, ci.created_at DESC");
+        }
+        ContentItemSort::SourceAsc => {
+            sql.push_str(" ORDER BY f.title COLLATE NOCASE ASC, ci.created_at DESC");
+        }
+    }
 
     if let Some(lim) = limit {
         let _ = write!(sql, " LIMIT {lim}");

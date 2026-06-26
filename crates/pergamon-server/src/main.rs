@@ -62,14 +62,21 @@ struct Args {
 
 /// Build the Axum router with all routes and middleware.
 fn build_router(state: AppState, static_dir: Option<&PathBuf>) -> Router {
-    let mut app = routes::api_router().with_state(state);
+    let mut app = routes::api_router();
 
-    // Mount static file serving when a directory is configured.
+    // Static assets: serve from a disk directory when configured (override),
+    // otherwise serve the assets embedded in the binary.
     if let Some(dir) = static_dir {
         app = app.nest_service("/static", ServeDir::new(dir));
+    } else {
+        app = app.route(
+            "/static/{file}",
+            axum::routing::get(routes::static_assets::serve),
+        );
     }
 
-    app.layer(CompressionLayer::new())
+    app.with_state(state)
+        .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
 }
 
@@ -191,6 +198,7 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
+    use pergamon_core::status::DocumentStatus;
     use tower::ServiceExt;
 
     /// Create an `AppState` backed by an in-memory database.
@@ -487,6 +495,247 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert!(response.headers().contains_key("x-total-count"));
         assert!(response.headers().contains_key("link"));
+    }
+
+    // ── Web UI (HTML) ──────────────────────────────────────────────
+
+    /// Insert a content item directly into a state's database.
+    fn seed_item(
+        state: &AppState,
+        title: &str,
+        status: pergamon_core::status::DocumentStatus,
+    ) -> uuid::Uuid {
+        let now = time::OffsetDateTime::now_utc();
+        let id = uuid::Uuid::new_v4();
+        let item = pergamon_core::model::ContentItem {
+            id,
+            url: Some(format!("https://example.com/{id}")),
+            title: title.to_owned(),
+            author: None,
+            content_type: pergamon_core::content_type::ContentType::Article,
+            status,
+            content_text: Some("First paragraph.\n\nSecond paragraph.".to_owned()),
+            excerpt: Some("An excerpt.".to_owned()),
+            published_at: None,
+            created_at: now,
+            updated_at: now,
+            read_at: None,
+        };
+        let db = state.db.lock().unwrap();
+        db.insert_content_item(&item).unwrap();
+        id
+    }
+
+    async fn body_string(response: axum::response::Response) -> String {
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn index_redirects_to_inbox() {
+        let app = test_app();
+        let req = Request::get("/").body(Body::empty()).unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(response.headers()["location"], "/inbox");
+    }
+
+    #[tokio::test]
+    async fn inbox_renders_full_page() {
+        let state = test_state();
+        seed_item(&state, "Hello Inbox", DocumentStatus::Inbox);
+        let app = build_router(state, None);
+
+        let req = Request::get("/inbox").body(Body::empty()).unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let html = body_string(response).await;
+        assert!(html.contains("<!DOCTYPE html>"));
+        assert!(html.contains("Hello Inbox"));
+        assert!(html.contains("app-sidebar"));
+    }
+
+    #[tokio::test]
+    async fn inbox_htmx_returns_list_fragment() {
+        let state = test_state();
+        seed_item(&state, "Fragment Item", DocumentStatus::Inbox);
+        let app = build_router(state, None);
+
+        let req = Request::get("/inbox")
+            .header("HX-Request", "true")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let html = body_string(response).await;
+        assert!(!html.contains("<!DOCTYPE html>"));
+        assert!(html.contains("id=\"item-list\""));
+        assert!(html.contains("Fragment Item"));
+    }
+
+    #[tokio::test]
+    async fn inbox_accepts_filters_and_sort() {
+        let app = test_app();
+        let req = Request::get("/inbox?status=later&type=article&sort=title&page=1&per_page=10")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn reader_renders_item() {
+        let state = test_state();
+        let id = seed_item(&state, "Readable Article", DocumentStatus::Inbox);
+        let app = build_router(state, None);
+
+        let req = Request::get(format!("/items/{id}"))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let html = body_string(response).await;
+        assert!(html.contains("Readable Article"));
+        assert!(html.contains("First paragraph."));
+        assert!(html.contains("Second paragraph."));
+    }
+
+    #[tokio::test]
+    async fn reader_missing_item_is_not_found() {
+        let app = test_app();
+        let id = uuid::Uuid::new_v4();
+        let req = Request::get(format!("/items/{id}"))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn status_htmx_returns_row_fragment() {
+        let state = test_state();
+        let id = seed_item(&state, "Triage Me", DocumentStatus::Inbox);
+        let app = build_router(state, None);
+
+        let req = Request::post(format!("/items/{id}/status"))
+            .header("HX-Request", "true")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("action=archive"))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let html = body_string(response).await;
+        assert!(html.contains("data-item-row"));
+        assert!(html.contains("item-row read"));
+    }
+
+    #[tokio::test]
+    async fn status_htmx_reader_returns_status_text() {
+        let state = test_state();
+        let id = seed_item(&state, "Reader Triage", DocumentStatus::Inbox);
+        let app = build_router(state, None);
+
+        let req = Request::post(format!("/items/{id}/status"))
+            .header("HX-Request", "true")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("action=later&view=status"))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let text = body_string(response).await;
+        assert_eq!(text.trim(), "later");
+    }
+
+    #[tokio::test]
+    async fn status_without_htmx_redirects() {
+        let state = test_state();
+        let id = seed_item(&state, "NoJs Triage", DocumentStatus::Inbox);
+        let app = build_router(state, None);
+
+        let req = Request::post(format!("/items/{id}/status"))
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("action=archive"))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(response.headers()["location"], "/inbox");
+    }
+
+    #[tokio::test]
+    async fn bulk_action_returns_list_fragment() {
+        let state = test_state();
+        let id1 = seed_item(&state, "Bulk One", DocumentStatus::Inbox);
+        let id2 = seed_item(&state, "Bulk Two", DocumentStatus::Inbox);
+        let app = build_router(state, None);
+
+        let req = Request::post("/items/bulk")
+            .header("HX-Request", "true")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from(format!("action=later&ids={id1}&ids={id2}")))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let html = body_string(response).await;
+        assert!(html.contains("id=\"item-list\""));
+    }
+
+    #[tokio::test]
+    async fn add_and_remove_tag() {
+        let state = test_state();
+        let id = seed_item(&state, "Tagged", DocumentStatus::Inbox);
+        let app = build_router(state.clone(), None);
+
+        let req = Request::post(format!("/items/{id}/tags"))
+            .header("HX-Request", "true")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("name=rust"))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = body_string(response).await;
+        assert!(html.contains("rust"));
+
+        let app = build_router(state, None);
+        let req = Request::post(format!("/items/{id}/tags/rust/delete"))
+            .header("HX-Request", "true")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = body_string(response).await;
+        assert!(!html.contains(">rust<"));
+    }
+
+    #[tokio::test]
+    async fn static_asset_is_served() {
+        let app = test_app();
+        let req = Request::get("/static/app.css").body(Body::empty()).unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response.headers()["content-type"]
+                .to_str()
+                .unwrap()
+                .contains("text/css")
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_static_asset_is_not_found() {
+        let app = test_app();
+        let req = Request::get("/static/nope.xyz")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     // ── Test data helpers ──────────────────────────────────────────

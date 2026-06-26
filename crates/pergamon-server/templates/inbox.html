@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+
+{% block title %}Inbox · pergamon{% endblock %}
+{% block page %}inbox{% endblock %}
+
+{% block content %}
+<div class="app-shell">
+  <aside class="app-sidebar">
+    <nav>
+      <h6>Library</h6>
+      <ul>
+        {% for link in sidebar.status_links %}
+        <li>
+          <a href="{{ link.href }}" class="{% if link.active %}active{% endif %}">
+            <span>{{ link.label }}</span>
+            <span class="count">{{ link.count }}</span>
+          </a>
+        </li>
+        {% endfor %}
+      </ul>
+
+      {% if !sidebar.folders.is_empty() || !sidebar.feeds_root.is_empty() %}
+      <h6>Feeds</h6>
+      <ul>
+        {% for folder in sidebar.folders %}
+        <li>
+          <a href="{{ folder.href }}" class="{% if folder.active %}active{% endif %}">
+            <span>📁 {{ folder.name }}</span>
+          </a>
+          <ul class="folder-feeds">
+            {% for feed in folder.feeds %}
+            <li>
+              <a href="{{ feed.href }}" class="{% if feed.active %}active{% endif %}">
+                <span>{{ feed.title }}</span>
+                <span class="count">{{ feed.count }}</span>
+              </a>
+            </li>
+            {% endfor %}
+          </ul>
+        </li>
+        {% endfor %}
+        {% for feed in sidebar.feeds_root %}
+        <li>
+          <a href="{{ feed.href }}" class="{% if feed.active %}active{% endif %}">
+            <span>{{ feed.title }}</span>
+            <span class="count">{{ feed.count }}</span>
+          </a>
+        </li>
+        {% endfor %}
+      </ul>
+      {% endif %}
+
+      {% if !sidebar.tags.is_empty() %}
+      <h6>Tags</h6>
+      <ul>
+        {% for link in sidebar.tags %}
+        <li>
+          <a href="{{ link.href }}" class="{% if link.active %}active{% endif %}">
+            <span>#{{ link.label }}</span>
+            <span class="count">{{ link.count }}</span>
+          </a>
+        </li>
+        {% endfor %}
+      </ul>
+      {% endif %}
+    </nav>
+  </aside>
+
+  <main class="app-main">
+    <div class="filter-bar">
+      <form
+        method="get"
+        action="/inbox"
+        hx-get="/inbox"
+        hx-target="#item-list"
+        hx-swap="outerHTML"
+        hx-push-url="true"
+      >
+        {% if filter.feed != "" %}<input type="hidden" name="feed" value="{{ filter.feed }}" />{% endif %}
+        {% if filter.folder != "" %}<input type="hidden" name="folder" value="{{ filter.folder }}" />{% endif %}
+
+        <select name="status" aria-label="Status" hx-trigger="change" hx-get="/inbox" hx-target="#item-list" hx-swap="outerHTML" hx-include="closest form" hx-push-url="true">
+          <option value="" {% if filter.status == "" %}selected{% endif %}>All statuses</option>
+          {% for opt in filter.statuses %}
+          <option value="{{ opt }}" {% if filter.status == opt.as_str() %}selected{% endif %}>{{ opt }}</option>
+          {% endfor %}
+        </select>
+
+        <select name="type" aria-label="Type" hx-trigger="change" hx-get="/inbox" hx-target="#item-list" hx-swap="outerHTML" hx-include="closest form" hx-push-url="true">
+          <option value="" {% if filter.content_type == "" %}selected{% endif %}>All types</option>
+          {% for opt in filter.content_types %}
+          <option value="{{ opt }}" {% if filter.content_type == opt.as_str() %}selected{% endif %}>{{ opt }}</option>
+          {% endfor %}
+        </select>
+
+        <select name="tag" aria-label="Tag" hx-trigger="change" hx-get="/inbox" hx-target="#item-list" hx-swap="outerHTML" hx-include="closest form" hx-push-url="true">
+          <option value="" {% if filter.tag == "" %}selected{% endif %}>All tags</option>
+          {% for opt in filter.tags %}
+          <option value="{{ opt }}" {% if filter.tag == opt.as_str() %}selected{% endif %}>#{{ opt }}</option>
+          {% endfor %}
+        </select>
+
+        <select name="sort" aria-label="Sort" hx-trigger="change" hx-get="/inbox" hx-target="#item-list" hx-swap="outerHTML" hx-include="closest form" hx-push-url="true">
+          <option value="date" {% if filter.sort == "date" %}selected{% endif %}>Newest</option>
+          <option value="title" {% if filter.sort == "title" %}selected{% endif %}>Title</option>
+          <option value="source" {% if filter.sort == "source" %}selected{% endif %}>Source</option>
+        </select>
+
+        <button type="submit">Filter</button>
+      </form>
+    </div>
+
+    {% include "_item_list.html" %}
+  </main>
+</div>
+{% endblock %}

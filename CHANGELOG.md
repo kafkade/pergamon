@@ -11,6 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Web UI (server-rendered HTML) for pergamon-server: inbox/library list and article reader views (#68)
+- Inbox view: feed/folder sidebar with unread counts, status/type/tag/source filters, sort by date/title/source, and pagination
+- Article reader view: extracted content, metadata header, original-link, inline status triage, and tag add/remove
+- HTMX-powered partial updates for triage, tagging, filtering, and bulk actions, with full-page fallbacks when JavaScript is unavailable (progressive enhancement)
+- Bulk triage actions (archive/later/read/delete) over selected items from the inbox
+- Keyboard-driven triage and navigation (j/k, Enter, a, l, r, s, o, x) via unobtrusive JavaScript
+- Vendored, binary-embedded static assets (Pico CSS, HTMX) served from `/static` with an optional `--static-dir` override
 - `pergamon-uniffi` crate: UniFFI facade exposing `pergamon-core` to Apple (Swift/SwiftUI) clients (spike #29)
 - iOS sample app (`apps/ios`): SwiftUI app that lists and opens items served by the Rust core via UniFFI
 - `scripts/build-ios.sh` and `scripts/smoke-macos.sh` for building the iOS XCFramework and running a host-side binding smoke test
@@ -34,6 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Gzip response compression and request tracing middleware
 - URL save workflow with article extraction, metadata enrichment, and duplicate detection
 - SSRF protection: HTTP/HTTPS-only URL validation, redirect limits, response size caps
+- `pergamon-storage`: optional sort order (`ContentItemSort`: date, title, source) on filtered content-item listing
 
 ## [0.6.1] - 2026-05-29
 

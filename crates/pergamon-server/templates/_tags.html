@@ -1,0 +1,17 @@
+{% import "macros.html" as m %}
+<section id="tag-section">
+  <div class="tag-list">
+    {% if tags.is_empty() %}<span class="kbd-hint">No tags yet.</span>{% endif %}
+    {% for tag in tags %}{% call m::tag_chip(item_id, tag) %}{% endcall %}{% endfor %}
+  </div>
+  <form
+    method="post"
+    action="/items/{{ item_id }}/tags"
+    hx-post="/items/{{ item_id }}/tags"
+    hx-target="#tag-section"
+    hx-swap="outerHTML"
+  >
+    <input type="text" name="name" placeholder="Add tag…" aria-label="Add tag" />
+    <button type="submit" class="secondary outline">Add tag</button>
+  </form>
+</section>

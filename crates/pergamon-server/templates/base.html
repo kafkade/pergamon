@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{% block title %}pergamon{% endblock %}</title>
+    <link rel="stylesheet" href="/static/pico.min.css" />
+    <link rel="stylesheet" href="/static/app.css" />
+    <script src="/static/htmx.min.js" defer></script>
+    <script src="/static/app.js" defer></script>
+  </head>
+  <body data-page="{% block page %}{% endblock %}"{% block body_attrs %}{% endblock %}>
+    <header class="app-header">
+      <a class="brand" href="/inbox">📚 pergamon</a>
+      <span class="kbd-hint">
+        <kbd>j</kbd>/<kbd>k</kbd> move · <kbd>Enter</kbd> open · <kbd>a</kbd> archive ·
+        <kbd>o</kbd> original
+      </span>
+    </header>
+    {% block content %}{% endblock %}
+  </body>
+</html>

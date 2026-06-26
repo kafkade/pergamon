@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+
+{% block title %}{{ title }} · pergamon{% endblock %}
+{% block page %}reader{% endblock %}
+{% block body_attrs %}{% if has_url %} data-item-url="{{ url }}"{% endif %}{% endblock %}
+
+{% block content %}
+<main class="app-main">
+  <article class="reader">
+    <p><a href="{{ back_url }}" data-back>← Back to inbox</a></p>
+
+    <header class="article-header">
+      <h1>{{ title }}</h1>
+      <div class="article-meta">
+        {% if author != "" %}<span>By {{ author }}</span>{% endif %}
+        <span>{{ source }}</span>
+        <span>{{ type_label }}</span>
+        {% if date != "" %}<span>{{ date }}</span>{% endif %}
+        <span>{{ status }}</span>
+        {% if has_url %}<a href="{{ url }}" target="_blank" rel="noopener">Original ↗</a>{% endif %}
+      </div>
+    </header>
+
+    <div class="article-controls">
+      <form method="post" action="/items/{{ item_id }}/status" hx-post="/items/{{ item_id }}/status" hx-target="#status-label" hx-swap="innerHTML">
+        <input type="hidden" name="action" value="reading" />
+        <input type="hidden" name="view" value="status" />
+        <button type="submit" class="secondary outline">Reading</button>
+      </form>
+      <form method="post" action="/items/{{ item_id }}/status" hx-post="/items/{{ item_id }}/status" hx-target="#status-label" hx-swap="innerHTML">
+        <input type="hidden" name="action" value="later" />
+        <input type="hidden" name="view" value="status" />
+        <button type="submit" class="secondary outline">Later</button>
+      </form>
+      <form method="post" action="/items/{{ item_id }}/status" hx-post="/items/{{ item_id }}/status" hx-target="#status-label" hx-swap="innerHTML">
+        <input type="hidden" name="action" value="archive" />
+        <input type="hidden" name="view" value="status" />
+        <button type="submit" class="secondary outline" data-action="archive">Archive</button>
+      </form>
+      <form method="post" action="/items/{{ item_id }}/status" hx-post="/items/{{ item_id }}/status" hx-target="#status-label" hx-swap="innerHTML">
+        <input type="hidden" name="action" value="discard" />
+        <input type="hidden" name="view" value="status" />
+        <button type="submit" class="secondary outline">Discard</button>
+      </form>
+      <span class="kbd-hint">Status: <strong id="status-label">{{ status }}</strong></span>
+    </div>
+
+    {% include "_tags.html" %}
+
+    <div class="article-body">
+      {% if has_content %}
+      {% for para in paragraphs %}<p>{{ para }}</p>{% endfor %}
+      {% else %}
+      <p class="kbd-hint">No extracted content for this item.{% if has_url %} Read it at the
+        <a href="{{ url }}" target="_blank" rel="noopener">original source</a>.{% endif %}</p>
+      {% endif %}
+    </div>
+  </article>
+</main>
+{% endblock %}

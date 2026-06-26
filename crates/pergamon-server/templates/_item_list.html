@@ -1,0 +1,65 @@
+{% import "macros.html" as m %}
+<section id="item-list">
+  <form
+    id="bulk-form"
+    class="bulk-bar"
+    method="post"
+    action="/items/bulk"
+    hx-post="/items/bulk"
+    hx-target="#item-list"
+    hx-swap="outerHTML"
+  >
+    {% for hf in list.hidden_filters %}
+    <input type="hidden" name="{{ hf.name }}" value="{{ hf.value }}" />
+    {% endfor %}
+    <label for="bulk-action" class="kbd-hint">With selected:</label>
+    <select id="bulk-action" name="action" aria-label="Bulk action">
+      <option value="read">Mark read</option>
+      <option value="archive">Archive</option>
+      <option value="later">Read later</option>
+      <option value="delete">Delete</option>
+    </select>
+    <button type="submit" class="secondary">Apply</button>
+    <span class="kbd-hint">{{ list.total }} item{% if list.total != 1 %}s{% endif %}</span>
+  </form>
+
+  {% if list.items.is_empty() %}
+  <p class="kbd-hint">Nothing here. Try a different filter or sync your feeds.</p>
+  {% else %}
+  <ul class="item-list">
+    {% for item in list.items %}{% call m::item_row(item) %}{% endcall %}{% endfor %}
+  </ul>
+  {% endif %}
+
+  <nav class="pagination">
+    <a
+      role="button"
+      class="secondary outline"
+      {% if list.prev_url != "" %}
+      href="{{ list.prev_url }}"
+      hx-get="{{ list.prev_url }}"
+      hx-target="#item-list"
+      hx-swap="outerHTML"
+      hx-push-url="true"
+      {% else %}
+      href="#"
+      aria-disabled="true"
+      {% endif %}
+    >← Prev</a>
+    <span class="kbd-hint">Page {{ list.page }} of {{ list.total_pages }}</span>
+    <a
+      role="button"
+      class="secondary outline"
+      {% if list.next_url != "" %}
+      href="{{ list.next_url }}"
+      hx-get="{{ list.next_url }}"
+      hx-target="#item-list"
+      hx-swap="outerHTML"
+      hx-push-url="true"
+      {% else %}
+      href="#"
+      aria-disabled="true"
+      {% endif %}
+    >Next →</a>
+  </nav>
+</section>

@@ -10,8 +10,10 @@ pub mod items;
 pub mod notes;
 pub mod review;
 pub mod search;
+pub mod static_assets;
 pub mod stats;
 pub mod tags;
+pub mod web;
 
 use axum::Router;
 use axum::routing::{delete, get, patch, post};
@@ -20,12 +22,21 @@ use crate::state::AppState;
 
 /// Build the complete application router.
 ///
-/// Mounts all API endpoints under `/api/` and the health check at `/health`.
-/// Static file serving is added separately in `main.rs` when configured.
+/// Mounts all API endpoints under `/api/`, the server-rendered HTML views at
+/// the root, and the health check at `/health`. Static file serving is added
+/// separately in `main.rs` (embedded assets, or a disk directory override).
 pub fn api_router() -> Router<AppState> {
     Router::new()
         // Health
         .route("/health", get(health::health))
+        // Server-rendered web UI
+        .route("/", get(web::index))
+        .route("/inbox", get(web::inbox))
+        .route("/items/bulk", post(web::bulk))
+        .route("/items/{id}", get(web::reader))
+        .route("/items/{id}/status", post(web::item_status))
+        .route("/items/{id}/tags", post(web::add_tag))
+        .route("/items/{id}/tags/{tag}/delete", post(web::remove_tag))
         // Content items
         .route(
             "/api/items",
