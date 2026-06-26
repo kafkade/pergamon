@@ -1,0 +1,40 @@
+[package]
+name = "pergamon-uniffi"
+description = "UniFFI facade exposing pergamon-core to Apple (Swift/SwiftUI) clients. Spike for issue #29."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[lib]
+name = "pergamon_uniffi"
+# `lib` so the bindgen bin can link it; `staticlib` for the iOS XCFramework;
+# `cdylib` for the macOS host smoke-test dylib.
+crate-type = ["lib", "staticlib", "cdylib"]
+
+# The `uniffi-bindgen` CLI is vendored as a crate binary so the generator
+# version always matches the `uniffi` runtime version. Run it with:
+#   cargo run --bin uniffi-bindgen -- generate ...
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+
+# NOTE: this crate intentionally does NOT use `[lints] workspace = true`.
+# The workspace forbids `unsafe_code`, but UniFFI's generated scaffolding emits
+# `unsafe` FFI glue, so it must be allowed here. The rest of the lint posture is
+# kept reasonably strict. See docs/spikes/uniffi-ios-findings.md.
+[lints.rust]
+unsafe_code = "allow"
+missing_docs = "warn"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+
+[dependencies]
+pergamon-core = { workspace = true }
+time = { workspace = true }
+uuid = { workspace = true }
+uniffi = { version = "0.29", features = ["cli"] }

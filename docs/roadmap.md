@@ -3197,7 +3197,7 @@ Predictable, portable, well-maintained, and aligned with the rest of the Rust ec
 | 4 | SQLite + FTS5 scale | search won’t be the bottleneck | <100 ms search on 100k mixed items | 🟢 | **[Validated]** |
 | 5 | URL canonicalization | bookmark dedupe is safe enough to automate | query params/domain normalization catch obvious dupes without false merges | 🟡 | **[Validation Required]** |
 | 6 | WASM build size | web phase remains plausible | first web-oriented bundle stays <2 MB compressed | 🔴 | **[Validation Required]** |
-| 7 | UniFFI sample app | iOS path is technically open | sample SwiftUI view lists and opens items from Rust bindings | 🟡 | **[Validation Required]** |
+| 7 | UniFFI sample app | iOS path is technically open | sample SwiftUI view lists and opens items from Rust bindings | 🟢 | **[Validated]** (spike #29; see `docs/spikes/uniffi-ios-findings.md`) |
 | 8 | Obsidian export loop | plugin scope can stay thin | sample export inserts cleanly into a test vault with stable links | 🟡 | **[Validation Required]** |
 
 **Rule:** do not start broad UI work until spikes 1–4 are green. pergamon’s first job is trustworthy ingestion and readable output. **[Validated]**

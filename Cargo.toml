@@ -9,6 +9,7 @@ members = [
     "crates/pergamon-export",
     "crates/pergamon-cli",
     "crates/pergamon-server",
+    "crates/pergamon-uniffi",
 ]
 
 [workspace.package]

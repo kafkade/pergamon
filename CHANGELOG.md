@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `pergamon-uniffi` crate: UniFFI facade exposing `pergamon-core` to Apple (Swift/SwiftUI) clients (spike #29)
+- iOS sample app (`apps/ios`): SwiftUI app that lists and opens items served by the Rust core via UniFFI
+- `scripts/build-ios.sh` and `scripts/smoke-macos.sh` for building the iOS XCFramework and running a host-side binding smoke test
+- Spike findings doc on UniFFI ergonomics and binary size (`docs/spikes/uniffi-ios-findings.md`)
 - `pergamon-server` crate: Axum-based web server for pergamon (AGPL-3.0-only)
 - REST API for content items: list, save URL, update status/tags, delete (`/api/items`)
 - REST API for feeds: subscribe, list, delete, sync all, OPML import (`/api/feeds`)
