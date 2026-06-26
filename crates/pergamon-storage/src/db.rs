@@ -16,10 +16,10 @@ use pergamon_core::content_type::ContentType;
 use pergamon_core::fsrs::{CardState, Rating};
 use pergamon_core::model::{
     BookmarkMeta, Collection, ContentItem, DailyReviewSummary, DailyUsageSummary, Feed, FeedFolder,
-    FeedItemMeta, HighlightMeta, LinkHealth, MonthlyUsageSummary, Note, ReadingActivity,
-    ReviewCard, ReviewLog, ReviewStats, ReviewStatsReport, SearchHit, SearchResult,
-    SourceBreakdown, SourceRanking, Tag, TagCount, TagTrendPoint, UsageOverview, UsageStatsReport,
-    WeeklyReviewSummary, WeeklyUsageSummary,
+    FeedItemMeta, HighlightMeta, LinkHealth, MonthlyReviewSummary, MonthlyUsageSummary, Note,
+    ReadingActivity, ReviewCard, ReviewLog, ReviewStats, ReviewStatsReport, SearchHit,
+    SearchResult, SourceBreakdown, SourceRanking, Tag, TagCount, TagTrendPoint, UsageOverview,
+    UsageStatsReport, WeeklyReviewSummary, WeeklyUsageSummary,
 };
 use pergamon_core::rule::{ContentRule, RuleAction};
 use pergamon_core::status::DocumentStatus;
@@ -1211,7 +1211,11 @@ impl Database {
                 params![id.to_string()],
                 |row| Ok(row_to_review_card(row)),
             )
-            .map_err(StorageError::from)
+            .optional()?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "review_card",
+                id: id.to_string(),
+            })
     }
 
     /// Retrieve the review card for a given highlight content item.
@@ -1624,6 +1628,36 @@ impl Database {
         Ok(result)
     }
 
+    /// Monthly review activity for the last `months` calendar months.
+    pub fn review_monthly_history(
+        &self,
+        months: i64,
+        now: OffsetDateTime,
+    ) -> Result<Vec<MonthlyReviewSummary>, StorageError> {
+        let cutoff = now - time::Duration::days(months * 30);
+        let mut stmt = self.conn.prepare(
+            "SELECT strftime('%Y-%m', reviewed_at) AS m,
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN rating >= 2 THEN 1 ELSE 0 END) AS good
+             FROM review_logs
+             WHERE reviewed_at >= ?1
+             GROUP BY m
+             ORDER BY m ASC",
+        )?;
+        let rows = stmt.query_map(params![fmt_time(cutoff)], |row| {
+            Ok(MonthlyReviewSummary {
+                month: row.get(0)?,
+                reviews: row.get(1)?,
+                successes: row.get(2)?,
+            })
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
     /// Build a full review stats report with all dimensions.
     pub fn review_stats_report(
         &self,
@@ -1633,11 +1667,13 @@ impl Database {
         let source_breakdown = self.review_source_breakdown()?;
         let daily_history = self.review_daily_history(30, now)?;
         let weekly_history = self.review_weekly_history(12, now)?;
+        let monthly_history = self.review_monthly_history(12, now)?;
         Ok(ReviewStatsReport {
             stats,
             source_breakdown,
             daily_history,
             weekly_history,
+            monthly_history,
         })
     }
 

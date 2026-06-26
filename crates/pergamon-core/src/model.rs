@@ -365,6 +365,8 @@ pub struct ReviewStatsReport {
     pub daily_history: Vec<DailyReviewSummary>,
     /// Weekly review counts (last 12 weeks).
     pub weekly_history: Vec<WeeklyReviewSummary>,
+    /// Monthly review counts (last 12 months).
+    pub monthly_history: Vec<MonthlyReviewSummary>,
 }
 
 /// Weekly review activity summary.
@@ -373,6 +375,17 @@ pub struct WeeklyReviewSummary {
     /// ISO week label (e.g. "2026-W22").
     pub week: String,
     /// Total reviews performed that week.
+    pub reviews: i64,
+    /// Reviews rated Hard or above (successful).
+    pub successes: i64,
+}
+
+/// Monthly review activity summary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MonthlyReviewSummary {
+    /// Month label (e.g. "2026-06").
+    pub month: String,
+    /// Total reviews performed that month.
     pub reviews: i64,
     /// Reviews rated Hard or above (successful).
     pub successes: i64,

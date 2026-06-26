@@ -42,6 +42,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - URL save workflow with article extraction, metadata enrichment, and duplicate detection
 - SSRF protection: HTTP/HTTPS-only URL validation, redirect limits, response size caps
 - `pergamon-storage`: optional sort order (`ContentItemSort`: date, title, source) on filtered content-item listing
+- Web Highlights view: source-grouped highlight browsing with tag/source/date/color filters, inline note editing, and JSON/Markdown export
+- Web Notes view: note browsing with source context, note search, and inline create/edit/delete flows
+- Web Review view: card-based review queue with reveal flow, Again/Hard/Good/Easy actions, and keyboard shortcuts (`Space`, `1`-`4`)
+- Web Review stats dashboard with daily/weekly/monthly activity, retention indicators, and maturity distribution
+- Web header navigation for Inbox, Highlights, Notes, Review, and Review stats pages
+
+### Changed
+
+- Review statistics API now includes monthly activity history (`monthly_history`) in `/api/review/stats`
+
+### Fixed
+
+- Review submission now returns `404 Not Found` for unknown review cards instead of an internal error
 
 ## [0.6.1] - 2026-05-29
 

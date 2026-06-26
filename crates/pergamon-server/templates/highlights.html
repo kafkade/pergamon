@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+
+{% block title %}Highlights · pergamon{% endblock %}
+{% block page %}highlights{% endblock %}
+
+{% block content %}
+<main class="app-main highlights-page">
+  <section class="highlight-filters">
+    <form method="get" action="/highlights">
+      <input type="text" name="tag" value="{{ filter.tag }}" placeholder="Tag" aria-label="Filter by tag" list="highlight-tags" />
+      <datalist id="highlight-tags">
+        {% for tag in filter.tags %}
+        <option value="{{ tag }}"></option>
+        {% endfor %}
+      </datalist>
+
+      <select name="source" aria-label="Filter by source">
+        <option value="" {% if filter.source == "" %}selected{% endif %}>All sources</option>
+        {% for source in filter.sources %}
+        <option value="{{ source.id }}" {% if filter.source == source.id.as_str() %}selected{% endif %}>
+          {{ source.title }}
+        </option>
+        {% endfor %}
+      </select>
+
+      <select name="color" aria-label="Filter by color">
+        <option value="" {% if filter.color == "" %}selected{% endif %}>All colors</option>
+        {% for color in filter.colors %}
+        <option value="{{ color }}" {% if filter.color == color.as_str() %}selected{% endif %}>{{ color }}</option>
+        {% endfor %}
+      </select>
+
+      <input type="date" name="since" value="{{ filter.since }}" aria-label="Created since" />
+      <input type="date" name="before" value="{{ filter.before }}" aria-label="Created before" />
+      <button type="submit">Filter</button>
+    </form>
+  </section>
+
+  <div class="export-links">
+    <span class="kbd-hint">{{ total }} highlight{% if total != 1 %}s{% endif %}</span>
+    <a class="secondary outline" role="button" href="/highlights/export?format=json">Export JSON</a>
+    <a class="secondary outline" role="button" href="/highlights/export?format=markdown">Export Markdown</a>
+  </div>
+
+  {% if groups.is_empty() %}
+  <p class="kbd-hint">No highlights match these filters.</p>
+  {% else %}
+  {% for group in groups %}
+  <section class="highlight-group">
+    <h3>
+      {% if group.href != "" %}
+      <a href="{{ group.href }}">{{ group.title }}</a>
+      {% else %}
+      {{ group.title }}
+      {% endif %}
+      <span class="kbd-hint">({{ group.highlights.len() }})</span>
+    </h3>
+    <ul class="highlight-list">
+      {% for row in group.highlights %}
+      {% include "_highlight_row.html" %}
+      {% endfor %}
+    </ul>
+  </section>
+  {% endfor %}
+  {% endif %}
+</main>
+{% endblock %}
