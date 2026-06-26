@@ -20,6 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - REST API for feeds: subscribe, list, delete, sync all, OPML import (`/api/feeds`)
 - REST API for tags: list with item counts, add/remove tags on items (`/api/tags`)
 - REST API for collections: create, list, view/add items (`/api/collections`)
+- REST API for full-text search: ranked results with snippets and faceted filters — type, tag, status, source, date range (`/api/search`)
+- REST API for saved searches backed by smart collections (`/api/saved-searches`)
+- REST API for highlights: list with filters, per-item highlights, create, update note/color, delete (`/api/highlights`, `/api/items/:id/highlights`)
+- REST API for notes: per-item list, create, update, delete (`/api/items/:id/notes`, `/api/notes/:id`)
+- REST API for spaced-repetition review: due queue, submit FSRS rating, review statistics (`/api/review`)
+- REST API for statistics: usage and review/retention reports (`/api/stats/usage`, `/api/stats/review`)
 - Paginated list responses with `Link` headers and `X-Total-Count`
 - Consistent JSON error responses with machine-readable error codes
 - Health check endpoint at `/health` with database status
