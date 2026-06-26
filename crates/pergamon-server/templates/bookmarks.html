@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+
+{% block title %}Bookmarks · pergamon{% endblock %}
+{% block page %}bookmarks{% endblock %}
+
+{% block content %}
+<main class="app-main bookmarks-page">
+  <div class="filter-bar bookmarks-toolbar">
+    <form method="get" action="/bookmarks" class="bookmarks-filter">
+      <input type="hidden" name="layout" value="{{ layout }}" />
+      <select name="status" aria-label="Status" onchange="this.form.submit()">
+        <option value="" {% if status == "" %}selected{% endif %}>All statuses</option>
+        {% for opt in statuses %}
+        <option value="{{ opt }}" {% if status == opt.as_str() %}selected{% endif %}>{{ opt }}</option>
+        {% endfor %}
+      </select>
+      <noscript><button type="submit">Filter</button></noscript>
+    </form>
+
+    <span class="kbd-hint">{{ total }} bookmark{% if total != 1 %}s{% endif %}</span>
+
+    <div class="layout-toggle" role="group" aria-label="Layout">
+      <a role="button" class="secondary outline {% if is_grid %}active{% endif %}"
+         href="/bookmarks?layout=grid{% if status != "" %}&status={{ status }}{% endif %}">▦ Grid</a>
+      <a role="button" class="secondary outline {% if !is_grid %}active{% endif %}"
+         href="/bookmarks?layout=list{% if status != "" %}&status={{ status }}{% endif %}">☰ List</a>
+    </div>
+  </div>
+
+  <form class="quick-add" method="post" action="/bookmarks">
+    <input type="url" name="url" placeholder="https://…" aria-label="Bookmark URL" required />
+    <input type="text" name="title" placeholder="Title (optional)" aria-label="Bookmark title" />
+    <input type="text" name="tags" placeholder="tags, comma separated" aria-label="Tags" />
+    <button type="submit">Add bookmark</button>
+  </form>
+
+  {% if bookmarks.is_empty() %}
+  <p class="kbd-hint">No bookmarks yet. Add one above, or save a URL with <code>pergamon save --bookmark</code>.</p>
+  {% else %}
+  <ul class="bookmark-{% if is_grid %}grid{% else %}list{% endif %}">
+    {% for b in bookmarks %}
+    <li class="bookmark-card {% if b.item.is_read %}read{% else %}unread{% endif %}"
+        data-item-row data-item-id="{{ b.item.id }}"
+        {% if b.item.has_url %}data-item-url="{{ b.item.url }}"{% endif %}>
+      <a class="bookmark-thumb" href="{{ b.item.reader_url }}">
+        {% if b.has_thumbnail %}
+        <img src="{{ b.thumbnail_url }}" alt="" loading="lazy" />
+        {% else %}
+        <span class="bookmark-thumb-placeholder" aria-hidden="true">🔖</span>
+        {% endif %}
+      </a>
+      <div class="bookmark-body">
+        <p class="item-title">
+          {% if b.item.favicon_url != "" %}<img class="item-favicon" src="{{ b.item.favicon_url }}" alt="" loading="lazy" />{% endif %}
+          <a href="{{ b.item.reader_url }}">{{ b.item.title }}</a>
+        </p>
+        <div class="item-meta">
+          <span class="item-source">{{ b.item.source }}</span>
+          {% if b.item.date != "" %}<span class="item-date">{{ b.item.date }}</span>{% endif %}
+          <span class="item-status">{{ b.item.status }}</span>
+          {% if b.has_health %}<span class="health-badge {{ b.health_class }}">{{ b.health_label }}</span>{% endif %}
+        </div>
+        {% if b.description != "" %}<p class="item-excerpt">{{ b.description }}</p>{% endif %}
+      </div>
+      <div class="item-actions">
+        {% if b.item.has_url %}
+        <a class="secondary outline" role="button" href="{{ b.item.url }}" target="_blank" rel="noopener" data-action="open" title="Open original (o)">↗</a>
+        {% endif %}
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+
+  <nav class="pagination">
+    <a role="button" class="secondary outline"
+       {% if prev_url != "" %}href="{{ prev_url }}"{% else %}href="#" aria-disabled="true"{% endif %}>← Prev</a>
+    <span class="kbd-hint">Page {{ page }} of {{ total_pages }}</span>
+    <a role="button" class="secondary outline"
+       {% if next_url != "" %}href="{{ next_url }}"{% else %}href="#" aria-disabled="true"{% endif %}>Next →</a>
+  </nav>
+  {% endif %}
+</main>
+{% endblock %}

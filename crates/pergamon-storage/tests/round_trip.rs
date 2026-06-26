@@ -1449,6 +1449,49 @@ mod collection_tag_bulk {
     }
 
     #[test]
+    fn reorder_collection_items_sets_order() {
+        let db = test_db();
+        let coll = make_collection(&db, "Ordered", None);
+        let a = make_item(&db, "Alpha");
+        let b = make_item(&db, "Bravo");
+        let c = make_item(&db, "Charlie");
+
+        db.add_to_collection(a.id, coll.id, 0).unwrap();
+        db.add_to_collection(b.id, coll.id, 1).unwrap();
+        db.add_to_collection(c.id, coll.id, 2).unwrap();
+
+        // Reverse the order.
+        db.reorder_collection_items(coll.id, &[c.id, b.id, a.id])
+            .unwrap();
+
+        let ids: Vec<Uuid> = db
+            .list_collection_items(coll.id)
+            .unwrap()
+            .into_iter()
+            .map(|i| i.id)
+            .collect();
+        assert_eq!(ids, vec![c.id, b.id, a.id]);
+    }
+
+    #[test]
+    fn reorder_smart_collection_rejected() {
+        let db = test_db();
+        let smart = Collection {
+            id: Uuid::new_v4(),
+            name: "Smart".to_owned(),
+            parent_id: None,
+            sort_order: 0,
+            is_smart: true,
+            filter_query: Some("type:article".to_owned()),
+            created_at: now(),
+            updated_at: now(),
+        };
+        db.insert_collection(&smart).unwrap();
+
+        assert!(db.reorder_collection_items(smart.id, &[]).is_err());
+    }
+
+    #[test]
     fn collection_delete_promotes_children() {
         let db = test_db();
         let parent = make_collection(&db, "Parent", None);
@@ -1735,6 +1778,100 @@ mod collection_tag_bulk {
         // Old name should no longer match.
         let results = db.search("original").unwrap();
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn merge_tags_moves_items_and_deletes_source() {
+        let db = test_db();
+        let item1 = make_item(&db, "Only Source");
+        let item2 = make_item(&db, "Both Tags");
+        let source = db.get_or_create_tag("js").unwrap();
+        let target = db.get_or_create_tag("javascript").unwrap();
+
+        db.tag_content_item(item1.id, source.id).unwrap();
+        db.tag_content_item(item2.id, source.id).unwrap();
+        db.tag_content_item(item2.id, target.id).unwrap();
+
+        db.merge_tags(source.id, target.id).unwrap();
+
+        // Source tag is gone.
+        assert!(db.get_tag_by_name("js").unwrap().is_none());
+        // Both items now carry the target tag.
+        let t1: Vec<String> = db
+            .tags_for_item(item1.id)
+            .unwrap()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        assert_eq!(t1, vec!["javascript".to_owned()]);
+        let t2: Vec<String> = db
+            .tags_for_item(item2.id)
+            .unwrap()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        assert_eq!(t2, vec!["javascript".to_owned()]);
+    }
+
+    #[test]
+    fn merge_tags_refreshes_fts() {
+        let db = test_db();
+        let item = make_item(&db, "Merge FTS Test");
+        let source = db.get_or_create_tag("sourcetag").unwrap();
+        let target = db.get_or_create_tag("targettag").unwrap();
+        db.tag_content_item(item.id, source.id).unwrap();
+
+        db.merge_tags(source.id, target.id).unwrap();
+
+        // Item is now findable by the target tag, not the source tag.
+        assert!(!db.search("targettag").unwrap().is_empty());
+        assert!(db.search("sourcetag").unwrap().is_empty());
+    }
+
+    #[test]
+    fn merge_tags_same_tag_is_noop() {
+        let db = test_db();
+        let tag = db.get_or_create_tag("solo").unwrap();
+        let item = make_item(&db, "Solo Item");
+        db.tag_content_item(item.id, tag.id).unwrap();
+
+        db.merge_tags(tag.id, tag.id).unwrap();
+        assert!(db.get_tag_by_name("solo").unwrap().is_some());
+        assert_eq!(db.tags_for_item(item.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn merge_tags_missing_tag_errors() {
+        let db = test_db();
+        let tag = db.get_or_create_tag("real").unwrap();
+        assert!(db.merge_tags(Uuid::new_v4(), tag.id).is_err());
+        assert!(db.merge_tags(tag.id, Uuid::new_v4()).is_err());
+    }
+
+    #[test]
+    fn link_health_round_trip() {
+        use pergamon_core::model::LinkHealth;
+
+        let db = test_db();
+        let item = make_item(&db, "Health Item");
+
+        // No record yet.
+        assert!(db.get_link_health(item.id).unwrap().is_none());
+
+        let health = LinkHealth {
+            content_item_id: item.id,
+            http_status: Some(404),
+            final_url: Some("https://example.com/gone".to_owned()),
+            redirect_count: 1,
+            last_checked_at: now(),
+            error_message: None,
+        };
+        db.upsert_link_health(&health).unwrap();
+
+        let got = db.get_link_health(item.id).unwrap().unwrap();
+        assert_eq!(got.http_status, Some(404));
+        assert_eq!(got.final_url.as_deref(), Some("https://example.com/gone"));
+        assert_eq!(got.redirect_count, 1);
     }
 
     #[test]

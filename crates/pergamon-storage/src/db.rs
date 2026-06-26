@@ -2222,6 +2222,62 @@ impl Database {
         Ok(())
     }
 
+    /// Merge one tag into another.
+    ///
+    /// Reassigns every item tagged with `from_id` to `to_id` (skipping items
+    /// already carrying `to_id`), then deletes the now-empty `from` tag. FTS is
+    /// refreshed for all affected items so tag-based search stays accurate. The
+    /// whole operation runs in a transaction. A no-op when `from_id == to_id`.
+    pub fn merge_tags(&self, from_id: Uuid, to_id: Uuid) -> Result<(), StorageError> {
+        if from_id == to_id {
+            return Ok(());
+        }
+
+        // Both tags must exist.
+        self.get_tag(from_id)?;
+        self.get_tag(to_id)?;
+
+        // Capture affected items before mutating so FTS can be refreshed after.
+        let affected_items: Vec<Uuid> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT content_item_id FROM content_item_tags WHERE tag_id = ?1")?;
+            let rows = stmt.query_map(params![from_id.to_string()], |row| {
+                Ok(parse_uuid(&row.get::<_, String>(0)?))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+
+        self.conn.execute_batch("BEGIN;")?;
+        let result = (|| {
+            // Copy memberships to the target tag, ignoring rows that already exist.
+            self.conn.execute(
+                "INSERT OR IGNORE INTO content_item_tags (content_item_id, tag_id)
+                 SELECT content_item_id, ?1 FROM content_item_tags WHERE tag_id = ?2",
+                params![to_id.to_string(), from_id.to_string()],
+            )?;
+            // Deleting the source tag cascades its membership rows.
+            self.conn.execute(
+                "DELETE FROM tags WHERE id = ?1",
+                params![from_id.to_string()],
+            )?;
+            Ok::<(), StorageError>(())
+        })();
+        match result {
+            Ok(()) => self.conn.execute_batch("COMMIT;")?,
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK;");
+                return Err(e);
+            }
+        }
+
+        for item_id in &affected_items {
+            self.refresh_fts_tags(*item_id)?;
+        }
+
+        Ok(())
+    }
+
     /// Find a tag by name (case-insensitive).
     pub fn get_tag_by_name(&self, name: &str) -> Result<Option<Tag>, StorageError> {
         self.conn
@@ -2509,6 +2565,49 @@ impl Database {
             items.push(row?);
         }
         Ok(items)
+    }
+
+    /// Reorder the members of a (manual) collection.
+    ///
+    /// Assigns each item in `ordered_item_ids` a `sort_order` matching its
+    /// position in the slice. Items belonging to the collection but absent from
+    /// the slice are left untouched (their existing `sort_order` is preserved).
+    /// Rejects smart collections, whose membership is computed, not stored.
+    /// Runs in a transaction.
+    pub fn reorder_collection_items(
+        &self,
+        collection_id: Uuid,
+        ordered_item_ids: &[Uuid],
+    ) -> Result<(), StorageError> {
+        let coll = self.get_collection(collection_id)?;
+        if coll.is_smart {
+            return Err(StorageError::Constraint(
+                "cannot reorder items in a smart collection".to_owned(),
+            ));
+        }
+
+        self.conn.execute_batch("BEGIN;")?;
+        let result = (|| {
+            for (position, item_id) in ordered_item_ids.iter().enumerate() {
+                let order = i64::try_from(position).unwrap_or(i64::MAX);
+                self.conn.execute(
+                    "UPDATE content_item_collections SET sort_order = ?1
+                     WHERE collection_id = ?2 AND content_item_id = ?3",
+                    params![order, collection_id.to_string(), item_id.to_string()],
+                )?;
+            }
+            Ok::<(), StorageError>(())
+        })();
+        match result {
+            Ok(()) => {
+                self.conn.execute_batch("COMMIT;")?;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK;");
+                Err(e)
+            }
+        }
     }
 
     // ------------------------------------------------------------------
@@ -3503,6 +3602,32 @@ impl Database {
             ],
         )?;
         Ok(())
+    }
+
+    /// Fetch the link-health record for a content item, if one exists.
+    pub fn get_link_health(
+        &self,
+        content_item_id: Uuid,
+    ) -> Result<Option<LinkHealth>, StorageError> {
+        self.conn
+            .query_row(
+                "SELECT content_item_id, http_status, final_url, redirect_count,
+                        last_checked_at, error_message
+                 FROM link_health WHERE content_item_id = ?1",
+                params![content_item_id.to_string()],
+                |row| {
+                    Ok(LinkHealth {
+                        content_item_id: parse_uuid(&row.get::<_, String>(0)?),
+                        http_status: row.get(1)?,
+                        final_url: row.get(2)?,
+                        redirect_count: row.get(3)?,
+                        last_checked_at: parse_time(&row.get::<_, String>(4)?),
+                        error_message: row.get(5)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StorageError::from)
     }
 
     /// List content item URLs that need a health check.

@@ -194,6 +194,7 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
+    #![allow(clippy::significant_drop_tightening)]
 
     use super::*;
     use axum::body::Body;
@@ -1346,5 +1347,536 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let report = json_body(response).await;
         assert!(report["stats"].is_object());
+    }
+
+    // ── Web: Search ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn search_page_renders_prompt_without_query() {
+        let app = test_app();
+        let req = Request::get("/search").body(Body::empty()).unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = body_string(response).await;
+        assert!(html.contains("<!DOCTYPE html>"));
+        assert!(html.contains("Type a query to search"));
+    }
+
+    #[tokio::test]
+    async fn search_page_highlights_snippet() {
+        let state = test_state();
+        insert_item(
+            &state,
+            "Rust Patterns",
+            Some("the quick brown fox jumps high"),
+        );
+        let app = build_router(state, None);
+
+        let req = Request::get("/search?q=quick")
+            .header("HX-Request", "true")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = body_string(response).await;
+        // HTMX fragment only (no full page).
+        assert!(!html.contains("<!DOCTYPE html>"));
+        assert!(html.contains("id=\"search-results\""));
+        assert!(html.contains("Rust Patterns"));
+        assert!(html.contains("<mark>quick</mark>"));
+    }
+
+    #[tokio::test]
+    async fn save_search_creates_smart_collection() {
+        let state = test_state();
+        let app = build_router(state.clone(), None);
+
+        let req = Request::post("/search/save")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("name=Rust+stuff&dsl=text:rust+type:article"))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+
+        let db = state.db.lock().unwrap();
+        let coll = db.get_collection_by_name("Rust stuff").unwrap().unwrap();
+        assert!(coll.is_smart);
+        assert_eq!(coll.filter_query.as_deref(), Some("text:rust type:article"));
+    }
+
+    #[tokio::test]
+    async fn save_search_rejects_invalid_dsl() {
+        let app = test_app();
+        let req = Request::post("/search/save")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("name=Bad&dsl="))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(response.headers()["location"], "/search");
+    }
+
+    // ── Web: Bookmarks ─────────────────────────────────────────────
+
+    /// Insert a bookmark-type content item, returning its ID.
+    fn insert_bookmark(state: &AppState, title: &str) -> uuid::Uuid {
+        let now = time::OffsetDateTime::now_utc();
+        let id = uuid::Uuid::new_v4();
+        let item = pergamon_core::model::ContentItem {
+            id,
+            url: Some(format!("https://example.com/bookmark/{id}")),
+            title: title.to_owned(),
+            author: None,
+            content_type: pergamon_core::content_type::ContentType::Bookmark,
+            status: pergamon_core::status::DocumentStatus::Inbox,
+            content_text: None,
+            excerpt: None,
+            published_at: None,
+            created_at: now,
+            updated_at: now,
+            read_at: None,
+        };
+        let db = state.db.lock().unwrap();
+        db.insert_content_item(&item).unwrap();
+        id
+    }
+
+    #[tokio::test]
+    async fn bookmarks_page_lists_only_bookmarks() {
+        let state = test_state();
+        insert_bookmark(&state, "Saved Link");
+        insert_item(&state, "An Article", Some("body"));
+        let app = build_router(state, None);
+
+        let req = Request::get("/bookmarks").body(Body::empty()).unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = body_string(response).await;
+        assert!(html.contains("Saved Link"));
+        assert!(!html.contains("An Article"));
+        assert!(html.contains("bookmark-grid"));
+    }
+
+    #[tokio::test]
+    async fn bookmarks_layout_toggle_switches_to_list() {
+        let state = test_state();
+        insert_bookmark(&state, "Saved Link");
+        let app = build_router(state, None);
+
+        let req = Request::get("/bookmarks?layout=list")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = body_string(response).await;
+        assert!(html.contains("bookmark-list"));
+    }
+
+    #[tokio::test]
+    async fn bookmarks_quick_add_creates_bookmark() {
+        let state = test_state();
+        let app = build_router(state.clone(), None);
+
+        let req = Request::post("/bookmarks")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from(
+                "url=https://rust-lang.org/&title=Rust&tags=lang,systems",
+            ))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(response.headers()["location"], "/bookmarks");
+
+        let db = state.db.lock().unwrap();
+        let filter = pergamon_storage::ContentItemFilter {
+            content_type: Some(pergamon_core::content_type::ContentType::Bookmark),
+            ..pergamon_storage::ContentItemFilter::default()
+        };
+        let items = db.list_content_items_filtered(&filter, None, None).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title, "Rust");
+    }
+
+    #[tokio::test]
+    async fn bookmarks_quick_add_rejects_bad_scheme() {
+        let state = test_state();
+        let app = build_router(state.clone(), None);
+
+        let req = Request::post("/bookmarks")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("url=ftp://example.com/file"))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+
+        let db = state.db.lock().unwrap();
+        let filter = pergamon_storage::ContentItemFilter {
+            content_type: Some(pergamon_core::content_type::ContentType::Bookmark),
+            ..pergamon_storage::ContentItemFilter::default()
+        };
+        assert!(
+            db.list_content_items_filtered(&filter, None, None)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    // ── Web: Tags ──────────────────────────────────────────────────
+
+    /// Tag an item with a fresh tag, returning the tag ID.
+    fn tag_item(state: &AppState, item_id: uuid::Uuid, name: &str) -> uuid::Uuid {
+        let db = state.db.lock().unwrap();
+        let tag = db.get_or_create_tag(name).unwrap();
+        db.tag_content_item(item_id, tag.id).unwrap();
+        tag.id
+    }
+
+    #[tokio::test]
+    async fn tags_page_shows_cloud_with_counts() {
+        let state = test_state();
+        let item = insert_item(&state, "Tagged", Some("body"));
+        tag_item(&state, item, "rust");
+        let app = build_router(state, None);
+
+        let req = Request::get("/tags").body(Body::empty()).unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = body_string(response).await;
+        assert!(html.contains("tag-cloud"));
+        assert!(html.contains("rust"));
+    }
+
+    #[tokio::test]
+    async fn tags_rename_changes_tag_name() {
+        let state = test_state();
+        let item = insert_item(&state, "Tagged", Some("body"));
+        tag_item(&state, item, "rust");
+        let app = build_router(state.clone(), None);
+
+        let req = Request::post("/tags/rust/rename")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("new_name=rustlang"))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+
+        let db = state.db.lock().unwrap();
+        assert!(db.get_tag_by_name("rust").unwrap().is_none());
+        assert!(db.get_tag_by_name("rustlang").unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn tags_merge_combines_tags() {
+        let state = test_state();
+        let item = insert_item(&state, "Tagged", Some("body"));
+        tag_item(&state, item, "rust");
+        tag_item(&state, item, "systems");
+        let app = build_router(state.clone(), None);
+
+        let req = Request::post("/tags/rust/merge")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("target=systems"))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+
+        let db = state.db.lock().unwrap();
+        assert!(db.get_tag_by_name("rust").unwrap().is_none());
+        let systems = db.get_tag_by_name("systems").unwrap().unwrap();
+        let tags = db.tags_for_item(item).unwrap();
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].id, systems.id);
+    }
+
+    #[tokio::test]
+    async fn tags_delete_removes_tag() {
+        let state = test_state();
+        let item = insert_item(&state, "Tagged", Some("body"));
+        tag_item(&state, item, "rust");
+        let app = build_router(state.clone(), None);
+
+        let req = Request::post("/tags/rust/delete")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+
+        let db = state.db.lock().unwrap();
+        assert!(db.get_tag_by_name("rust").unwrap().is_none());
+    }
+
+    // ── Web: Collections ───────────────────────────────────────────
+
+    /// Insert a regular collection, returning its ID.
+    fn insert_collection(state: &AppState, name: &str) -> uuid::Uuid {
+        let now = time::OffsetDateTime::now_utc();
+        let coll = pergamon_core::model::Collection {
+            id: uuid::Uuid::new_v4(),
+            name: name.to_owned(),
+            parent_id: None,
+            sort_order: 0,
+            is_smart: false,
+            filter_query: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let db = state.db.lock().unwrap();
+        db.insert_collection(&coll).unwrap();
+        coll.id
+    }
+
+    #[tokio::test]
+    async fn collections_page_lists_regular_and_smart() {
+        let state = test_state();
+        insert_collection(&state, "Reading List");
+        let app = build_router(state, None);
+
+        let req = Request::get("/collections").body(Body::empty()).unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = body_string(response).await;
+        assert!(html.contains("Reading List"));
+        assert!(html.contains("Regular collections"));
+        assert!(html.contains("Smart collections"));
+    }
+
+    #[tokio::test]
+    async fn collection_create_regular_redirects_to_detail() {
+        let state = test_state();
+        let app = build_router(state.clone(), None);
+
+        let req = Request::post("/collections/create")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("name=Favorites&kind=regular"))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert!(
+            response.headers()["location"]
+                .to_str()
+                .unwrap()
+                .starts_with("/collections/")
+        );
+
+        let db = state.db.lock().unwrap();
+        assert!(db.get_collection_by_name("Favorites").unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn collection_create_smart_requires_valid_filter() {
+        let state = test_state();
+        let app = build_router(state.clone(), None);
+
+        // Empty filter on a smart collection → rejected, back to /collections.
+        let req = Request::post("/collections/create")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("name=Bad+Smart&kind=smart&filter_query="))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(response.headers()["location"], "/collections");
+
+        let db = state.db.lock().unwrap();
+        assert!(db.get_collection_by_name("Bad Smart").unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn collection_detail_shows_members() {
+        let state = test_state();
+        let coll = insert_collection(&state, "Reading List");
+        let item = insert_item(&state, "Member Article", Some("body"));
+        {
+            let db = state.db.lock().unwrap();
+            db.add_to_collection(item, coll, 0).unwrap();
+        }
+        let app = build_router(state, None);
+
+        let req = Request::get(format!("/collections/{coll}"))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = body_string(response).await;
+        assert!(html.contains("Reading List"));
+        assert!(html.contains("Member Article"));
+        assert!(html.contains("data-reorder-list"));
+    }
+
+    #[tokio::test]
+    async fn collection_smart_detail_evaluates_filter() {
+        let state = test_state();
+        insert_bookmark(&state, "A Bookmark");
+        insert_item(&state, "An Article", Some("body"));
+        let coll = {
+            let now = time::OffsetDateTime::now_utc();
+            let coll = pergamon_core::model::Collection {
+                id: uuid::Uuid::new_v4(),
+                name: "Bookmarks Smart".to_owned(),
+                parent_id: None,
+                sort_order: 0,
+                is_smart: true,
+                filter_query: Some("type:bookmark".to_owned()),
+                created_at: now,
+                updated_at: now,
+            };
+            let db = state.db.lock().unwrap();
+            db.insert_collection(&coll).unwrap();
+            coll.id
+        };
+        let app = build_router(state, None);
+
+        let req = Request::get(format!("/collections/{coll}"))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = body_string(response).await;
+        assert!(html.contains("A Bookmark"));
+        assert!(!html.contains("An Article"));
+        // Smart collections are not reorderable.
+        assert!(!html.contains("data-reorder-list"));
+    }
+
+    #[tokio::test]
+    async fn collection_reorder_sets_new_order() {
+        let state = test_state();
+        let coll = insert_collection(&state, "Ordered");
+        let a = insert_item(&state, "Item A", Some("a"));
+        let b = insert_item(&state, "Item B", Some("b"));
+        {
+            let db = state.db.lock().unwrap();
+            db.add_to_collection(a, coll, 0).unwrap();
+            db.add_to_collection(b, coll, 1).unwrap();
+        }
+        let app = build_router(state.clone(), None);
+
+        // Reverse the order: B then A.
+        let req = Request::post(format!("/collections/{coll}/reorder"))
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from(format!("ids={b}&ids={a}")))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+
+        let db = state.db.lock().unwrap();
+        let ordered: Vec<uuid::Uuid> = db
+            .list_collection_items(coll)
+            .unwrap()
+            .into_iter()
+            .map(|i| i.id)
+            .collect();
+        assert_eq!(ordered, vec![b, a]);
+    }
+
+    #[tokio::test]
+    async fn collection_move_item_down_swaps_order() {
+        let state = test_state();
+        let coll = insert_collection(&state, "Ordered");
+        let a = insert_item(&state, "Item A", Some("a"));
+        let b = insert_item(&state, "Item B", Some("b"));
+        {
+            let db = state.db.lock().unwrap();
+            db.add_to_collection(a, coll, 0).unwrap();
+            db.add_to_collection(b, coll, 1).unwrap();
+        }
+        let app = build_router(state.clone(), None);
+
+        let req = Request::post(format!("/collections/{coll}/items/{a}/move"))
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("dir=down"))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+
+        let db = state.db.lock().unwrap();
+        let ordered: Vec<uuid::Uuid> = db
+            .list_collection_items(coll)
+            .unwrap()
+            .into_iter()
+            .map(|i| i.id)
+            .collect();
+        assert_eq!(ordered, vec![b, a]);
+    }
+
+    #[tokio::test]
+    async fn collection_remove_item_drops_membership() {
+        let state = test_state();
+        let coll = insert_collection(&state, "Reading List");
+        let item = insert_item(&state, "Member", Some("body"));
+        {
+            let db = state.db.lock().unwrap();
+            db.add_to_collection(item, coll, 0).unwrap();
+        }
+        let app = build_router(state.clone(), None);
+
+        let req = Request::post(format!("/collections/{coll}/items/{item}/remove"))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+
+        let db = state.db.lock().unwrap();
+        assert!(db.list_collection_items(coll).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn collection_update_filter_changes_dsl() {
+        let state = test_state();
+        let coll = {
+            let now = time::OffsetDateTime::now_utc();
+            let coll = pergamon_core::model::Collection {
+                id: uuid::Uuid::new_v4(),
+                name: "Smart".to_owned(),
+                parent_id: None,
+                sort_order: 0,
+                is_smart: true,
+                filter_query: Some("type:article".to_owned()),
+                created_at: now,
+                updated_at: now,
+            };
+            let db = state.db.lock().unwrap();
+            db.insert_collection(&coll).unwrap();
+            coll.id
+        };
+        let app = build_router(state.clone(), None);
+
+        let req = Request::post(format!("/collections/{coll}/filter"))
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("filter_query=type:bookmark"))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+
+        let db = state.db.lock().unwrap();
+        let updated = db.get_collection(coll).unwrap();
+        assert_eq!(updated.filter_query.as_deref(), Some("type:bookmark"));
+    }
+
+    #[tokio::test]
+    async fn collection_delete_removes_collection() {
+        let state = test_state();
+        let coll = insert_collection(&state, "Doomed");
+        let app = build_router(state.clone(), None);
+
+        let req = Request::post(format!("/collections/{coll}/delete"))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(response.headers()["location"], "/collections");
+
+        let db = state.db.lock().unwrap();
+        assert!(db.get_collection_by_name("Doomed").unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn collection_detail_missing_is_not_found() {
+        let app = test_app();
+        let id = uuid::Uuid::new_v4();
+        let req = Request::get(format!("/collections/{id}"))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }

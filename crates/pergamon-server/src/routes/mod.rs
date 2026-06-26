@@ -14,6 +14,10 @@ pub mod static_assets;
 pub mod stats;
 pub mod tags;
 pub mod web;
+pub mod web_bookmarks;
+pub mod web_collections;
+pub mod web_search;
+pub mod web_tags;
 
 use axum::Router;
 use axum::routing::{delete, get, patch, post};
@@ -25,6 +29,7 @@ use crate::state::AppState;
 /// Mounts all API endpoints under `/api/`, the server-rendered HTML views at
 /// the root, and the health check at `/health`. Static file serving is added
 /// separately in `main.rs` (embedded assets, or a disk directory override).
+#[allow(clippy::too_many_lines)]
 pub fn api_router() -> Router<AppState> {
     Router::new()
         // Health
@@ -32,6 +37,43 @@ pub fn api_router() -> Router<AppState> {
         // Server-rendered web UI
         .route("/", get(web::index))
         .route("/inbox", get(web::inbox))
+        .route("/search", get(web_search::search))
+        .route("/search/save", post(web_search::save_search))
+        .route(
+            "/bookmarks",
+            get(web_bookmarks::bookmarks).post(web_bookmarks::add_bookmark),
+        )
+        .route("/tags", get(web_tags::tags))
+        .route("/tags/{name}/rename", post(web_tags::rename_tag))
+        .route("/tags/{name}/merge", post(web_tags::merge_tag))
+        .route("/tags/{name}/delete", post(web_tags::delete_tag))
+        .route("/collections", get(web_collections::collections))
+        .route(
+            "/collections/create",
+            post(web_collections::create_collection),
+        )
+        .route("/collections/{id}", get(web_collections::collection_detail))
+        .route(
+            "/collections/{id}/rename",
+            post(web_collections::rename_collection),
+        )
+        .route(
+            "/collections/{id}/filter",
+            post(web_collections::update_filter),
+        )
+        .route(
+            "/collections/{id}/delete",
+            post(web_collections::delete_collection),
+        )
+        .route("/collections/{id}/reorder", post(web_collections::reorder))
+        .route(
+            "/collections/{id}/items/{item_id}/remove",
+            post(web_collections::remove_item),
+        )
+        .route(
+            "/collections/{id}/items/{item_id}/move",
+            post(web_collections::move_item),
+        )
         .route("/highlights", get(web::highlights))
         .route("/highlights/export", get(web::highlights_export))
         .route("/highlights/{id}/note", post(web::update_highlight_note))

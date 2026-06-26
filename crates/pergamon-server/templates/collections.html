@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+
+{% block title %}Collections · pergamon{% endblock %}
+{% block page %}collections{% endblock %}
+
+{% block content %}
+<main class="app-main collections-page">
+  <div class="filter-bar"><h1>Collections</h1></div>
+
+  <details class="create-collection" open>
+    <summary>New collection</summary>
+    <form method="post" action="/collections/create" class="collection-create-form" data-collection-create>
+      <input type="text" name="name" placeholder="Collection name" aria-label="Collection name" required />
+
+      <fieldset class="kind-toggle">
+        <label><input type="radio" name="kind" value="regular" checked data-kind-regular /> Regular</label>
+        <label><input type="radio" name="kind" value="smart" data-kind-smart /> Smart</label>
+      </fieldset>
+
+      <select name="parent_id" aria-label="Parent collection" data-parent-select>
+        <option value="">No parent</option>
+        {% for p in parents %}
+        <option value="{{ p.id }}">{{ p.name }}</option>
+        {% endfor %}
+      </select>
+
+      <div class="smart-filter-field" data-smart-field hidden>
+        <input type="text" name="filter_query" placeholder="e.g. type:article tag:rust status:later" aria-label="Smart filter (DSL)" />
+        <small class="kbd-hint">Keys: <code>text:</code> <code>type:</code> <code>tag:</code> <code>status:</code> <code>source:</code> <code>since:</code> <code>before:</code></small>
+      </div>
+
+      <button type="submit">Create</button>
+    </form>
+  </details>
+
+  <h2>Regular collections</h2>
+  {% if regular.is_empty() %}
+  <p class="kbd-hint">No regular collections yet.</p>
+  {% else %}
+  <ul class="collection-list">
+    {% for c in regular %}
+    <li class="collection-row">
+      <a class="collection-name" href="{{ c.detail_href }}">📁 {{ c.name }}</a>
+      {% if c.parent_name != "" %}<span class="collection-parent">in {{ c.parent_name }}</span>{% endif %}
+      <span class="count">{{ c.member_count }}</span>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+
+  <h2>Smart collections</h2>
+  {% if smart.is_empty() %}
+  <p class="kbd-hint">No smart collections yet. Save a search, or create one above.</p>
+  {% else %}
+  <ul class="collection-list">
+    {% for c in smart %}
+    <li class="collection-row">
+      <a class="collection-name" href="{{ c.detail_href }}">✨ {{ c.name }}</a>
+      <code class="collection-filter">{{ c.filter_query }}</code>
+      <span class="count">{{ c.member_count }}</span>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</main>
+{% endblock %}
