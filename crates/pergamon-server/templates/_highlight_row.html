@@ -1,0 +1,18 @@
+<li class="highlight-row" id="highlight-{{ row.id }}">
+  <blockquote>{{ row.quote_text }}</blockquote>
+  <div class="highlight-meta">
+    {% if row.color != "" %}<span>Color: {{ row.color }}</span>{% endif %}
+    {% if row.created_at != "" %}<span>{{ row.created_at }}</span>{% endif %}
+    {% if row.source_href != "" %}<a href="{{ row.source_href }}">Source: {{ row.source_title }}</a>{% endif %}
+  </div>
+  <form
+    method="post"
+    action="/highlights/{{ row.id }}/note"
+    hx-post="/highlights/{{ row.id }}/note"
+    hx-target="closest .highlight-row"
+    hx-swap="outerHTML"
+  >
+    <textarea name="note" placeholder="Add note…" aria-label="Highlight note">{{ row.note }}</textarea>
+    <button type="submit" class="secondary outline">Save note</button>
+  </form>
+</li>

@@ -1,0 +1,53 @@
+<section id="review-panel" class="review-shell">
+  <div class="review-status">
+    <span>Remaining: {{ panel.queue_remaining }}</span>
+    <span>Due now: {{ panel.due_count }}</span>
+    <span>Reviewed today: {{ panel.reviewed_today }}</span>
+    <span>Streak: {{ panel.current_streak }}</span>
+    {% if panel.last_rating != "" %}<span>Last rating: {{ panel.last_rating }}</span>{% endif %}
+  </div>
+
+  {% if panel.has_card %}
+  <article class="review-card">
+    <h2>
+      {% if panel.card.source_href != "" %}
+      <a href="{{ panel.card.source_href }}">{{ panel.card.source_title }}</a>
+      {% else %}
+      {{ panel.card.source_title }}
+      {% endif %}
+    </h2>
+    <p class="kbd-hint">State: {{ panel.card.state }} · Due: {{ panel.card.due_at }}</p>
+    <p>Front: recall the key idea before revealing.</p>
+
+    <details class="review-answer">
+      <summary>Reveal answer (Space)</summary>
+      <blockquote>{{ panel.card.quote_text }}</blockquote>
+      {% if panel.card.note != "" %}<p><strong>Note:</strong> {{ panel.card.note }}</p>{% endif %}
+      {% if panel.card.color != "" %}<p class="kbd-hint">Color: {{ panel.card.color }}</p>{% endif %}
+    </details>
+
+    <form
+      method="post"
+      action="/review/{{ panel.card.card_id }}"
+      hx-post="/review/{{ panel.card.card_id }}"
+      hx-target="#review-panel"
+      hx-swap="outerHTML"
+      class="review-actions"
+    >
+      <button type="submit" name="rating" value="1" data-rating="1" class="secondary">1 · Again</button>
+      <button type="submit" name="rating" value="2" data-rating="2" class="secondary">2 · Hard</button>
+      <button type="submit" name="rating" value="3" data-rating="3">3 · Good</button>
+      <button type="submit" name="rating" value="4" data-rating="4">4 · Easy</button>
+    </form>
+    <p class="kbd-hint">Keyboard: <kbd>Space</kbd> reveal, <kbd>1</kbd>-<kbd>4</kbd> rate.</p>
+  </article>
+  {% else %}
+  <section class="review-empty">
+    <h2>Queue complete</h2>
+    <p>No cards are due right now.</p>
+    <p class="kbd-hint">You reviewed {{ panel.reviewed_today }} card{% if panel.reviewed_today != 1 %}s{% endif %} today.</p>
+  </section>
+  {% endif %}
+
+  <p><a href="/review/stats">Open review statistics →</a></p>
+</section>

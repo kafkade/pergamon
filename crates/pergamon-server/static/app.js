@@ -135,6 +135,33 @@
       return;
     }
 
+    /* Review-page shortcuts. */
+    if (page === "review") {
+      if (e.key === " " || e.key === "Spacebar") {
+        var details = document.querySelector(".review-answer");
+        if (details) {
+          e.preventDefault();
+          details.open = !details.open;
+        }
+        return;
+      }
+      if (e.key === "1" || e.key === "2" || e.key === "3" || e.key === "4") {
+        var ratingButton = document.querySelector(
+          '[data-rating="' + e.key + '"]'
+        );
+        if (ratingButton) {
+          e.preventDefault();
+          ratingButton.click();
+        }
+        return;
+      }
+      return;
+    }
+
+    if (page !== "inbox") {
+      return;
+    }
+
     /* Inbox / list shortcuts. */
     var row = currentRow();
     switch (e.key) {

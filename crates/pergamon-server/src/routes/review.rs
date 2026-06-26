@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use pergamon_core::fsrs::{MemoryState, Parameters, Rating, Scheduler};
 use pergamon_core::model::{ReviewCard, ReviewLog, ReviewStatsReport};
+use pergamon_storage::{Database, StorageError};
 
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -63,17 +64,40 @@ pub async fn submit_review(
     Path(card_id): Path<Uuid>,
     Json(body): Json<SubmitReviewRequest>,
 ) -> Result<Json<ReviewCard>, ApiError> {
-    let rating = body.rating;
-    let now = OffsetDateTime::now_utc();
-
     let db = state
         .db
         .lock()
         .map_err(|_| ApiError::internal("database lock poisoned"))?;
+    let now = OffsetDateTime::now_utc();
 
-    let card = db
-        .get_review_card(card_id)
-        .map_err(|_| ApiError::not_found("review card not found"))?;
+    let updated = apply_review_rating(&db, card_id, body.rating, now).map_err(|err| match err {
+        StorageError::NotFound { .. } => ApiError::not_found("review card not found"),
+        other => ApiError::from(other),
+    })?;
+    Ok(Json(updated))
+}
+
+/// `GET /api/review/stats` — review statistics report.
+pub async fn review_stats(
+    State(state): State<AppState>,
+) -> Result<Json<ReviewStatsReport>, ApiError> {
+    let now = OffsetDateTime::now_utc();
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| ApiError::internal("database lock poisoned"))?;
+    let report = db.review_stats_report(now)?;
+    Ok(Json(report))
+}
+
+/// Apply a review rating and persist FSRS card + log updates.
+pub fn apply_review_rating(
+    db: &Database,
+    card_id: Uuid,
+    rating: Rating,
+    now: OffsetDateTime,
+) -> Result<ReviewCard, StorageError> {
+    let card = db.get_review_card(card_id)?;
 
     let scheduler = Scheduler::new(&Parameters::default());
 
@@ -128,19 +152,5 @@ pub async fn submit_review(
     };
     db.insert_review_log(&log)?;
 
-    let updated = db.get_review_card(card.id)?;
-    Ok(Json(updated))
-}
-
-/// `GET /api/review/stats` — review statistics report.
-pub async fn review_stats(
-    State(state): State<AppState>,
-) -> Result<Json<ReviewStatsReport>, ApiError> {
-    let now = OffsetDateTime::now_utc();
-    let db = state
-        .db
-        .lock()
-        .map_err(|_| ApiError::internal("database lock poisoned"))?;
-    let report = db.review_stats_report(now)?;
-    Ok(Json(report))
+    db.get_review_card(card.id)
 }

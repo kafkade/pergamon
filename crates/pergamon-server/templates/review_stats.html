@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+
+{% block title %}Review stats · pergamon{% endblock %}
+{% block page %}review-stats{% endblock %}
+
+{% block content %}
+<main class="app-main review-stats-page">
+  <section class="review-stats-shell">
+    <div class="stat-grid">
+      {% for card in cards %}
+      <article class="stat-card">
+        <h4>{{ card.label }}</h4>
+        <strong>{{ card.value }}</strong>
+      </article>
+      {% endfor %}
+    </div>
+
+    <section>
+      <h3>Daily activity</h3>
+      {% if daily.is_empty() %}
+      <p class="kbd-hint">No daily review activity yet.</p>
+      {% else %}
+      <ul class="chart-list">
+        {% for point in daily %}
+        <li>
+          <span>{{ point.label }}</span>
+          <progress max="100" value="{{ point.review_percent }}"></progress>
+          <span>{{ point.reviews }} · {{ point.retention }}</span>
+        </li>
+        {% endfor %}
+      </ul>
+      {% endif %}
+    </section>
+
+    <section>
+      <h3>Weekly activity</h3>
+      {% if weekly.is_empty() %}
+      <p class="kbd-hint">No weekly review activity yet.</p>
+      {% else %}
+      <ul class="chart-list">
+        {% for point in weekly %}
+        <li>
+          <span>{{ point.label }}</span>
+          <progress max="100" value="{{ point.review_percent }}"></progress>
+          <span>{{ point.reviews }} · {{ point.retention }}</span>
+        </li>
+        {% endfor %}
+      </ul>
+      {% endif %}
+    </section>
+
+    <section>
+      <h3>Monthly activity</h3>
+      {% if monthly.is_empty() %}
+      <p class="kbd-hint">No monthly review activity yet.</p>
+      {% else %}
+      <ul class="chart-list">
+        {% for point in monthly %}
+        <li>
+          <span>{{ point.label }}</span>
+          <progress max="100" value="{{ point.review_percent }}"></progress>
+          <span>{{ point.reviews }} · {{ point.retention }}</span>
+        </li>
+        {% endfor %}
+      </ul>
+      {% endif %}
+    </section>
+
+    <section>
+      <h3>Maturity distribution</h3>
+      <ul class="chart-list">
+        {% for point in maturity %}
+        <li>
+          <span>{{ point.label }}</span>
+          <progress max="100" value="{{ point.bar_percent }}"></progress>
+          <span>{{ point.count }} · {{ point.percent }}</span>
+        </li>
+        {% endfor %}
+      </ul>
+    </section>
+  </section>
+</main>
+{% endblock %}

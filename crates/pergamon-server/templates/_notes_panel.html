@@ -1,0 +1,81 @@
+<section id="notes-panel" class="notes-panel">
+  <form
+    class="notes-filters"
+    method="get"
+    action="/notes"
+    hx-get="/notes"
+    hx-target="#notes-panel"
+    hx-swap="outerHTML"
+    hx-push-url="true"
+  >
+    <input type="search" name="q" value="{{ panel.query }}" placeholder="Search notes…" aria-label="Search notes" />
+    <select name="source" aria-label="Filter by source">
+      <option value="" {% if panel.source == "" %}selected{% endif %}>All sources</option>
+      {% for source in panel.sources %}
+      <option value="{{ source.id }}" {% if panel.source == source.id.as_str() %}selected{% endif %}>{{ source.title }}</option>
+      {% endfor %}
+    </select>
+    <button type="submit">Filter</button>
+    <span class="kbd-hint">{{ panel.total }} note{% if panel.total != 1 %}s{% endif %}</span>
+  </form>
+
+  <section class="create-note">
+    <h3>Create note</h3>
+    <form
+      method="post"
+      action="/notes/create"
+      hx-post="/notes/create"
+      hx-target="#notes-panel"
+      hx-swap="outerHTML"
+    >
+      {% if panel.query != "" %}<input type="hidden" name="q" value="{{ panel.query }}" />{% endif %}
+      {% if panel.source != "" %}<input type="hidden" name="source" value="{{ panel.source }}" />{% endif %}
+      <select name="content_item_id" aria-label="Note source" required>
+        {% for item in panel.create_targets %}
+        <option value="{{ item.id }}">{{ item.label }}</option>
+        {% endfor %}
+      </select>
+      <textarea name="body" placeholder="Write note…" aria-label="Note body" required></textarea>
+      <button type="submit">Add note</button>
+    </form>
+  </section>
+
+  {% if panel.notes.is_empty() %}
+  <p class="kbd-hint">No notes match these filters.</p>
+  {% else %}
+  <ul class="notes-list">
+    {% for note in panel.notes %}
+    <li class="note-row">
+      <div class="note-meta">
+        <a href="{{ note.source_href }}">{{ note.source_title }}</a>
+        <span>Created {{ note.created_at }}</span>
+        <span>Updated {{ note.updated_at }}</span>
+      </div>
+      <form
+        method="post"
+        action="/notes/{{ note.id }}/update"
+        hx-post="/notes/{{ note.id }}/update"
+        hx-target="#notes-panel"
+        hx-swap="outerHTML"
+      >
+        {% if panel.query != "" %}<input type="hidden" name="q" value="{{ panel.query }}" />{% endif %}
+        {% if panel.source != "" %}<input type="hidden" name="source" value="{{ panel.source }}" />{% endif %}
+        <textarea name="body" aria-label="Edit note">{{ note.body }}</textarea>
+        <button type="submit" class="secondary">Save</button>
+      </form>
+      <form
+        method="post"
+        action="/notes/{{ note.id }}/delete"
+        hx-post="/notes/{{ note.id }}/delete"
+        hx-target="#notes-panel"
+        hx-swap="outerHTML"
+      >
+        {% if panel.query != "" %}<input type="hidden" name="q" value="{{ panel.query }}" />{% endif %}
+        {% if panel.source != "" %}<input type="hidden" name="source" value="{{ panel.source }}" />{% endif %}
+        <button type="submit" class="secondary outline">Delete</button>
+      </form>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</section>

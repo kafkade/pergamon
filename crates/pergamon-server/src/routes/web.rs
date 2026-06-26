@@ -10,21 +10,27 @@
 
 #![allow(clippy::significant_drop_tightening)]
 
+use std::collections::BTreeSet;
+use std::fmt::Write as _;
+
 use askama::Template;
 use axum::Form;
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{Html, IntoResponse, Redirect, Response};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
 use pergamon_core::content_type::ContentType;
-use pergamon_core::model::ContentItem;
+use pergamon_core::fsrs::Rating;
+use pergamon_core::model::{ContentItem, HighlightMeta, Note, ReviewCard, ReviewStatsReport};
 use pergamon_core::status::DocumentStatus;
-use pergamon_storage::{ContentItemFilter, ContentItemSort, Database};
+use pergamon_storage::{ContentItemFilter, ContentItemSort, Database, StorageError};
 
+use crate::routes::review::apply_review_rating;
 use crate::state::AppState;
+use crate::util::parse_date_param;
 
 // ======================================================================
 // View models
@@ -917,4 +923,993 @@ fn total_pages(total: u64, per_page: u32) -> u32 {
     }
     let pages = total.div_ceil(u64::from(per_page));
     u32::try_from(pages).unwrap_or(u32::MAX)
+}
+
+// ======================================================================
+// Highlights, notes, and review web views
+// ======================================================================
+
+struct HighlightSourceOptionView {
+    id: String,
+    title: String,
+}
+
+struct HighlightFilterView {
+    tag: String,
+    source: String,
+    since: String,
+    before: String,
+    color: String,
+    tags: Vec<String>,
+    sources: Vec<HighlightSourceOptionView>,
+    colors: Vec<String>,
+}
+
+struct HighlightRowView {
+    id: String,
+    quote_text: String,
+    note: String,
+    color: String,
+    created_at: String,
+    source_title: String,
+    source_href: String,
+}
+
+struct HighlightGroupView {
+    key: String,
+    title: String,
+    href: String,
+    highlights: Vec<HighlightRowView>,
+}
+
+#[derive(Template)]
+#[template(path = "highlights.html")]
+struct HighlightsTemplate {
+    filter: HighlightFilterView,
+    groups: Vec<HighlightGroupView>,
+    total: usize,
+}
+
+#[derive(Template)]
+#[template(path = "_highlight_row.html")]
+struct HighlightRowTemplate {
+    row: HighlightRowView,
+}
+
+struct NoteSourceOptionView {
+    id: String,
+    title: String,
+}
+
+struct NoteTargetOptionView {
+    id: String,
+    label: String,
+}
+
+struct NoteRowView {
+    id: String,
+    body: String,
+    created_at: String,
+    updated_at: String,
+    source_title: String,
+    source_href: String,
+}
+
+struct NotesPanelView {
+    query: String,
+    source: String,
+    sources: Vec<NoteSourceOptionView>,
+    create_targets: Vec<NoteTargetOptionView>,
+    notes: Vec<NoteRowView>,
+    total: usize,
+}
+
+#[derive(Template)]
+#[template(path = "notes.html")]
+struct NotesTemplate {
+    panel: NotesPanelView,
+}
+
+#[derive(Template)]
+#[template(path = "_notes_panel.html")]
+struct NotesPanelTemplate {
+    panel: NotesPanelView,
+}
+
+struct ReviewCardView {
+    card_id: String,
+    source_title: String,
+    source_href: String,
+    state: String,
+    due_at: String,
+    quote_text: String,
+    note: String,
+    color: String,
+}
+
+struct ReviewPanelView {
+    has_card: bool,
+    card: ReviewCardView,
+    queue_remaining: usize,
+    reviewed_today: i64,
+    due_count: i64,
+    current_streak: i64,
+    last_rating: String,
+}
+
+#[derive(Template)]
+#[template(path = "review.html")]
+struct ReviewTemplate {
+    panel: ReviewPanelView,
+}
+
+#[derive(Template)]
+#[template(path = "_review_panel.html")]
+struct ReviewPanelTemplate {
+    panel: ReviewPanelView,
+}
+
+struct StatCardView {
+    label: String,
+    value: String,
+}
+
+struct StatSeriesPointView {
+    label: String,
+    reviews: i64,
+    retention: String,
+    review_percent: i64,
+}
+
+struct MaturityPointView {
+    label: String,
+    count: i64,
+    percent: String,
+    bar_percent: i64,
+}
+
+#[derive(Template)]
+#[template(path = "review_stats.html")]
+struct ReviewStatsTemplate {
+    cards: Vec<StatCardView>,
+    daily: Vec<StatSeriesPointView>,
+    weekly: Vec<StatSeriesPointView>,
+    monthly: Vec<StatSeriesPointView>,
+    maturity: Vec<MaturityPointView>,
+}
+
+#[derive(Debug, Default, Deserialize, Clone)]
+pub struct HighlightsQuery {
+    tag: Option<String>,
+    source: Option<Uuid>,
+    since: Option<String>,
+    before: Option<String>,
+    color: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize, Clone)]
+pub struct HighlightsExportQuery {
+    format: Option<String>,
+    tag: Option<String>,
+    source: Option<Uuid>,
+    since: Option<String>,
+    before: Option<String>,
+    color: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct HighlightNoteForm {
+    #[serde(default)]
+    note: String,
+}
+
+#[derive(Debug, Default, Deserialize, Clone)]
+pub struct NotesQuery {
+    q: Option<String>,
+    source: Option<Uuid>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateNoteWebForm {
+    content_item_id: Uuid,
+    body: String,
+    #[serde(default)]
+    q: Option<String>,
+    #[serde(default)]
+    source: Option<Uuid>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateNoteWebForm {
+    body: String,
+    #[serde(default)]
+    q: Option<String>,
+    #[serde(default)]
+    source: Option<Uuid>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct DeleteNoteWebForm {
+    #[serde(default)]
+    q: Option<String>,
+    #[serde(default)]
+    source: Option<Uuid>,
+}
+
+#[derive(Debug, Default, Deserialize, Clone)]
+pub struct ReviewQuery {
+    last: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SubmitReviewWebForm {
+    rating: u32,
+}
+
+#[derive(Debug, Serialize)]
+struct HighlightExportRow {
+    id: String,
+    source_id: Option<String>,
+    source_title: String,
+    source_href: String,
+    quote_text: String,
+    note: Option<String>,
+    color: Option<String>,
+    created_at: String,
+}
+
+/// `GET /highlights` — list highlights grouped by source with filters.
+pub async fn highlights(
+    State(state): State<AppState>,
+    Query(query): Query<HighlightsQuery>,
+) -> Response {
+    let Ok(since) = parse_optional_date(query.since.as_deref()) else {
+        return bad_request();
+    };
+    let Ok(before) = parse_optional_date(query.before.as_deref()) else {
+        return bad_request();
+    };
+
+    let Ok(db) = state.db.lock() else {
+        return internal_error();
+    };
+
+    let tag = non_empty(query.tag.as_deref());
+    let color = non_empty(query.color.as_deref());
+    let Ok(rows) = list_highlights_for_filters(&db, query.source, tag, since, before, color) else {
+        return internal_error();
+    };
+    let Ok(all_rows) = db.list_highlights(None, None, None, None, None) else {
+        return internal_error();
+    };
+    let template = build_highlights_template(&db, &query, &rows, &all_rows);
+    render(&template)
+}
+
+/// `GET /highlights/export` — export filtered highlights as JSON or Markdown.
+pub async fn highlights_export(
+    State(state): State<AppState>,
+    Query(query): Query<HighlightsExportQuery>,
+) -> Response {
+    let Ok(since) = parse_optional_date(query.since.as_deref()) else {
+        return bad_request();
+    };
+    let Ok(before) = parse_optional_date(query.before.as_deref()) else {
+        return bad_request();
+    };
+
+    let format = query.format.as_deref().unwrap_or("json");
+    let tag = non_empty(query.tag.as_deref());
+    let color = non_empty(query.color.as_deref());
+
+    let Ok(db) = state.db.lock() else {
+        return internal_error();
+    };
+    let Ok(rows) = list_highlights_for_filters(&db, query.source, tag, since, before, color) else {
+        return internal_error();
+    };
+
+    let export_rows: Vec<HighlightExportRow> = rows
+        .iter()
+        .map(|(item, meta)| {
+            let (_source_key, source_title, source_href) = highlight_source_context(&db, meta);
+            HighlightExportRow {
+                id: item.id.to_string(),
+                source_id: meta.source_item_id.map(|id| id.to_string()),
+                source_title,
+                source_href,
+                quote_text: meta.quote_text.clone(),
+                note: meta.note.clone(),
+                color: meta.color.clone(),
+                created_at: fmt_date(Some(item.created_at)),
+            }
+        })
+        .collect();
+
+    if format.eq_ignore_ascii_case("markdown") {
+        let mut out = String::new();
+        let _ = writeln!(out, "# pergamon highlights export");
+        let _ = writeln!(out);
+        let mut current_group = String::new();
+        for row in &export_rows {
+            let group = if row.source_title.is_empty() {
+                "Unlinked source"
+            } else {
+                row.source_title.as_str()
+            };
+            if current_group != group {
+                group.clone_into(&mut current_group);
+                let _ = writeln!(out, "## {group}");
+                let _ = writeln!(out);
+            }
+            let _ = writeln!(out, "> {}", row.quote_text);
+            if let Some(note) = &row.note
+                && !note.trim().is_empty()
+            {
+                let _ = writeln!(out, "*{note}*");
+            }
+            if let Some(color_value) = &row.color
+                && !color_value.is_empty()
+            {
+                let _ = writeln!(out, "- color: {color_value}");
+            }
+            if !row.source_href.is_empty() {
+                let _ = writeln!(out, "- source: [{}]({})", row.source_title, row.source_href);
+            }
+            let _ = writeln!(out, "- captured: {}", row.created_at);
+            let _ = writeln!(out);
+        }
+        return (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, "text/markdown; charset=utf-8"),
+                (
+                    header::CONTENT_DISPOSITION,
+                    "attachment; filename=\"highlights.md\"",
+                ),
+            ],
+            out,
+        )
+            .into_response();
+    }
+
+    let Ok(json_body) = serde_json::to_string_pretty(&export_rows) else {
+        return internal_error();
+    };
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"highlights.json\"",
+            ),
+        ],
+        json_body,
+    )
+        .into_response()
+}
+
+/// `POST /highlights/{id}/note` — update a highlight note inline.
+pub async fn update_highlight_note(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Form(form): Form<HighlightNoteForm>,
+) -> Response {
+    let Ok(db) = state.db.lock() else {
+        return internal_error();
+    };
+
+    let Ok(existing) = db.get_highlight_meta(id) else {
+        return not_found();
+    };
+
+    let updated_note = if form.note.trim().is_empty() {
+        None
+    } else {
+        Some(form.note.as_str())
+    };
+    if db
+        .update_highlight_meta(id, updated_note, existing.color.as_deref())
+        .is_err()
+    {
+        return not_found();
+    }
+
+    if !is_htmx(&headers) {
+        return Redirect::to("/highlights").into_response();
+    }
+
+    let Ok(item) = db.get_content_item(id) else {
+        return not_found();
+    };
+    let Ok(meta) = db.get_highlight_meta(id) else {
+        return not_found();
+    };
+    let row = build_highlight_row_view(&db, &item, &meta);
+    render(&HighlightRowTemplate { row })
+}
+
+/// `GET /notes` — list notes with source context and search.
+pub async fn notes(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<NotesQuery>,
+) -> Response {
+    render_notes_response(&state, &headers, &query)
+}
+
+/// `POST /notes/create` — create a note from the notes page.
+pub async fn create_note_web(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<CreateNoteWebForm>,
+) -> Response {
+    if form.body.trim().is_empty() {
+        return bad_request();
+    }
+    let Ok(db) = state.db.lock() else {
+        return internal_error();
+    };
+    if db.get_content_item(form.content_item_id).is_err() {
+        return not_found();
+    }
+    let now = OffsetDateTime::now_utc();
+    let note = Note {
+        id: Uuid::new_v4(),
+        content_item_id: form.content_item_id,
+        body: form.body.clone(),
+        created_at: now,
+        updated_at: now,
+    };
+    if db.insert_note(&note).is_err() {
+        return internal_error();
+    }
+    drop(db);
+
+    let query = NotesQuery {
+        q: form.q.clone(),
+        source: form.source,
+    };
+    if !is_htmx(&headers) {
+        return Redirect::to(&notes_url(&query)).into_response();
+    }
+    render_notes_panel(&state, &query)
+}
+
+/// `POST /notes/{id}/update` — update an existing note inline.
+pub async fn update_note_web(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Form(form): Form<UpdateNoteWebForm>,
+) -> Response {
+    if form.body.trim().is_empty() {
+        return bad_request();
+    }
+    let Ok(db) = state.db.lock() else {
+        return internal_error();
+    };
+    match db.update_note(id, &form.body) {
+        Ok(()) => {}
+        Err(err) => {
+            if matches!(err, StorageError::NotFound { .. }) {
+                return not_found();
+            }
+            return internal_error();
+        }
+    }
+    drop(db);
+
+    let query = NotesQuery {
+        q: form.q.clone(),
+        source: form.source,
+    };
+    if !is_htmx(&headers) {
+        return Redirect::to(&notes_url(&query)).into_response();
+    }
+    render_notes_panel(&state, &query)
+}
+
+/// `POST /notes/{id}/delete` — delete a note inline.
+pub async fn delete_note_web(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Form(form): Form<DeleteNoteWebForm>,
+) -> Response {
+    let Ok(db) = state.db.lock() else {
+        return internal_error();
+    };
+    match db.delete_note(id) {
+        Ok(true) => {}
+        Ok(false) => return not_found(),
+        Err(_) => return internal_error(),
+    }
+    drop(db);
+
+    let query = NotesQuery {
+        q: form.q.clone(),
+        source: form.source,
+    };
+    if !is_htmx(&headers) {
+        return Redirect::to(&notes_url(&query)).into_response();
+    }
+    render_notes_panel(&state, &query)
+}
+
+/// `GET /review` — card-based review queue.
+pub async fn review(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ReviewQuery>,
+) -> Response {
+    let Ok(db) = state.db.lock() else {
+        return internal_error();
+    };
+    let Ok(panel) = build_review_panel(&db, query.last.as_deref()) else {
+        return internal_error();
+    };
+    if is_htmx(&headers) {
+        return render(&ReviewPanelTemplate { panel });
+    }
+    render(&ReviewTemplate { panel })
+}
+
+/// `POST /review/{card_id}` — submit a rating from the web review queue.
+pub async fn submit_review_web(
+    State(state): State<AppState>,
+    Path(card_id): Path<Uuid>,
+    headers: HeaderMap,
+    Form(form): Form<SubmitReviewWebForm>,
+) -> Response {
+    let Some(rating) = Rating::from_value(form.rating) else {
+        return bad_request();
+    };
+
+    let last_rating = match rating {
+        Rating::Again => "again",
+        Rating::Hard => "hard",
+        Rating::Good => "good",
+        Rating::Easy => "easy",
+    };
+
+    let Ok(db) = state.db.lock() else {
+        return internal_error();
+    };
+    match apply_review_rating(&db, card_id, rating, OffsetDateTime::now_utc()) {
+        Ok(_) => {}
+        Err(err) => {
+            if matches!(err, StorageError::NotFound { .. }) {
+                return not_found();
+            }
+            return internal_error();
+        }
+    }
+
+    if !is_htmx(&headers) {
+        return Redirect::to(&format!("/review?last={last_rating}")).into_response();
+    }
+
+    let Ok(panel) = build_review_panel(&db, Some(last_rating)) else {
+        return internal_error();
+    };
+    render(&ReviewPanelTemplate { panel })
+}
+
+/// `GET /review/stats` — review statistics dashboard page.
+pub async fn review_stats_page(State(state): State<AppState>) -> Response {
+    let Ok(db) = state.db.lock() else {
+        return internal_error();
+    };
+    let Ok(report) = db.review_stats_report(OffsetDateTime::now_utc()) else {
+        return internal_error();
+    };
+
+    let cards = vec![
+        StatCardView {
+            label: "Total cards".to_owned(),
+            value: report.stats.total_cards.to_string(),
+        },
+        StatCardView {
+            label: "Due now".to_owned(),
+            value: report.stats.due_count.to_string(),
+        },
+        StatCardView {
+            label: "Reviews today".to_owned(),
+            value: report.stats.reviews_today.to_string(),
+        },
+        StatCardView {
+            label: "Observed retention".to_owned(),
+            value: format!("{:.1}%", report.stats.observed_retention * 100.0),
+        },
+        StatCardView {
+            label: "Current streak".to_owned(),
+            value: report.stats.current_streak.to_string(),
+        },
+        StatCardView {
+            label: "Longest streak".to_owned(),
+            value: report.stats.longest_streak.to_string(),
+        },
+    ];
+
+    let daily = build_series_points_daily(&report);
+    let weekly = build_series_points_weekly(&report);
+    let monthly = build_series_points_monthly(&report);
+    let maturity = build_maturity_points(&report);
+
+    render(&ReviewStatsTemplate {
+        cards,
+        daily,
+        weekly,
+        monthly,
+        maturity,
+    })
+}
+
+fn parse_optional_date(value: Option<&str>) -> Result<Option<OffsetDateTime>, ()> {
+    non_empty(value).map_or_else(
+        || Ok(None),
+        |v| parse_date_param(v).map(Some).map_err(|_| ()),
+    )
+}
+
+fn list_highlights_for_filters(
+    db: &Database,
+    source: Option<Uuid>,
+    tag: Option<&str>,
+    since: Option<OffsetDateTime>,
+    before: Option<OffsetDateTime>,
+    color: Option<&str>,
+) -> Result<Vec<(ContentItem, HighlightMeta)>, StorageError> {
+    let mut rows = db.list_highlights(source, tag, since, before, None)?;
+    if let Some(color_filter) = color {
+        rows.retain(|(_, meta)| {
+            meta.color
+                .as_deref()
+                .is_some_and(|value| value.eq_ignore_ascii_case(color_filter))
+        });
+    }
+    Ok(rows)
+}
+
+fn build_highlights_template(
+    db: &Database,
+    query: &HighlightsQuery,
+    rows: &[(ContentItem, HighlightMeta)],
+    all_rows: &[(ContentItem, HighlightMeta)],
+) -> HighlightsTemplate {
+    let tags = db
+        .list_tags_with_counts()
+        .map(|rows| rows.into_iter().map(|r| r.tag_name).collect())
+        .unwrap_or_default();
+
+    let mut source_opts = BTreeSet::<(String, String)>::new();
+    let mut color_opts = BTreeSet::<String>::new();
+    for (_item, meta) in all_rows {
+        let (_, title, _) = highlight_source_context(db, meta);
+        if let Some(source_id) = meta.source_item_id {
+            source_opts.insert((source_id.to_string(), title));
+        }
+        if let Some(color) = &meta.color
+            && !color.is_empty()
+        {
+            color_opts.insert(color.clone());
+        }
+    }
+
+    let mut groups: Vec<HighlightGroupView> = Vec::new();
+    for (item, meta) in rows {
+        let (source_key, source_title, source_href) = highlight_source_context(db, meta);
+        let row = build_highlight_row_view(db, item, meta);
+        if let Some(group) = groups.iter_mut().find(|group| group.key == source_key) {
+            group.highlights.push(row);
+        } else {
+            groups.push(HighlightGroupView {
+                key: source_key,
+                title: source_title,
+                href: source_href,
+                highlights: vec![row],
+            });
+        }
+    }
+
+    HighlightsTemplate {
+        filter: HighlightFilterView {
+            tag: query.tag.clone().unwrap_or_default(),
+            source: query.source.map(|id| id.to_string()).unwrap_or_default(),
+            since: query.since.clone().unwrap_or_default(),
+            before: query.before.clone().unwrap_or_default(),
+            color: query.color.clone().unwrap_or_default(),
+            tags,
+            sources: source_opts
+                .into_iter()
+                .map(|(id, title)| HighlightSourceOptionView { id, title })
+                .collect(),
+            colors: color_opts.into_iter().collect(),
+        },
+        total: rows.len(),
+        groups,
+    }
+}
+
+fn build_highlight_row_view(
+    db: &Database,
+    item: &ContentItem,
+    meta: &HighlightMeta,
+) -> HighlightRowView {
+    let (_, source_title, source_href) = highlight_source_context(db, meta);
+    HighlightRowView {
+        id: item.id.to_string(),
+        quote_text: meta.quote_text.clone(),
+        note: meta.note.clone().unwrap_or_default(),
+        color: meta.color.clone().unwrap_or_default(),
+        created_at: fmt_date(Some(item.created_at)),
+        source_title,
+        source_href,
+    }
+}
+
+fn highlight_source_context(db: &Database, meta: &HighlightMeta) -> (String, String, String) {
+    if let Some(source_id) = meta.source_item_id
+        && let Ok(source_item) = db.get_content_item(source_id)
+    {
+        return (
+            source_id.to_string(),
+            source_item.title,
+            format!("/items/{source_id}"),
+        );
+    }
+    (
+        "unlinked".to_owned(),
+        "Unlinked source".to_owned(),
+        String::new(),
+    )
+}
+
+fn render_notes_response(state: &AppState, headers: &HeaderMap, query: &NotesQuery) -> Response {
+    let Ok(db) = state.db.lock() else {
+        return internal_error();
+    };
+    let Ok(panel) = build_notes_panel(&db, query) else {
+        return internal_error();
+    };
+    if is_htmx(headers) {
+        return render(&NotesPanelTemplate { panel });
+    }
+    render(&NotesTemplate { panel })
+}
+
+fn render_notes_panel(state: &AppState, query: &NotesQuery) -> Response {
+    let Ok(db) = state.db.lock() else {
+        return internal_error();
+    };
+    build_notes_panel(&db, query).map_or_else(
+        |_| internal_error(),
+        |panel| render(&NotesPanelTemplate { panel }),
+    )
+}
+
+fn build_notes_panel(db: &Database, query: &NotesQuery) -> Result<NotesPanelView, StorageError> {
+    let query_text = query.q.clone().unwrap_or_default();
+    let query_lower = query_text.to_lowercase();
+    let mut notes = db.list_all_notes()?;
+    notes.retain(|note| {
+        if let Some(source_id) = query.source
+            && note.content_item_id != source_id
+        {
+            return false;
+        }
+        if query_lower.is_empty() {
+            return true;
+        }
+        note.body.to_lowercase().contains(&query_lower)
+    });
+    notes.sort_by_key(|note| std::cmp::Reverse(note.updated_at));
+
+    let all_notes = db.list_all_notes()?;
+    let mut source_opts = BTreeSet::<(String, String)>::new();
+    for note in &all_notes {
+        if let Ok(item) = db.get_content_item(note.content_item_id) {
+            source_opts.insert((item.id.to_string(), item.title));
+        }
+    }
+
+    let recent_items =
+        db.list_content_items_filtered(&ContentItemFilter::default(), Some(200), Some(0))?;
+    let create_targets = recent_items
+        .iter()
+        .map(|item| NoteTargetOptionView {
+            id: item.id.to_string(),
+            label: format!("{} · {}", item.title, item_source(db, item)),
+        })
+        .collect();
+
+    let mut note_rows = Vec::new();
+    for note in notes {
+        if let Ok(item) = db.get_content_item(note.content_item_id) {
+            note_rows.push(NoteRowView {
+                id: note.id.to_string(),
+                body: note.body,
+                created_at: fmt_date(Some(note.created_at)),
+                updated_at: fmt_date(Some(note.updated_at)),
+                source_title: item.title,
+                source_href: format!("/items/{}", item.id),
+            });
+        }
+    }
+
+    let total = note_rows.len();
+    Ok(NotesPanelView {
+        query: query_text,
+        source: query.source.map(|id| id.to_string()).unwrap_or_default(),
+        sources: source_opts
+            .into_iter()
+            .map(|(id, title)| NoteSourceOptionView { id, title })
+            .collect(),
+        create_targets,
+        notes: note_rows,
+        total,
+    })
+}
+
+fn notes_url(query: &NotesQuery) -> String {
+    let mut pairs: Vec<(&str, String)> = Vec::new();
+    if let Some(q) = non_empty(query.q.as_deref()) {
+        pairs.push(("q", q.to_owned()));
+    }
+    if let Some(source) = query.source {
+        pairs.push(("source", source.to_string()));
+    }
+    if pairs.is_empty() {
+        "/notes".to_owned()
+    } else {
+        format!("/notes?{}", encode_pairs(&pairs))
+    }
+}
+
+fn build_review_panel(
+    db: &Database,
+    last_rating: Option<&str>,
+) -> Result<ReviewPanelView, StorageError> {
+    let now = OffsetDateTime::now_utc();
+    let queue = db.list_due_review_cards(now)?;
+    let stats = db.review_stats(now)?;
+    let card = queue
+        .first()
+        .and_then(|card| build_review_card_view(db, card));
+
+    let fallback_card = ReviewCardView {
+        card_id: String::new(),
+        source_title: String::new(),
+        source_href: String::new(),
+        state: String::new(),
+        due_at: String::new(),
+        quote_text: String::new(),
+        note: String::new(),
+        color: String::new(),
+    };
+
+    Ok(ReviewPanelView {
+        has_card: card.is_some(),
+        card: card.unwrap_or(fallback_card),
+        queue_remaining: queue.len(),
+        reviewed_today: stats.reviews_today,
+        due_count: stats.due_count,
+        current_streak: stats.current_streak,
+        last_rating: last_rating.unwrap_or_default().to_owned(),
+    })
+}
+
+fn build_review_card_view(db: &Database, card: &ReviewCard) -> Option<ReviewCardView> {
+    let meta = db.get_highlight_meta(card.content_item_id).ok()?;
+    let (_source_key, source_title, source_href) = highlight_source_context(db, &meta);
+    Some(ReviewCardView {
+        card_id: card.id.to_string(),
+        source_title,
+        source_href,
+        state: card.state.as_str().to_owned(),
+        due_at: fmt_date(Some(card.due_at)),
+        quote_text: meta.quote_text,
+        note: meta.note.unwrap_or_default(),
+        color: meta.color.unwrap_or_default(),
+    })
+}
+
+fn build_series_points_daily(report: &ReviewStatsReport) -> Vec<StatSeriesPointView> {
+    let max_reviews = report
+        .daily_history
+        .iter()
+        .map(|point| point.reviews)
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    report
+        .daily_history
+        .iter()
+        .map(|point| StatSeriesPointView {
+            label: point.date.clone(),
+            reviews: point.reviews,
+            retention: format_ratio_percent(point.successes, point.reviews),
+            review_percent: (point.reviews * 100 / max_reviews),
+        })
+        .collect()
+}
+
+fn build_series_points_weekly(report: &ReviewStatsReport) -> Vec<StatSeriesPointView> {
+    let max_reviews = report
+        .weekly_history
+        .iter()
+        .map(|point| point.reviews)
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    report
+        .weekly_history
+        .iter()
+        .map(|point| StatSeriesPointView {
+            label: point.week.clone(),
+            reviews: point.reviews,
+            retention: format_ratio_percent(point.successes, point.reviews),
+            review_percent: (point.reviews * 100 / max_reviews),
+        })
+        .collect()
+}
+
+fn build_series_points_monthly(report: &ReviewStatsReport) -> Vec<StatSeriesPointView> {
+    let max_reviews = report
+        .monthly_history
+        .iter()
+        .map(|point| point.reviews)
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    report
+        .monthly_history
+        .iter()
+        .map(|point| StatSeriesPointView {
+            label: point.month.clone(),
+            reviews: point.reviews,
+            retention: format_ratio_percent(point.successes, point.reviews),
+            review_percent: (point.reviews * 100 / max_reviews),
+        })
+        .collect()
+}
+
+fn build_maturity_points(report: &ReviewStatsReport) -> Vec<MaturityPointView> {
+    let total = report.stats.total_cards.max(1);
+    let points = [
+        ("New", report.stats.new_count),
+        ("Learning", report.stats.learning_count),
+        ("Review", report.stats.review_count),
+        ("Relearning", report.stats.relearning_count),
+    ];
+    points
+        .into_iter()
+        .map(|(label, count)| MaturityPointView {
+            label: label.to_owned(),
+            count,
+            percent: format_ratio_percent(count, total),
+            bar_percent: (count * 100 / total),
+        })
+        .collect()
+}
+
+fn format_ratio_percent(numerator: i64, denominator: i64) -> String {
+    if denominator <= 0 {
+        return "0.0%".to_owned();
+    }
+    let scaled_tenths = numerator.saturating_mul(1000) / denominator;
+    let whole = scaled_tenths / 10;
+    let tenths = scaled_tenths.rem_euclid(10);
+    format!("{whole}.{tenths}%")
+}
+
+fn bad_request() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Html("<h1>400</h1><p>Invalid request.</p>".to_owned()),
+    )
+        .into_response()
 }

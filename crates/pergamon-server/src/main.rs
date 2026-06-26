@@ -715,6 +715,194 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn highlights_page_renders_with_source_context() {
+        let state = test_state();
+        let source_id = insert_item(&state, "Highlight Source", Some("A key paragraph here."));
+        {
+            let db = state.db.lock().unwrap();
+            let _ = db
+                .create_highlight(
+                    source_id,
+                    "A key paragraph",
+                    Some("remember this"),
+                    Some("yellow"),
+                )
+                .unwrap();
+        }
+        let app = build_router(state, None);
+
+        let req = Request::get("/highlights").body(Body::empty()).unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = body_string(response).await;
+        assert!(html.contains("Highlight Source"));
+        assert!(html.contains("A key paragraph"));
+        assert!(html.contains("Export JSON"));
+    }
+
+    #[tokio::test]
+    async fn highlight_note_update_htmx_updates_row() {
+        let state = test_state();
+        let source_id = insert_item(&state, "Highlight Source", Some("A key paragraph here."));
+        let highlight_id = {
+            let db = state.db.lock().unwrap();
+            db.create_highlight(source_id, "A key paragraph", None, Some("yellow"))
+                .unwrap()
+                .id
+        };
+        let app = build_router(state.clone(), None);
+
+        let req = Request::post(format!("/highlights/{highlight_id}/note"))
+            .header("HX-Request", "true")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("note=updated+from+web"))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = body_string(response).await;
+        assert!(html.contains("updated from web"));
+
+        let meta = {
+            let db = state.db.lock().unwrap();
+            db.get_highlight_meta(highlight_id).unwrap()
+        };
+        assert_eq!(meta.note.as_deref(), Some("updated from web"));
+    }
+
+    #[tokio::test]
+    async fn notes_page_filters_by_query() {
+        let state = test_state();
+        let item_id = insert_item(&state, "Noted Item", None);
+        {
+            let db = state.db.lock().unwrap();
+            let now = time::OffsetDateTime::now_utc();
+            db.insert_note(&pergamon_core::model::Note {
+                id: uuid::Uuid::new_v4(),
+                content_item_id: item_id,
+                body: "alpha idea".to_owned(),
+                created_at: now,
+                updated_at: now,
+            })
+            .unwrap();
+            db.insert_note(&pergamon_core::model::Note {
+                id: uuid::Uuid::new_v4(),
+                content_item_id: item_id,
+                body: "beta thought".to_owned(),
+                created_at: now,
+                updated_at: now,
+            })
+            .unwrap();
+        }
+        let app = build_router(state, None);
+
+        let req = Request::get("/notes?q=alpha").body(Body::empty()).unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = body_string(response).await;
+        assert!(html.contains("alpha idea"));
+        assert!(!html.contains("beta thought"));
+    }
+
+    #[tokio::test]
+    async fn notes_create_update_delete_htmx_cycle() {
+        let state = test_state();
+        let item_id = insert_item(&state, "Noted Item", None);
+        let app = build_router(state.clone(), None);
+
+        let req = Request::post("/notes/create")
+            .header("HX-Request", "true")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from(format!(
+                "content_item_id={item_id}&body=first+web+note"
+            )))
+            .unwrap();
+        let response = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = body_string(response).await;
+        assert!(html.contains("first web note"));
+
+        let note_id = {
+            let db = state.db.lock().unwrap();
+            db.list_notes_for_item(item_id).unwrap()[0].id
+        };
+
+        let req = Request::post(format!("/notes/{note_id}/update"))
+            .header("HX-Request", "true")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("body=edited+web+note"))
+            .unwrap();
+        let response = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = body_string(response).await;
+        assert!(html.contains("edited web note"));
+
+        let req = Request::post(format!("/notes/{note_id}/delete"))
+            .header("HX-Request", "true")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = body_string(response).await;
+        assert!(!html.contains("edited web note"));
+    }
+
+    #[tokio::test]
+    async fn review_page_accepts_keyboard_rating_flow() {
+        let state = test_state();
+        let card_id = enable_review(&state);
+        let app = build_router(state.clone(), None);
+
+        let req = Request::get("/review").body(Body::empty()).unwrap();
+        let response = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = body_string(response).await;
+        assert!(html.contains("1 · Again"));
+        assert!(html.contains("3 · Good"));
+
+        let req = Request::post(format!("/review/{card_id}"))
+            .header("HX-Request", "true")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("rating=3"))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let updated = {
+            let db = state.db.lock().unwrap();
+            db.get_review_card(card_id).unwrap()
+        };
+        assert_eq!(updated.review_count, 1);
+    }
+
+    #[tokio::test]
+    async fn review_stats_web_and_api_include_dashboard_data() {
+        let state = test_state();
+        let card_id = enable_review(&state);
+        let app = build_router(state, None);
+
+        let req = Request::post(format!("/api/review/{card_id}"))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"rating":"good"}"#))
+            .unwrap();
+        let _ = app.clone().oneshot(req).await.unwrap();
+
+        let req = Request::get("/review/stats").body(Body::empty()).unwrap();
+        let response = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = body_string(response).await;
+        assert!(html.contains("Monthly activity"));
+        assert!(html.contains("Maturity distribution"));
+
+        let req = Request::get("/api/review/stats")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        let report = json_body(response).await;
+        assert!(report["monthly_history"].is_array());
+    }
+
+    #[tokio::test]
     async fn static_asset_is_served() {
         let app = test_app();
         let req = Request::get("/static/app.css").body(Body::empty()).unwrap();

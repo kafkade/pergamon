@@ -23,12 +23,43 @@ body > header.app-header {
   display: flex;
   align-items: center;
   gap: 1rem;
+  flex-wrap: wrap;
 }
 
 body > header.app-header .brand {
   font-weight: 700;
   font-size: 1.1rem;
   text-decoration: none;
+}
+
+.app-nav {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.app-nav a {
+  text-decoration: none;
+  color: inherit;
+  font-size: 0.84rem;
+  border: 1px solid var(--pico-muted-border-color);
+  border-radius: 999px;
+  padding: 0.15rem 0.6rem;
+}
+
+.app-nav a:hover {
+  background: var(--pico-secondary-background);
+}
+
+body[data-page="inbox"] .app-nav a[href="/inbox"],
+body[data-page="highlights"] .app-nav a[href="/highlights"],
+body[data-page="notes"] .app-nav a[href="/notes"],
+body[data-page="review"] .app-nav a[href="/review"],
+body[data-page="review-stats"] .app-nav a[href="/review/stats"] {
+  background: var(--pico-primary-background);
+  color: var(--pico-primary-inverse);
+  border-color: var(--pico-primary);
 }
 
 .app-shell {
@@ -353,4 +384,239 @@ nav.pagination a[aria-disabled="true"] {
 
 kbd {
   font-size: 0.72rem;
+}
+
+/* ----------------------------------------------------------------- */
+/* Highlights                                                         */
+/* ----------------------------------------------------------------- */
+
+.highlights-page .highlight-filters,
+.notes-page .notes-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  margin-bottom: 0.9rem;
+}
+
+.highlights-page .highlight-filters input,
+.highlights-page .highlight-filters select,
+.notes-page .notes-filters input,
+.notes-page .notes-filters select {
+  margin: 0;
+  width: auto;
+  min-width: 9rem;
+}
+
+.highlights-page .export-links {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.8rem;
+  flex-wrap: wrap;
+}
+
+.highlights-page .highlight-group {
+  border: 1px solid var(--pico-muted-border-color);
+  border-radius: var(--pico-border-radius);
+  padding: 0.7rem;
+  margin-bottom: 0.8rem;
+}
+
+.highlights-page .highlight-group h3 {
+  margin: 0 0 0.5rem;
+  font-size: 0.96rem;
+}
+
+.highlights-page .highlight-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.highlights-page .highlight-row {
+  border-top: 1px solid var(--pico-muted-border-color);
+  padding: 0.65rem 0;
+}
+
+.highlights-page .highlight-row:first-child {
+  border-top: none;
+  padding-top: 0.1rem;
+}
+
+.highlights-page blockquote {
+  margin: 0 0 0.35rem;
+  padding: 0.45rem 0.65rem;
+  border-left: 3px solid var(--pico-primary);
+  font-size: 0.95rem;
+}
+
+.highlights-page .highlight-meta {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  font-size: 0.78rem;
+  color: var(--pico-muted-color);
+  margin-bottom: 0.35rem;
+}
+
+.highlights-page .highlight-row form {
+  margin: 0;
+  display: flex;
+  gap: 0.45rem;
+  align-items: flex-start;
+}
+
+.highlights-page .highlight-row textarea {
+  margin: 0;
+  min-height: 2.6rem;
+}
+
+/* ----------------------------------------------------------------- */
+/* Notes                                                              */
+/* ----------------------------------------------------------------- */
+
+.notes-page .notes-panel {
+  display: grid;
+  gap: 1rem;
+}
+
+.notes-page .create-note {
+  border: 1px solid var(--pico-muted-border-color);
+  border-radius: var(--pico-border-radius);
+  padding: 0.8rem;
+}
+
+.notes-page .create-note form {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.notes-page .notes-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.notes-page .note-row {
+  border: 1px solid var(--pico-muted-border-color);
+  border-radius: var(--pico-border-radius);
+  padding: 0.75rem;
+  margin-bottom: 0.65rem;
+}
+
+.notes-page .note-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  font-size: 0.78rem;
+  color: var(--pico-muted-color);
+  margin-bottom: 0.45rem;
+}
+
+.notes-page .note-row form {
+  display: flex;
+  gap: 0.45rem;
+  margin: 0;
+}
+
+.notes-page .note-row textarea {
+  margin: 0;
+  min-height: 3.2rem;
+}
+
+/* ----------------------------------------------------------------- */
+/* Review and stats                                                   */
+/* ----------------------------------------------------------------- */
+
+.review-page .review-shell,
+.review-stats-page .review-stats-shell {
+  max-width: 54rem;
+  margin: 0 auto;
+}
+
+.review-page .review-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.8rem;
+  font-size: 0.85rem;
+  color: var(--pico-muted-color);
+  margin-bottom: 0.7rem;
+}
+
+.review-page .review-card {
+  border: 1px solid var(--pico-muted-border-color);
+  border-radius: var(--pico-border-radius);
+  padding: 0.95rem;
+}
+
+.review-page .review-card h2 {
+  margin-top: 0;
+}
+
+.review-page .review-answer {
+  margin: 0.8rem 0;
+}
+
+.review-page .review-answer blockquote {
+  margin: 0.5rem 0;
+}
+
+.review-page .review-actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(7.5rem, 1fr));
+  gap: 0.45rem;
+}
+
+.review-page .review-actions button {
+  width: 100%;
+  margin: 0;
+}
+
+.review-page .review-empty {
+  border: 1px solid var(--pico-muted-border-color);
+  border-radius: var(--pico-border-radius);
+  padding: 1rem;
+}
+
+.review-stats-page .stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  gap: 0.6rem;
+  margin-bottom: 1rem;
+}
+
+.review-stats-page .stat-card {
+  border: 1px solid var(--pico-muted-border-color);
+  border-radius: var(--pico-border-radius);
+  padding: 0.65rem;
+}
+
+.review-stats-page .stat-card h4 {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--pico-muted-color);
+}
+
+.review-stats-page .stat-card strong {
+  font-size: 1.15rem;
+}
+
+.review-stats-page .chart-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.review-stats-page .chart-list li {
+  display: grid;
+  grid-template-columns: minmax(5rem, 9rem) 1fr auto;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.45rem;
+}
+
+.review-stats-page progress {
+  width: 100%;
+  height: 0.7rem;
 }
