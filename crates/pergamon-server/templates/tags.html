@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+
+{% block title %}Tags · pergamon{% endblock %}
+{% block page %}tags{% endblock %}
+
+{% block content %}
+<main class="app-main tags-page">
+  <div class="filter-bar">
+    <h1>Tags</h1>
+    <span class="kbd-hint">{{ total }} tag{% if total != 1 %}s{% endif %}</span>
+  </div>
+
+  {% if tags.is_empty() %}
+  <p class="kbd-hint">No tags yet. Tag items from the reader or inbox to see them here.</p>
+  {% else %}
+  <ul class="tag-cloud">
+    {% for tag in tags %}
+    <li class="tag-cloud-item">
+      <a class="tag-link tag-w{{ tag.weight }}" href="{{ tag.filter_href }}">
+        #{{ tag.name }}<span class="count">{{ tag.count }}</span>
+      </a>
+    </li>
+    {% endfor %}
+  </ul>
+
+  <h2>Manage tags</h2>
+  <table class="tag-manage">
+    <thead>
+      <tr><th>Tag</th><th>Items</th><th>Rename</th><th>Merge into</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for tag in tags %}
+      <tr>
+        <td><a href="{{ tag.filter_href }}">#{{ tag.name }}</a></td>
+        <td>{{ tag.count }}</td>
+        <td>
+          <form method="post" action="/tags/{{ tag.name }}/rename" class="inline-form">
+            <input type="text" name="new_name" value="{{ tag.name }}" aria-label="New name for {{ tag.name }}" required />
+            <button type="submit" class="secondary outline">Rename</button>
+          </form>
+        </td>
+        <td>
+          <form method="post" action="/tags/{{ tag.name }}/merge" class="inline-form">
+            <input type="text" name="target" placeholder="target tag" aria-label="Merge {{ tag.name }} into" required />
+            <button type="submit" class="secondary outline">Merge</button>
+          </form>
+        </td>
+        <td>
+          <form method="post" action="/tags/{{ tag.name }}/delete" class="inline-form"
+                onsubmit="return confirm('Delete tag #{{ tag.name }}? This removes it from all items.');">
+            <button type="submit" class="secondary outline danger">Delete</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</main>
+{% endblock %}

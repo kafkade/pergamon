@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+
+{% block title %}{{ name }} · pergamon{% endblock %}
+{% block page %}collections{% endblock %}
+
+{% block content %}
+<main class="app-main collection-detail-page">
+  <div class="filter-bar collection-detail-header">
+    <a href="/collections" class="back-link">← Collections</a>
+    <h1>{% if is_smart %}✨{% else %}📁{% endif %} {{ name }}</h1>
+    <span class="kbd-hint">{{ member_count }} item{% if member_count != 1 %}s{% endif %}</span>
+  </div>
+
+  <div class="collection-controls">
+    <form method="post" action="/collections/{{ id }}/rename" class="inline-form">
+      <input type="text" name="name" value="{{ name }}" aria-label="Rename collection" required />
+      <button type="submit" class="secondary outline">Rename</button>
+    </form>
+
+    <form method="post" action="/collections/{{ id }}/delete" class="inline-form"
+          onsubmit="return confirm('Delete this collection? Items are not deleted.');">
+      <button type="submit" class="secondary outline danger">Delete collection</button>
+    </form>
+  </div>
+
+  {% if is_smart %}
+  <form method="post" action="/collections/{{ id }}/filter" class="smart-filter-editor">
+    <label for="filter_query">Smart filter (DSL)</label>
+    <input id="filter_query" type="text" name="filter_query" value="{{ filter_query }}"
+           aria-label="Smart filter query" />
+    <small class="kbd-hint">Keys: <code>text:</code> <code>type:</code> <code>tag:</code> <code>status:</code> <code>source:</code> <code>since:</code> <code>before:</code></small>
+    <button type="submit">Update filter</button>
+  </form>
+  {% endif %}
+
+  {% if members.is_empty() %}
+  <p class="kbd-hint">No items here yet.{% if is_smart %} Adjust the filter, or save more matching content.{% endif %}</p>
+  {% else %}
+  <ul class="item-list collection-members{% if !is_smart %} reorderable{% endif %}"
+      {% if !is_smart %}data-reorder-list data-reorder-url="{{ reorder_url }}"{% endif %}>
+    {% for member in members %}
+    <li class="item-row collection-member {% if member.item.is_read %}read{% else %}unread{% endif %}"
+        data-item-row data-item-id="{{ member.item.id }}"
+        {% if !is_smart %}draggable="true" data-reorder-item{% endif %}
+        {% if member.item.has_url %}data-item-url="{{ member.item.url }}"{% endif %}>
+      {% if !is_smart %}<span class="drag-handle" aria-hidden="true" title="Drag to reorder">⠿</span>{% endif %}
+      {% if member.item.favicon_url != "" %}
+      <img class="item-favicon" src="{{ member.item.favicon_url }}" alt="" loading="lazy" />
+      {% else %}
+      <span class="item-favicon" aria-hidden="true">•</span>
+      {% endif %}
+      <div class="item-body">
+        <p class="item-title"><a href="{{ member.item.reader_url }}">{{ member.item.title }}</a></p>
+        <div class="item-meta">
+          <span class="item-source">{{ member.item.source }}</span>
+          <span class="item-type">{{ member.item.type_label }}</span>
+          {% if member.item.date != "" %}<span class="item-date">{{ member.item.date }}</span>{% endif %}
+          <span class="item-status">{{ member.item.status }}</span>
+        </div>
+      </div>
+      {% if !is_smart %}
+      <div class="item-actions member-actions">
+        <form method="post" action="{{ member.move_up_href }}" class="inline-form">
+          <input type="hidden" name="dir" value="up" />
+          <button type="submit" class="secondary outline" title="Move up" {% if member.is_first %}disabled{% endif %}>↑</button>
+        </form>
+        <form method="post" action="{{ member.move_down_href }}" class="inline-form">
+          <input type="hidden" name="dir" value="down" />
+          <button type="submit" class="secondary outline" title="Move down" {% if member.is_last %}disabled{% endif %}>↓</button>
+        </form>
+        <form method="post" action="{{ member.remove_href }}" class="inline-form">
+          <button type="submit" class="secondary outline danger" title="Remove from collection">×</button>
+        </form>
+      </div>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</main>
+{% endblock %}

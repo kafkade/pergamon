@@ -37,19 +37,19 @@ use crate::util::parse_date_param;
 // ======================================================================
 
 /// A single content item rendered as a list row or reader header.
-struct ItemView {
-    id: String,
-    title: String,
-    reader_url: String,
-    has_url: bool,
-    url: String,
-    favicon_url: String,
-    source: String,
-    type_label: String,
-    date: String,
-    is_read: bool,
-    status: String,
-    excerpt: String,
+pub struct ItemView {
+    pub id: String,
+    pub title: String,
+    pub reader_url: String,
+    pub has_url: bool,
+    pub url: String,
+    pub favicon_url: String,
+    pub source: String,
+    pub type_label: String,
+    pub date: String,
+    pub is_read: bool,
+    pub status: String,
+    pub excerpt: String,
 }
 
 /// A sidebar navigation link with an item count.
@@ -501,7 +501,7 @@ pub async fn bulk(
 // ======================================================================
 
 /// Render a template into an HTML response, mapping render errors to 500.
-fn render<T: Template>(tmpl: &T) -> Response {
+pub fn render<T: Template>(tmpl: &T) -> Response {
     match tmpl.render() {
         Ok(html) => Html(html).into_response(),
         Err(e) => {
@@ -532,7 +532,7 @@ fn tag_section_response(state: &AppState, id: Uuid, headers: &HeaderMap) -> Resp
 }
 
 /// A simple 404 HTML response.
-fn not_found() -> Response {
+pub fn not_found() -> Response {
     (
         StatusCode::NOT_FOUND,
         Html("<h1>404</h1><p>Not found. <a href=\"/inbox\">Back to inbox</a></p>".to_owned()),
@@ -541,7 +541,7 @@ fn not_found() -> Response {
 }
 
 /// A simple 500 HTML response.
-fn internal_error() -> Response {
+pub fn internal_error() -> Response {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
         Html("<h1>500</h1><p>Something went wrong.</p>".to_owned()),
@@ -550,7 +550,7 @@ fn internal_error() -> Response {
 }
 
 /// Whether the request was issued by HTMX.
-fn is_htmx(headers: &HeaderMap) -> bool {
+pub fn is_htmx(headers: &HeaderMap) -> bool {
     headers
         .get("HX-Request")
         .and_then(|v| v.to_str().ok())
@@ -562,7 +562,7 @@ fn is_htmx(headers: &HeaderMap) -> bool {
 // ======================================================================
 
 /// Construct an [`ItemView`] for a content item, resolving its source.
-fn build_item_view(db: &Database, item: &ContentItem) -> ItemView {
+pub fn build_item_view(db: &Database, item: &ContentItem) -> ItemView {
     let favicon = if let Ok(meta) = db.get_bookmark_meta(item.id)
         && let Some(f) = meta.favicon_url
     {
@@ -588,7 +588,7 @@ fn build_item_view(db: &Database, item: &ContentItem) -> ItemView {
 }
 
 /// Resolve a human-readable source label for an item.
-fn item_source(db: &Database, item: &ContentItem) -> String {
+pub fn item_source(db: &Database, item: &ContentItem) -> String {
     if item.content_type == ContentType::FeedItem {
         if let Ok(meta) = db.get_feed_item_meta(item.id)
             && let Ok(feed) = db.get_feed(meta.feed_id)
@@ -748,17 +748,17 @@ const CONTENT_TYPE_VALUES: [&str; 6] = [
 ];
 
 /// Treat empty strings as absent.
-fn non_empty(value: Option<&str>) -> Option<&str> {
+pub fn non_empty(value: Option<&str>) -> Option<&str> {
     value.filter(|v| !v.is_empty())
 }
 
 /// Parse a status query value.
-fn parse_status(value: Option<&str>) -> Option<DocumentStatus> {
+pub fn parse_status(value: Option<&str>) -> Option<DocumentStatus> {
     non_empty(value).and_then(|v| v.parse().ok())
 }
 
 /// Parse a content type query value.
-fn parse_content_type(value: Option<&str>) -> Option<ContentType> {
+pub fn parse_content_type(value: Option<&str>) -> Option<ContentType> {
     non_empty(value).and_then(|v| v.parse().ok())
 }
 
@@ -794,7 +794,7 @@ fn action_to_status(action: &str) -> Option<DocumentStatus> {
 }
 
 /// Human-readable label for a content type.
-const fn type_label(ct: ContentType) -> &'static str {
+pub const fn type_label(ct: ContentType) -> &'static str {
     match ct {
         ContentType::FeedItem => "Feed",
         ContentType::Article => "Article",
@@ -806,7 +806,7 @@ const fn type_label(ct: ContentType) -> &'static str {
 }
 
 /// Format an optional timestamp as `YYYY-MM-DD`.
-fn fmt_date(dt: Option<OffsetDateTime>) -> String {
+pub fn fmt_date(dt: Option<OffsetDateTime>) -> String {
     dt.map_or_else(String::new, |d| {
         let date = d.date();
         format!(
@@ -841,7 +841,7 @@ fn split_paragraphs(text: Option<&str>) -> Vec<String> {
 }
 
 /// Extract the host portion of a URL for display.
-fn host_of(url: &str) -> Option<String> {
+pub fn host_of(url: &str) -> Option<String> {
     url::Url::parse(url).ok().and_then(|u| {
         u.host_str()
             .map(|h| h.trim_start_matches("www.").to_owned())
@@ -849,7 +849,7 @@ fn host_of(url: &str) -> Option<String> {
 }
 
 /// Capitalize the first character of a lowercase keyword.
-fn capitalize(s: &str) -> String {
+pub fn capitalize(s: &str) -> String {
     let mut chars = s.chars();
     chars.next().map_or_else(String::new, |first| {
         first.to_uppercase().collect::<String>() + chars.as_str()
@@ -857,7 +857,7 @@ fn capitalize(s: &str) -> String {
 }
 
 /// Percent-encode a value for use in a query string.
-fn urlencode(value: &str) -> String {
+pub fn urlencode(value: &str) -> String {
     url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
 

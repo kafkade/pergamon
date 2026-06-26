@@ -1,0 +1,57 @@
+<section id="search-results" data-search-results data-query="{{ results.q }}">
+  {% if !results.has_query %}
+  <p class="kbd-hint">Type a query to search across articles, bookmarks, highlights, and notes.</p>
+  {% else %}
+  <div class="search-results-header">
+    <span class="kbd-hint">{{ results.total }} result{% if results.total != 1 %}s{% endif %} for “{{ results.q }}”</span>
+    {% if results.can_save %}
+    <form
+      class="save-search-form"
+      method="post"
+      action="/search/save"
+    >
+      <input type="hidden" name="dsl" value="{{ results.save_dsl }}" />
+      <input type="text" name="name" placeholder="Save as smart collection…" aria-label="Smart collection name" required />
+      <button type="submit" class="secondary outline">Save search</button>
+    </form>
+    {% endif %}
+  </div>
+
+  {% if results.hits.is_empty() %}
+  <p class="kbd-hint">No matches. Try a broader query or clear some filters.</p>
+  {% else %}
+  <ul class="item-list search-hits">
+    {% for hit in results.hits %}
+    <li
+      class="item-row search-hit {% if hit.item.is_read %}read{% else %}unread{% endif %}"
+      data-item-row
+      data-item-id="{{ hit.item.id }}"
+      data-reader-url="{{ hit.item.reader_url }}"
+      {% if hit.item.has_url %}data-item-url="{{ hit.item.url }}"{% endif %}
+    >
+      {% if hit.item.favicon_url != "" %}
+      <img class="item-favicon" src="{{ hit.item.favicon_url }}" alt="" loading="lazy" />
+      {% else %}
+      <span class="item-favicon" aria-hidden="true">•</span>
+      {% endif %}
+      <div class="item-body">
+        <p class="item-title"><a href="{{ hit.item.reader_url }}">{{ hit.item.title }}</a></p>
+        <div class="item-meta">
+          <span class="item-source">{{ hit.item.source }}</span>
+          <span class="item-type">{{ hit.item.type_label }}</span>
+          {% if hit.item.date != "" %}<span class="item-date">{{ hit.item.date }}</span>{% endif %}
+          <span class="item-status">{{ hit.item.status }}</span>
+        </div>
+        {% if hit.has_snippet %}<p class="item-snippet">{{ hit.snippet_html|safe }}</p>{% endif %}
+      </div>
+      {% if hit.item.has_url %}
+      <div class="item-actions">
+        <a class="secondary outline" role="button" href="{{ hit.item.url }}" target="_blank" rel="noopener" data-action="open" title="Open original (o)">↗</a>
+      </div>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  {% endif %}
+</section>

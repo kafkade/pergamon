@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+
+{% block title %}Search · pergamon{% endblock %}
+{% block page %}search{% endblock %}
+
+{% block content %}
+<main class="app-main search-page">
+  <form
+    class="search-bar"
+    method="get"
+    action="/search"
+    role="search"
+    hx-get="/search"
+    hx-target="#search-results"
+    hx-swap="outerHTML"
+    hx-push-url="true"
+  >
+    <input
+      class="search-input"
+      type="search"
+      name="q"
+      value="{{ results.q }}"
+      placeholder="Search your library…"
+      aria-label="Search query"
+      autofocus
+      autocomplete="off"
+      data-recent-search-input
+      hx-get="/search"
+      hx-target="#search-results"
+      hx-swap="outerHTML"
+      hx-trigger="input changed delay:300ms, search"
+      hx-include="closest form"
+      hx-push-url="true"
+    />
+
+    <div class="search-facets">
+      <select name="type" aria-label="Type" hx-trigger="change" hx-get="/search" hx-target="#search-results" hx-swap="outerHTML" hx-include="closest form" hx-push-url="true">
+        <option value="" {% if facets.content_type == "" %}selected{% endif %}>All types</option>
+        {% for opt in facets.content_types %}
+        <option value="{{ opt }}" {% if facets.content_type == opt.as_str() %}selected{% endif %}>{{ opt }}</option>
+        {% endfor %}
+      </select>
+
+      <select name="status" aria-label="Status" hx-trigger="change" hx-get="/search" hx-target="#search-results" hx-swap="outerHTML" hx-include="closest form" hx-push-url="true">
+        <option value="" {% if facets.status == "" %}selected{% endif %}>All statuses</option>
+        {% for opt in facets.statuses %}
+        <option value="{{ opt }}" {% if facets.status == opt.as_str() %}selected{% endif %}>{{ opt }}</option>
+        {% endfor %}
+      </select>
+
+      <select name="tag" aria-label="Tag" hx-trigger="change" hx-get="/search" hx-target="#search-results" hx-swap="outerHTML" hx-include="closest form" hx-push-url="true">
+        <option value="" {% if facets.tag == "" %}selected{% endif %}>All tags</option>
+        {% for opt in facets.tags %}
+        <option value="{{ opt }}" {% if facets.tag == opt.as_str() %}selected{% endif %}>#{{ opt }}</option>
+        {% endfor %}
+      </select>
+
+      <select name="feed" aria-label="Source" hx-trigger="change" hx-get="/search" hx-target="#search-results" hx-swap="outerHTML" hx-include="closest form" hx-push-url="true">
+        <option value="" {% if facets.feed == "" %}selected{% endif %}>All sources</option>
+        {% for opt in facets.feeds %}
+        <option value="{{ opt.id }}" {% if facets.feed == opt.id.as_str() %}selected{% endif %}>{{ opt.title }}</option>
+        {% endfor %}
+      </select>
+
+      <input type="date" name="since" value="{{ facets.since }}" aria-label="Since" hx-trigger="change" hx-get="/search" hx-target="#search-results" hx-swap="outerHTML" hx-include="closest form" hx-push-url="true" />
+      <input type="date" name="before" value="{{ facets.before }}" aria-label="Before" hx-trigger="change" hx-get="/search" hx-target="#search-results" hx-swap="outerHTML" hx-include="closest form" hx-push-url="true" />
+
+      <button type="submit">Search</button>
+    </div>
+  </form>
+
+  <section class="recent-searches" data-recent-searches hidden>
+    <h6>Recent searches</h6>
+    <ul data-recent-search-list></ul>
+  </section>
+
+  {% include "_search_results.html" %}
+</main>
+{% endblock %}

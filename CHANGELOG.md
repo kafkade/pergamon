@@ -47,6 +47,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Web Review view: card-based review queue with reveal flow, Again/Hard/Good/Easy actions, and keyboard shortcuts (`Space`, `1`-`4`)
 - Web Review stats dashboard with daily/weekly/monthly activity, retention indicators, and maturity distribution
 - Web header navigation for Inbox, Highlights, Notes, Review, and Review stats pages
+- Web Search view: full-text search with live results, faceted filters (type, status, tag, source, date range), highlighted result snippets, and save-as-smart-collection (#69)
+- Recent searches on the Search view, remembered locally in the browser (#69)
+- Web Bookmarks view: grid/list layouts, favicons and thumbnails, link-health badges, status filtering, pagination, and a quick-add form (#69)
+- Web Tags view: weighted tag cloud plus a management table to rename, merge, and delete tags (#69)
+- Web Collections view: browse regular and smart collections, create collections, edit smart-collection filters, and rename/delete collections (#69)
+- Drag-and-drop reordering of items within a collection, with move up/down controls when JavaScript is unavailable (#69)
+- Web header navigation links for Search, Bookmarks, Tags, and Collections pages (#69)
 
 ### Changed
 

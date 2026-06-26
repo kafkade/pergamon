@@ -620,3 +620,478 @@ kbd {
   width: 100%;
   height: 0.7rem;
 }
+
+/* ====================================================================
+ * Search, bookmarks, tags, and collections views (#69)
+ * ==================================================================== */
+
+/* Shared small inline form used in management tables and toolbars. */
+.inline-form {
+  display: inline-flex;
+  gap: 0.3rem;
+  align-items: center;
+  margin: 0;
+}
+
+.inline-form input {
+  margin: 0;
+}
+
+.inline-form button {
+  margin: 0;
+  white-space: nowrap;
+}
+
+button.danger,
+a.danger {
+  --pico-color: var(--pico-del-color, #b3261e);
+  color: var(--pico-del-color, #b3261e);
+}
+
+/* --- Search ------------------------------------------------------- */
+.search-page .search-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.search-page .search-input {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.search-page .search-facets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  align-items: center;
+}
+
+.search-page .search-facets select,
+.search-page .search-facets input {
+  margin: 0;
+  width: auto;
+  flex: 0 1 auto;
+}
+
+.search-page .search-facets button {
+  margin: 0;
+}
+
+.search-results-header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+}
+
+.save-search-form {
+  display: inline-flex;
+  gap: 0.3rem;
+  align-items: center;
+  margin: 0;
+}
+
+.save-search-form input {
+  margin: 0;
+}
+
+.save-search-form button {
+  margin: 0;
+  white-space: nowrap;
+}
+
+.item-snippet {
+  margin: 0.25rem 0 0;
+  font-size: 0.85rem;
+  color: var(--pico-muted-color);
+}
+
+.item-snippet mark {
+  background: var(--pico-mark-background-color, #fde68a);
+  color: inherit;
+  padding: 0 0.1em;
+  border-radius: 2px;
+}
+
+.recent-searches {
+  margin-bottom: 1rem;
+}
+
+.recent-searches h6 {
+  margin: 0 0 0.3rem;
+  color: var(--pico-muted-color);
+}
+
+.recent-searches ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.recent-searches button {
+  margin: 0;
+  padding: 0.15rem 0.55rem;
+  font-size: 0.8rem;
+  border-radius: 999px;
+}
+
+/* --- Bookmarks ---------------------------------------------------- */
+.bookmarks-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  align-items: center;
+}
+
+.bookmarks-toolbar .bookmarks-filter {
+  margin: 0;
+}
+
+.bookmarks-toolbar .bookmarks-filter select {
+  margin: 0;
+}
+
+.layout-toggle {
+  margin-left: auto;
+  display: inline-flex;
+  gap: 0.25rem;
+}
+
+.layout-toggle a {
+  margin: 0;
+}
+
+.layout-toggle a.active {
+  background: var(--pico-primary-background);
+  color: var(--pico-primary-inverse);
+  border-color: var(--pico-primary);
+}
+
+.quick-add {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0 0 1rem;
+}
+
+.quick-add input {
+  margin: 0;
+  flex: 1 1 12rem;
+}
+
+.quick-add input[name="url"] {
+  flex: 2 1 16rem;
+}
+
+.quick-add button {
+  margin: 0;
+}
+
+ul.bookmark-grid {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
+  gap: 0.8rem;
+}
+
+ul.bookmark-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.bookmark-card {
+  border: 1px solid var(--pico-muted-border-color);
+  border-radius: var(--pico-border-radius);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+ul.bookmark-list .bookmark-card {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.bookmark-thumb {
+  display: block;
+  aspect-ratio: 16 / 9;
+  background: var(--pico-secondary-background);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.bookmark-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+ul.bookmark-list .bookmark-thumb {
+  width: 4rem;
+  height: 3rem;
+  aspect-ratio: auto;
+  flex: 0 0 auto;
+  border-radius: var(--pico-border-radius);
+  overflow: hidden;
+}
+
+.bookmark-thumb-placeholder {
+  font-size: 1.6rem;
+  opacity: 0.6;
+}
+
+.bookmark-body {
+  padding: 0.55rem 0.65rem;
+  flex: 1 1 auto;
+}
+
+ul.bookmark-list .bookmark-body {
+  padding: 0;
+}
+
+.bookmark-body .item-title {
+  margin: 0 0 0.25rem;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.bookmark-card .item-actions {
+  padding: 0 0.65rem 0.55rem;
+}
+
+ul.bookmark-list .bookmark-card .item-actions {
+  padding: 0;
+}
+
+.health-badge {
+  font-size: 0.7rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  border: 1px solid transparent;
+}
+
+.health-ok {
+  background: var(--pico-ins-color, #d1fae5);
+  color: #065f46;
+}
+
+.health-warn {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.health-error {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+/* --- Tags --------------------------------------------------------- */
+ul.tag-cloud {
+  list-style: none;
+  margin: 0 0 1.5rem;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.8rem;
+  align-items: baseline;
+}
+
+.tag-link {
+  text-decoration: none;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.2rem;
+}
+
+.tag-link .count {
+  font-size: 0.7em;
+  color: var(--pico-muted-color);
+}
+
+.tag-w1 { font-size: 0.85rem; }
+.tag-w2 { font-size: 1rem; }
+.tag-w3 { font-size: 1.2rem; }
+.tag-w4 { font-size: 1.45rem; }
+.tag-w5 { font-size: 1.7rem; font-weight: 600; }
+
+table.tag-manage {
+  font-size: 0.9rem;
+}
+
+table.tag-manage td {
+  vertical-align: middle;
+}
+
+/* --- Collections -------------------------------------------------- */
+.create-collection {
+  margin-bottom: 1.2rem;
+}
+
+.collection-create-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  margin: 0;
+}
+
+.collection-create-form input[name="name"] {
+  margin: 0;
+  flex: 1 1 12rem;
+}
+
+.collection-create-form select {
+  margin: 0;
+  width: auto;
+}
+
+.collection-create-form button {
+  margin: 0;
+}
+
+.kind-toggle {
+  display: inline-flex;
+  gap: 0.8rem;
+  border: 0;
+  margin: 0;
+  padding: 0;
+}
+
+.kind-toggle label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin: 0;
+}
+
+.smart-filter-field {
+  flex: 1 1 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.smart-filter-field input {
+  margin: 0;
+}
+
+ul.collection-list {
+  list-style: none;
+  margin: 0 0 1.5rem;
+  padding: 0;
+}
+
+.collection-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 0.2rem;
+  border-bottom: 1px solid var(--pico-muted-border-color);
+}
+
+.collection-name {
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.collection-parent {
+  font-size: 0.8rem;
+  color: var(--pico-muted-color);
+}
+
+.collection-filter {
+  font-size: 0.75rem;
+  color: var(--pico-muted-color);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 24rem;
+}
+
+.collection-row .count {
+  margin-left: auto;
+  font-size: 0.8rem;
+  color: var(--pico-muted-color);
+}
+
+.collection-detail-header {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.collection-detail-header .back-link {
+  text-decoration: none;
+}
+
+.collection-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.8rem;
+  margin-bottom: 1rem;
+}
+
+.smart-filter-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin-bottom: 1rem;
+  max-width: 40rem;
+}
+
+.smart-filter-editor input {
+  margin: 0;
+}
+
+.smart-filter-editor button {
+  margin: 0;
+  align-self: flex-start;
+}
+
+.collection-member .drag-handle {
+  cursor: grab;
+  color: var(--pico-muted-color);
+  padding: 0 0.3rem;
+  user-select: none;
+}
+
+.collection-member[draggable="true"] {
+  cursor: grab;
+}
+
+.collection-member.dragging {
+  opacity: 0.5;
+}
+
+.collection-member.drag-over {
+  border-top: 2px solid var(--pico-primary);
+}
+
+.member-actions {
+  display: inline-flex;
+  gap: 0.2rem;
+}
+
+.member-actions form {
+  margin: 0;
+}
+
+.member-actions button {
+  margin: 0;
+  padding: 0.1rem 0.5rem;
+}
