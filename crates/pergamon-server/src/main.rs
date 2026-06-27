@@ -7,6 +7,7 @@
 //! This crate is licensed under AGPL-3.0. See the `LICENSE` file in this
 //! crate's directory. All other pergamon crates are Apache-2.0.
 
+mod auth;
 mod error;
 mod pagination;
 mod routes;
@@ -58,6 +59,17 @@ struct Args {
     /// Directory to serve static assets from (mounted at `/static`).
     #[arg(long, env = "PERGAMON_STATIC_DIR")]
     static_dir: Option<PathBuf>,
+
+    /// Username for HTTP Basic auth on the admin diagnostics routes.
+    ///
+    /// When both this and `--admin-password` are set, the `/admin` routes
+    /// require these credentials. When unset, the admin routes are open.
+    #[arg(long, env = "PERGAMON_ADMIN_USER")]
+    admin_user: Option<String>,
+
+    /// Password for HTTP Basic auth on the admin diagnostics routes.
+    #[arg(long, env = "PERGAMON_ADMIN_PASSWORD")]
+    admin_password: Option<String>,
 }
 
 /// Subcommands for the pergamon web server binary.
@@ -86,6 +98,9 @@ struct HealthCheckArgs {
 /// Build the Axum router with all routes and middleware.
 fn build_router(state: AppState, static_dir: Option<&PathBuf>) -> Router {
     let mut app = routes::api_router();
+
+    // Admin diagnostics, gated by Basic auth (scoped to the /admin subtree).
+    app = app.merge(routes::admin_router(state.clone()));
 
     // Static assets: serve from a disk directory when configured (override),
     // otherwise serve the assets embedded in the binary.
@@ -218,9 +233,33 @@ async fn main() -> Result<()> {
         .build()
         .context("failed to build HTTP client")?;
 
+    // Resolve optional admin credentials. Both username and password must be
+    // provided to enable auth; otherwise the admin routes stay open.
+    let admin_auth = match (args.admin_user, args.admin_password) {
+        (Some(user), Some(password)) if !user.is_empty() && !password.is_empty() => {
+            tracing::info!("admin diagnostics routes are protected by Basic auth");
+            Some(auth::AdminCredentials::new(user, password))
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            tracing::warn!(
+                "admin auth requires BOTH --admin-user/PERGAMON_ADMIN_USER and \
+                 --admin-password/PERGAMON_ADMIN_PASSWORD; admin routes are OPEN"
+            );
+            None
+        }
+        _ => {
+            tracing::warn!(
+                "admin diagnostics routes are UNAUTHENTICATED; set \
+                 PERGAMON_ADMIN_USER and PERGAMON_ADMIN_PASSWORD to protect them"
+            );
+            None
+        }
+    };
+
     let state = AppState {
         db: Arc::new(std::sync::Mutex::new(db)),
         http,
+        admin_auth,
     };
 
     let app = build_router(state, args.static_dir.as_ref());
@@ -255,7 +294,7 @@ mod tests {
 
     use super::*;
     use axum::body::Body;
-    use axum::http::{Request, StatusCode};
+    use axum::http::{Request, StatusCode, header};
     use pergamon_core::status::DocumentStatus;
     use tower::ServiceExt;
 
@@ -267,11 +306,65 @@ mod tests {
         AppState {
             db: Arc::new(std::sync::Mutex::new(db)),
             http,
+            admin_auth: None,
         }
     }
 
     fn test_app() -> Router {
         build_router(test_state(), None)
+    }
+
+    /// Build an `AppState` with admin Basic-auth credentials configured.
+    fn authed_state() -> AppState {
+        let mut state = test_state();
+        state.admin_auth = Some(crate::auth::AdminCredentials::new(
+            "admin".to_owned(),
+            "s3cret".to_owned(),
+        ));
+        state
+    }
+
+    // ── Admin diagnostics ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn admin_dashboard_open_when_unauthenticated() {
+        let app = test_app();
+        let req = Request::get("/admin").body(Body::empty()).unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn admin_dashboard_requires_credentials_when_configured() {
+        let app = build_router(authed_state(), None);
+        let req = Request::get("/admin").body(Body::empty()).unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(response.headers().contains_key(header::WWW_AUTHENTICATE));
+    }
+
+    #[tokio::test]
+    async fn admin_dashboard_accepts_valid_credentials() {
+        let app = build_router(authed_state(), None);
+        // base64("admin:s3cret") = YWRtaW46czNjcmV0
+        let req = Request::get("/admin")
+            .header(header::AUTHORIZATION, "Basic YWRtaW46czNjcmV0")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn admin_dashboard_rejects_wrong_password() {
+        let app = build_router(authed_state(), None);
+        // base64("admin:wrong") = YWRtaW46d3Jvbmc=
+        let req = Request::get("/admin")
+            .header(header::AUTHORIZATION, "Basic YWRtaW46d3Jvbmc=")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     // ── Health ─────────────────────────────────────────────────────

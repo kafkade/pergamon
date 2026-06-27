@@ -2,6 +2,7 @@
 
 //! Route assembly for the pergamon REST API.
 
+pub mod admin;
 pub mod collections;
 pub mod feeds;
 pub mod health;
@@ -23,6 +24,23 @@ use axum::Router;
 use axum::routing::{delete, get, patch, post};
 
 use crate::state::AppState;
+
+/// Build the admin diagnostics sub-router, gated by Basic auth.
+///
+/// The auth middleware is applied with `route_layer` so it runs only for these
+/// admin routes, not for the rest of the application or the 404 fallback. The
+/// middleware reads [`AppState`] via `from_fn_with_state`, so the caller passes
+/// the shared state in.
+pub fn admin_router(state: AppState) -> Router<AppState> {
+    Router::new()
+        .route("/admin", get(admin::dashboard))
+        .route("/admin/sync", post(admin::sync_all))
+        .route("/admin/sync/{id}", post(admin::sync_one))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state,
+            crate::auth::require_admin_auth,
+        ))
+}
 
 /// Build the complete application router.
 ///

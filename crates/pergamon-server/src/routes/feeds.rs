@@ -12,6 +12,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use pergamon_core::content_type::ContentType;
+use pergamon_core::diagnostics::{ExtractionEvent, ExtractionSource};
 use pergamon_core::model::{ContentItem, Feed, FeedFolder, FeedItemMeta};
 use pergamon_core::status::DocumentStatus;
 
@@ -267,7 +268,7 @@ pub async fn import_opml(
 // ======================================================================
 
 /// Refresh a single feed: conditional GET → parse → ingest.
-async fn refresh_single_feed(state: &AppState, feed: &Feed) -> Result<u64, ApiError> {
+pub async fn refresh_single_feed(state: &AppState, feed: &Feed) -> Result<u64, ApiError> {
     let mut req = state.http.get(&feed.url);
 
     // Conditional GET headers.
@@ -381,6 +382,26 @@ fn ingest_entries(
             summary: entry.summary.clone(),
         };
         db.insert_feed_item_meta(&meta)?;
+
+        // Record an extraction event so the admin diagnostics view can report
+        // how often feeds deliver full content versus a summary only.
+        let has_content = item
+            .content_text
+            .as_deref()
+            .is_some_and(|t| !t.trim().is_empty());
+        let event = ExtractionEvent {
+            id: Uuid::new_v4(),
+            content_item_id: Some(item.id),
+            url: item.url.clone(),
+            source: ExtractionSource::FeedSync,
+            success: has_content,
+            extractor: Some("feed".to_owned()),
+            error_message: (!has_content)
+                .then(|| "feed entry has no full content (summary only)".to_owned()),
+            created_at: now,
+        };
+        let _ = db.insert_extraction_event(&event);
+
         count += 1;
     }
 

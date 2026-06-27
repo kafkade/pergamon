@@ -1,0 +1,287 @@
+{% extends "base.html" %}
+
+{% block title %}Admin diagnostics · pergamon{% endblock %}
+{% block page %}admin{% endblock %}
+
+{% block content %}
+<main class="app-main admin-page">
+  <div class="admin-shell">
+    <header class="admin-header">
+      <h1>Admin diagnostics</h1>
+      {% if auth_enabled %}
+      <span class="admin-badge admin-badge-ok">🔒 Authenticated</span>
+      {% else %}
+      <span class="admin-badge admin-badge-warn">⚠ Unauthenticated — set PERGAMON_ADMIN_USER / PERGAMON_ADMIN_PASSWORD</span>
+      {% endif %}
+    </header>
+
+    <nav class="admin-subnav" aria-label="Diagnostics sections">
+      <a href="#system">System</a>
+      <a href="#feeds">Feed health</a>
+      <a href="#extraction">Extraction</a>
+      <a href="#imports">Imports</a>
+      <a href="#links">Links</a>
+      <a href="#rules">Rules</a>
+    </nav>
+
+    <!-- System statistics -->
+    <section id="system" class="admin-section">
+      <h2>System statistics</h2>
+      <div class="stat-grid">
+        <article class="stat-card"><h4>Items</h4><strong>{{ system.total_items }}</strong></article>
+        <article class="stat-card"><h4>Feeds</h4><strong>{{ system.total_feeds }}</strong></article>
+        <article class="stat-card"><h4>Tags</h4><strong>{{ system.total_tags }}</strong></article>
+        <article class="stat-card"><h4>Collections</h4><strong>{{ system.total_collections }}</strong></article>
+        <article class="stat-card"><h4>Highlights</h4><strong>{{ system.total_highlights }}</strong></article>
+        <article class="stat-card"><h4>Notes</h4><strong>{{ system.total_notes }}</strong></article>
+        <article class="stat-card"><h4>Review cards</h4><strong>{{ system.total_review_cards }}</strong></article>
+        <article class="stat-card"><h4>Database size</h4><strong>{{ system.db_size }}</strong></article>
+        <article class="stat-card">
+          <h4>FTS index</h4>
+          {% if system.fts_ok %}
+          <strong class="admin-ok">Healthy</strong>
+          {% else %}
+          <strong class="admin-error">Corrupt</strong>
+          {% endif %}
+        </article>
+      </div>
+
+      <div class="admin-cols">
+        <div>
+          <h3>Content types</h3>
+          {% if system.content_types.is_empty() %}
+          <p class="kbd-hint">No content yet.</p>
+          {% else %}
+          <ul class="chart-list">
+            {% for row in system.content_types %}
+            <li>
+              <span>{{ row.label }}</span>
+              <progress max="100" value="{{ row.percent }}"></progress>
+              <span>{{ row.count }} · {{ row.percent }}%</span>
+            </li>
+            {% endfor %}
+          </ul>
+          {% endif %}
+        </div>
+        <div>
+          <h3>Status distribution</h3>
+          {% if system.statuses.is_empty() %}
+          <p class="kbd-hint">No content yet.</p>
+          {% else %}
+          <ul class="chart-list">
+            {% for row in system.statuses %}
+            <li>
+              <span>{{ row.label }}</span>
+              <progress max="100" value="{{ row.percent }}"></progress>
+              <span>{{ row.count }} · {{ row.percent }}%</span>
+            </li>
+            {% endfor %}
+          </ul>
+          {% endif %}
+        </div>
+      </div>
+    </section>
+
+    <!-- Feed health -->
+    <section id="feeds" class="admin-section">
+      <div class="admin-section-head">
+        <h2>Feed health</h2>
+        <form method="post" action="/admin/sync">
+          <button type="submit" class="admin-btn">Sync all feeds</button>
+        </form>
+      </div>
+      <p class="admin-summary">
+        {{ feed_summary.total }} feeds ·
+        <span class="admin-ok">{{ feed_summary.healthy }} healthy</span> ·
+        <span class="admin-warn">{{ feed_summary.warning }} warning</span> ·
+        <span class="admin-error">{{ feed_summary.error }} error</span> ·
+        {{ feed_summary.stale }} stale
+      </p>
+      {% if feeds.is_empty() %}
+      <p class="kbd-hint">No feed subscriptions.</p>
+      {% else %}
+      <table class="admin-table">
+        <thead>
+          <tr><th>Status</th><th>Feed</th><th>Errors</th><th>Last fetched</th><th>Last error</th><th></th></tr>
+        </thead>
+        <tbody>
+          {% for feed in feeds %}
+          <tr>
+            <td>
+              <span class="admin-pill admin-pill-{{ feed.status_class }}">{{ feed.status_label }}</span>
+              {% if feed.is_stale %}<span class="admin-pill admin-pill-stale">stale</span>{% endif %}
+            </td>
+            <td>
+              <div class="admin-feed-title">{{ feed.title }}</div>
+              <div class="admin-feed-url">{{ feed.url }}</div>
+            </td>
+            <td>{{ feed.error_count }}</td>
+            <td>{{ feed.last_fetched }}</td>
+            <td class="admin-error-text">{{ feed.last_error }}</td>
+            <td>
+              <form method="post" action="/admin/sync/{{ feed.feed_id }}">
+                <button type="submit" class="admin-btn admin-btn-small">Sync</button>
+              </form>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% endif %}
+    </section>
+
+    <!-- Extraction status -->
+    <section id="extraction" class="admin-section">
+      <h2>Extraction status</h2>
+      <div class="stat-grid">
+        <article class="stat-card"><h4>Attempts</h4><strong>{{ extraction.total }}</strong></article>
+        <article class="stat-card"><h4>Succeeded</h4><strong class="admin-ok">{{ extraction.succeeded }}</strong></article>
+        <article class="stat-card"><h4>Failed</h4><strong class="admin-error">{{ extraction.failed }}</strong></article>
+        <article class="stat-card"><h4>Success rate</h4><strong>{{ extraction.success_rate }}%</strong></article>
+      </div>
+
+      <h3>Recent failures</h3>
+      {% if extraction.failures.is_empty() %}
+      <p class="kbd-hint">No extraction failures recorded.</p>
+      {% else %}
+      <table class="admin-table">
+        <thead>
+          <tr><th>When</th><th>Source</th><th>Extractor</th><th>URL</th><th>Error</th></tr>
+        </thead>
+        <tbody>
+          {% for e in extraction.failures %}
+          <tr>
+            <td>{{ e.created }}</td>
+            <td>{{ e.source }}</td>
+            <td>{{ e.extractor }}</td>
+            <td class="admin-feed-url">{{ e.url }}</td>
+            <td class="admin-error-text">{{ e.error }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% endif %}
+
+      <h3>Recent attempts</h3>
+      {% if extraction.recent.is_empty() %}
+      <p class="kbd-hint">No extraction attempts recorded.</p>
+      {% else %}
+      <table class="admin-table">
+        <thead>
+          <tr><th>When</th><th>Result</th><th>Source</th><th>Extractor</th><th>URL</th></tr>
+        </thead>
+        <tbody>
+          {% for e in extraction.recent %}
+          <tr>
+            <td>{{ e.created }}</td>
+            <td>
+              {% if e.success %}
+              <span class="admin-pill admin-pill-healthy">ok</span>
+              {% else %}
+              <span class="admin-pill admin-pill-error">failed</span>
+              {% endif %}
+            </td>
+            <td>{{ e.source }}</td>
+            <td>{{ e.extractor }}</td>
+            <td class="admin-feed-url">{{ e.url }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% endif %}
+    </section>
+
+    <!-- Import history -->
+    <section id="imports" class="admin-section">
+      <h2>Import history</h2>
+      {% if imports.is_empty() %}
+      <p class="kbd-hint">No imports recorded yet.</p>
+      {% else %}
+      <table class="admin-table">
+        <thead>
+          <tr><th>When</th><th>Source</th><th>File</th><th>Added</th><th>Existing</th><th>Skipped</th><th>Errors</th></tr>
+        </thead>
+        <tbody>
+          {% for imp in imports %}
+          <tr>
+            <td>{{ imp.created }}</td>
+            <td>{{ imp.source }}</td>
+            <td class="admin-feed-url">{{ imp.file_name }}</td>
+            <td>{{ imp.added }}</td>
+            <td>{{ imp.existing }}</td>
+            <td>{{ imp.skipped }}</td>
+            <td>
+              {% if imp.errors > 0 %}
+              <span class="admin-error" title="{{ imp.error_detail }}">{{ imp.errors }}</span>
+              {% else %}
+              {{ imp.errors }}
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% endif %}
+    </section>
+
+    <!-- Link health -->
+    <section id="links" class="admin-section">
+      <h2>Broken links</h2>
+      {% if broken_links.is_empty() %}
+      <p class="kbd-hint">No broken links detected.</p>
+      {% else %}
+      <table class="admin-table">
+        <thead>
+          <tr><th>Checked</th><th>HTTP</th><th>Item</th><th>Error</th></tr>
+        </thead>
+        <tbody>
+          {% for link in broken_links %}
+          <tr>
+            <td>{{ link.last_checked }}</td>
+            <td class="admin-error">{{ link.http_status }}</td>
+            <td>
+              <div class="admin-feed-title">{{ link.title }}</div>
+              <div class="admin-feed-url">{{ link.url }}</div>
+            </td>
+            <td class="admin-error-text">{{ link.error }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% endif %}
+    </section>
+
+    <!-- Content rules monitor -->
+    <section id="rules" class="admin-section">
+      <h2>Content rules monitor</h2>
+      {% if rules.is_empty() %}
+      <p class="kbd-hint">No content rules defined.</p>
+      {% else %}
+      <table class="admin-table">
+        <thead>
+          <tr><th>Rule</th><th>Enabled</th><th>Priority</th><th>Matches</th><th>Filter</th><th>Actions</th></tr>
+        </thead>
+        <tbody>
+          {% for rule in rules %}
+          <tr>
+            <td>{{ rule.name }}</td>
+            <td>
+              {% if rule.enabled %}
+              <span class="admin-pill admin-pill-healthy">on</span>
+              {% else %}
+              <span class="admin-pill admin-pill-stale">off</span>
+              {% endif %}
+            </td>
+            <td>{{ rule.priority }}</td>
+            <td>{{ rule.match_count }}</td>
+            <td><code>{{ rule.filter_query }}</code></td>
+            <td>{{ rule.actions }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% endif %}
+    </section>
+  </div>
+</main>
+{% endblock %}

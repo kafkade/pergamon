@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, Parser, Subcommand};
 use pergamon_core::content_type::ContentType;
+use pergamon_core::diagnostics::{ExtractionEvent, ExtractionSource, ImportLogEntry, ImportSource};
 use pergamon_core::model::{
     BookmarkMeta, Collection, ContentItem, Feed, FeedFolder, FeedItemMeta, LinkHealth, Tag,
 };
@@ -1320,6 +1321,18 @@ fn import_opml(db: &Database, path: &std::path::Path, dry_run: bool) -> Result<(
         stats.feeds_moved,
     );
 
+    record_import_log(
+        db,
+        ImportSource::Opml,
+        path,
+        stats.feeds_added,
+        stats.feeds_existing,
+        stats.feeds_moved,
+        0,
+        None,
+        dry_run,
+    );
+
     Ok(())
 }
 
@@ -1331,6 +1344,69 @@ struct ImportStats {
     feeds_added: u64,
     feeds_existing: u64,
     feeds_moved: u64,
+}
+
+/// Record an import run in the diagnostics import-history log.
+///
+/// Dry runs are intentionally not recorded, preserving "dry run = no writes".
+/// A logging failure is reported as a warning but never fails the import.
+#[allow(clippy::too_many_arguments)]
+fn record_import_log(
+    db: &Database,
+    source: ImportSource,
+    path: &std::path::Path,
+    added: u64,
+    existing: u64,
+    skipped: u64,
+    errors: u64,
+    error_detail: Option<String>,
+    dry_run: bool,
+) {
+    if dry_run {
+        return;
+    }
+    let entry = ImportLogEntry {
+        id: Uuid::new_v4(),
+        source,
+        file_name: Some(path.display().to_string()),
+        items_added: i64::try_from(added).unwrap_or(i64::MAX),
+        items_existing: i64::try_from(existing).unwrap_or(i64::MAX),
+        items_skipped: i64::try_from(skipped).unwrap_or(i64::MAX),
+        errors: i64::try_from(errors).unwrap_or(i64::MAX),
+        error_detail,
+        dry_run,
+        created_at: OffsetDateTime::now_utc(),
+    };
+    if let Err(e) = db.insert_import_log(&entry) {
+        eprintln!("warning: failed to record import log: {e}");
+    }
+}
+
+/// Record a content-extraction attempt in the diagnostics extraction log.
+///
+/// A logging failure is reported as a warning but never fails the save.
+fn record_extraction_event(
+    db: &Database,
+    content_item_id: Option<Uuid>,
+    url: Option<&str>,
+    source: ExtractionSource,
+    success: bool,
+    extractor: &str,
+    error_message: Option<String>,
+) {
+    let event = ExtractionEvent {
+        id: Uuid::new_v4(),
+        content_item_id,
+        url: url.map(ToOwned::to_owned),
+        source,
+        success,
+        extractor: Some(extractor.to_owned()),
+        error_message,
+        created_at: OffsetDateTime::now_utc(),
+    };
+    if let Err(e) = db.insert_extraction_event(&event) {
+        eprintln!("warning: failed to record extraction event: {e}");
+    }
 }
 
 /// Recursively import OPML outlines into the database.
@@ -1558,6 +1634,17 @@ fn import_raindrop(db: &Database, path: &std::path::Path, dry_run: bool) -> Resu
         stats.created,
         stats.existing,
     );
+    record_import_log(
+        db,
+        ImportSource::Raindrop,
+        path,
+        stats.created,
+        stats.existing,
+        0,
+        0,
+        None,
+        dry_run,
+    );
     Ok(())
 }
 
@@ -1664,6 +1751,17 @@ fn import_pocket(db: &Database, path: &std::path::Path, dry_run: bool) -> Result
         if dry_run { "Would import" } else { "Imported" },
         stats.created,
         stats.existing,
+    );
+    record_import_log(
+        db,
+        ImportSource::Pocket,
+        path,
+        stats.created,
+        stats.existing,
+        0,
+        0,
+        None,
+        dry_run,
     );
     Ok(())
 }
@@ -1925,6 +2023,17 @@ fn import_kindle(
         stats.notes_created,
         stats.review_cards_created,
     );
+    record_import_log(
+        db,
+        ImportSource::Kindle,
+        path,
+        stats.highlights_created,
+        stats.highlights_existing,
+        0,
+        0,
+        None,
+        dry_run,
+    );
     Ok(())
 }
 
@@ -2129,6 +2238,17 @@ fn import_readwise(
         stats.highlights_created + stats.highlights_existing,
         stats.highlights_created,
         stats.review_cards_created,
+    );
+    record_import_log(
+        db,
+        ImportSource::Readwise,
+        path,
+        stats.highlights_created,
+        stats.highlights_existing,
+        0,
+        0,
+        None,
+        dry_run,
     );
     Ok(())
 }
@@ -2659,51 +2779,67 @@ fn resolve_url_input(raw_url: Option<&str>) -> Result<String> {
     Ok(trimmed)
 }
 
+/// Structured result of extracting content from fetched bytes.
+///
+/// The `extractor` and `success` fields describe the extraction outcome for the
+/// diagnostics log: the extractor used and whether it succeeded. An intentional
+/// bookmark save is always a success; an article save that falls back to
+/// metadata (because readability failed) is recorded as a failure.
+struct ExtractedContent {
+    title: String,
+    author: Option<String>,
+    content_text: Option<String>,
+    excerpt: Option<String>,
+    published_at: Option<OffsetDateTime>,
+    content_type: ContentType,
+    extractor: &'static str,
+    success: bool,
+}
+
 /// Extract content from fetched bytes, returning structured fields.
 fn extract_content(
     bytes: &[u8],
     final_url: &str,
     canonical_url: &str,
     bookmark: bool,
-) -> (
-    String,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<OffsetDateTime>,
-    ContentType,
-) {
+) -> ExtractedContent {
     if bookmark {
         let html = String::from_utf8_lossy(bytes);
         let meta = pergamon_extract::extract_metadata(&html);
-        (
-            meta.title.unwrap_or_else(|| canonical_url.to_owned()),
-            meta.author,
-            None,
-            meta.description,
-            None,
-            ContentType::Bookmark,
-        )
+        ExtractedContent {
+            title: meta.title.unwrap_or_else(|| canonical_url.to_owned()),
+            author: meta.author,
+            content_text: None,
+            excerpt: meta.description,
+            published_at: None,
+            content_type: ContentType::Bookmark,
+            extractor: "metadata",
+            success: true,
+        }
     } else if let Ok(article) = pergamon_extract::extract_article(bytes, final_url) {
-        (
-            article.title.unwrap_or_else(|| canonical_url.to_owned()),
-            article.author,
-            Some(article.content_text),
-            article.excerpt,
-            article.published_at,
-            ContentType::Article,
-        )
+        ExtractedContent {
+            title: article.title.unwrap_or_else(|| canonical_url.to_owned()),
+            author: article.author,
+            content_text: Some(article.content_text),
+            excerpt: article.excerpt,
+            published_at: article.published_at,
+            content_type: ContentType::Article,
+            extractor: "readability",
+            success: true,
+        }
     } else {
         let html = String::from_utf8_lossy(bytes);
         let meta = pergamon_extract::extract_metadata(&html);
-        (
-            meta.title.unwrap_or_else(|| canonical_url.to_owned()),
-            meta.author,
-            None,
-            meta.description,
-            None,
-            ContentType::Bookmark,
-        )
+        ExtractedContent {
+            title: meta.title.unwrap_or_else(|| canonical_url.to_owned()),
+            author: meta.author,
+            content_text: None,
+            excerpt: meta.description,
+            published_at: None,
+            content_type: ContentType::Bookmark,
+            extractor: "metadata-fallback",
+            success: false,
+        }
     }
 }
 
@@ -2789,19 +2925,18 @@ fn save_url(db: &Database, raw_url: Option<&str>, tags: &[String], bookmark: boo
     }
 
     let now = OffsetDateTime::now_utc();
-    let (title, author, content_text, excerpt, published_at, content_type) =
-        extract_content(&bytes, &final_url, &canonical_url, bookmark);
+    let extracted = extract_content(&bytes, &final_url, &canonical_url, bookmark);
 
     let item = ContentItem {
         id: Uuid::new_v4(),
         url: Some(canonical_url),
-        title,
-        author,
-        content_type,
+        title: extracted.title,
+        author: extracted.author,
+        content_type: extracted.content_type,
         status: DocumentStatus::Inbox,
-        content_text,
-        excerpt,
-        published_at,
+        content_text: extracted.content_text,
+        excerpt: extracted.excerpt,
+        published_at: extracted.published_at,
         created_at: now,
         updated_at: now,
         read_at: None,
@@ -2809,6 +2944,16 @@ fn save_url(db: &Database, raw_url: Option<&str>, tags: &[String], bookmark: boo
 
     db.insert_content_item(&item)
         .context("failed to save item")?;
+
+    record_extraction_event(
+        db,
+        Some(item.id),
+        item.url.as_deref(),
+        ExtractionSource::Save,
+        extracted.success,
+        extracted.extractor,
+        (!extracted.success).then(|| "article extraction failed; fell back to metadata".to_owned()),
+    );
 
     // Store enriched bookmark metadata (OG image, favicon, site name).
     let meta = build_enriched_bookmark_meta(item.id, &bytes, &url, &final_url);
@@ -5560,6 +5705,18 @@ fn restore_backup(db: &Database, path: &std::path::Path) -> Result<()> {
         notes.len(),
         review_cards.len(),
         rules.len(),
+    );
+
+    record_import_log(
+        db,
+        ImportSource::Backup,
+        path,
+        u64::try_from(total).unwrap_or(u64::MAX),
+        0,
+        0,
+        0,
+        None,
+        false,
     );
 
     Ok(())

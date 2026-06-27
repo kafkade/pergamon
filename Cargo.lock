@@ -2331,6 +2331,7 @@ dependencies = [
  "anyhow",
  "askama 0.16.0",
  "axum",
+ "base64",
  "clap",
  "pergamon-core",
  "pergamon-extract",

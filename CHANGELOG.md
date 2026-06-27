@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Admin diagnostics view for pergamon-server: authenticated `/admin` dashboard covering feed health, extraction status, import history, system statistics, broken links, and a content-rules monitor (#72)
+- Optional HTTP Basic auth for the admin subtree via `--admin-user`/`--admin-password` flags or `PERGAMON_ADMIN_USER`/`PERGAMON_ADMIN_PASSWORD` env vars (routes stay open with a startup warning when unset)
+- Diagnostics logging: new `import_log` and `extraction_log` tables (migration V12) with CLI import/save and server feed-sync instrumentation
+- Admin feed-sync actions: sync a single feed or all feeds from the dashboard (no-JS form fallbacks)
 - Web UI (server-rendered HTML) for pergamon-server: inbox/library list and article reader views (#68)
 - Inbox view: feed/folder sidebar with unread counts, status/type/tag/source filters, sort by date/title/source, and pagination
 - Article reader view: extracted content, metadata header, original-link, inline status triage, and tag add/remove

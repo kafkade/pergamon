@@ -127,7 +127,7 @@ Use conventional commits: `feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `chore
 - Product roadmap (`docs/roadmap.md`)
 - Cargo workspace with six crates: `pergamon-core`, `pergamon-storage`, `pergamon-feed`, `pergamon-extract`, `pergamon-import`, `pergamon-cli`
 - Unified content model: domain types for content items, feeds, feed folders, tags, collections, highlights, and bookmarks (`pergamon-core`)
-- SQLite schema with FTS5 full-text search (8 migrations), extension tables, `updated_at` triggers (`pergamon-storage`)
+- SQLite schema with FTS5 full-text search (12 migrations), extension tables, `updated_at` triggers (`pergamon-storage`)
 - Custom embedded migration runner for schema versioning
 - CRUD operations for all content entities with filtered listing and full-text search
 - Feed subscription and sync engine: `feed add/list/refresh/remove`, `sync` commands
@@ -163,6 +163,9 @@ Use conventional commits: `feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `chore
 - Idempotent re-import via synthetic stable URLs (`kindle://` and `readwise://` schemes)
 - Transaction-wrapped bulk imports for atomicity and performance
 - Backup and restore includes notes, review cards, and review logs
+- Admin diagnostics view (`pergamon-server`): authenticated `/admin` dashboard for feed health, extraction status, import history, system statistics, broken links, and content-rules monitor (#72)
+- Optional HTTP Basic auth for the `/admin` subtree (`--admin-user`/`--admin-password` or `PERGAMON_ADMIN_USER`/`PERGAMON_ADMIN_PASSWORD`); open with a startup warning when unset
+- Diagnostics logging tables `import_log` and `extraction_log` (V12 migration) with CLI import/save and server feed-sync instrumentation
 
 ### What's NOT yet implemented
 
@@ -178,7 +181,7 @@ Use conventional commits: `feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `chore
 **Crates:**
 
 - `crates/pergamon-core/` — Domain model, content types, status enum, FSRS-5 spaced repetition engine (zero I/O)
-- `crates/pergamon-storage/` — SQLite + FTS5, 8 migrations, CRUD operations, transaction API
+- `crates/pergamon-storage/` — SQLite + FTS5, 12 migrations, CRUD operations, transaction API
 - `crates/pergamon-feed/` — RSS/Atom/JSON Feed parsing, OPML import/export
 - `crates/pergamon-extract/` — Article extraction, HTML sanitization, URL canonicalization
 - `crates/pergamon-import/` — Importers: OPML, Raindrop.io (CSV), Pocket (HTML), Kindle (My Clippings.txt), Readwise (CSV)

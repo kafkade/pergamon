@@ -1287,8 +1287,8 @@ fn schema_version_returns_latest() {
     let version = db
         .schema_version()
         .unwrap_or_else(|e| unreachable!("version: {e}"));
-    // We have 11 migrations (V1–V11).
-    assert_eq!(version, 11);
+    // We have 12 migrations (V1–V12).
+    assert_eq!(version, 12);
 }
 
 #[test]
@@ -3730,4 +3730,150 @@ fn usage_reading_streaks() {
     let (current, longest) = compute_reading_streaks(&dates, "2025-07-03");
     assert_eq!(current, 1);
     assert_eq!(longest, 1);
+}
+
+// ======================================================================
+// Diagnostics: import & extraction logs (#72)
+// ======================================================================
+
+#[test]
+fn import_log_insert_and_list() {
+    use pergamon_core::diagnostics::{ImportLogEntry, ImportSource};
+
+    let db = test_db();
+    let entry = ImportLogEntry {
+        id: Uuid::new_v4(),
+        source: ImportSource::Opml,
+        file_name: Some("subscriptions.opml".to_owned()),
+        items_added: 10,
+        items_existing: 2,
+        items_skipped: 1,
+        errors: 0,
+        error_detail: None,
+        dry_run: false,
+        created_at: now(),
+    };
+    db.insert_import_log(&entry)
+        .unwrap_or_else(|e| unreachable!("insert import log: {e}"));
+
+    let logs = db
+        .list_import_logs(10)
+        .unwrap_or_else(|e| unreachable!("list import logs: {e}"));
+    assert_eq!(logs.len(), 1);
+    assert_eq!(logs[0].source, ImportSource::Opml);
+    assert_eq!(logs[0].items_added, 10);
+    assert_eq!(logs[0].file_name.as_deref(), Some("subscriptions.opml"));
+}
+
+#[test]
+fn extraction_log_stats_and_filtering() {
+    use pergamon_core::diagnostics::{ExtractionEvent, ExtractionSource};
+
+    let db = test_db();
+    let ok = ExtractionEvent {
+        id: Uuid::new_v4(),
+        content_item_id: None,
+        url: Some("https://example.com/ok".to_owned()),
+        source: ExtractionSource::Save,
+        success: true,
+        extractor: Some("readability".to_owned()),
+        error_message: None,
+        created_at: now(),
+    };
+    let bad = ExtractionEvent {
+        id: Uuid::new_v4(),
+        content_item_id: None,
+        url: Some("https://example.com/bad".to_owned()),
+        source: ExtractionSource::Save,
+        success: false,
+        extractor: Some("metadata-fallback".to_owned()),
+        error_message: Some("readability failed".to_owned()),
+        created_at: now(),
+    };
+    db.insert_extraction_event(&ok)
+        .unwrap_or_else(|e| unreachable!("insert ok event: {e}"));
+    db.insert_extraction_event(&bad)
+        .unwrap_or_else(|e| unreachable!("insert bad event: {e}"));
+
+    let stats = db
+        .extraction_stats()
+        .unwrap_or_else(|e| unreachable!("extraction stats: {e}"));
+    assert_eq!(stats.total, 2);
+    assert_eq!(stats.succeeded, 1);
+    assert_eq!(stats.failed, 1);
+
+    let failures = db
+        .list_extraction_events(10, true)
+        .unwrap_or_else(|e| unreachable!("list failures: {e}"));
+    assert_eq!(failures.len(), 1);
+    assert!(!failures[0].success);
+    assert_eq!(
+        failures[0].error_message.as_deref(),
+        Some("readability failed")
+    );
+
+    let all = db
+        .list_extraction_events(10, false)
+        .unwrap_or_else(|e| unreachable!("list all: {e}"));
+    assert_eq!(all.len(), 2);
+}
+
+#[test]
+fn system_stats_counts_items() {
+    let db = test_db();
+    let item = ContentItem {
+        id: Uuid::new_v4(),
+        url: Some("https://example.com/a".to_owned()),
+        title: "Item A".to_owned(),
+        author: None,
+        content_type: ContentType::Article,
+        status: DocumentStatus::Inbox,
+        content_text: Some("body".to_owned()),
+        excerpt: None,
+        published_at: None,
+        created_at: now(),
+        updated_at: now(),
+        read_at: None,
+    };
+    db.insert_content_item(&item)
+        .unwrap_or_else(|e| unreachable!("insert item: {e}"));
+
+    let stats = db
+        .system_stats()
+        .unwrap_or_else(|e| unreachable!("system stats: {e}"));
+    assert_eq!(stats.total_items, 1);
+    assert!(stats.db_size_bytes > 0);
+    assert!(stats.fts_ok);
+    assert_eq!(stats.content_types.iter().map(|c| c.count).sum::<i64>(), 1);
+}
+
+#[test]
+fn feed_health_classifies_errors() {
+    use pergamon_core::diagnostics::FeedHealthStatus;
+
+    let db = test_db();
+    let feed = Feed {
+        id: Uuid::new_v4(),
+        title: "Healthy Feed".to_owned(),
+        url: "https://example.com/feed.xml".to_owned(),
+        site_url: None,
+        description: None,
+        etag: None,
+        last_modified_header: None,
+        last_fetched_at: Some(now()),
+        last_error: None,
+        error_count: 0,
+        folder_id: None,
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.insert_feed(&feed)
+        .unwrap_or_else(|e| unreachable!("insert feed: {e}"));
+
+    let rows = db
+        .feed_health(7, now())
+        .unwrap_or_else(|e| unreachable!("feed health: {e}"));
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].status, FeedHealthStatus::Healthy);
+    assert!(!rows[0].is_stale);
 }
