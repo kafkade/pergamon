@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use axum::Router;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use pergamon_storage::Database;
 use tokio::net::TcpListener;
 use tower_http::compression::CompressionLayer;
@@ -37,6 +37,10 @@ use crate::state::AppState;
 #[derive(Debug, Parser)]
 #[command(name = "pergamon-server", version, about = "Web server for pergamon")]
 struct Args {
+    /// Optional subcommand. When omitted, the web server runs.
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Host address to bind to.
     #[arg(long, default_value = "127.0.0.1", env = "PERGAMON_HOST")]
     host: String,
@@ -54,6 +58,25 @@ struct Args {
     /// Directory to serve static assets from (mounted at `/static`).
     #[arg(long, env = "PERGAMON_STATIC_DIR")]
     static_dir: Option<PathBuf>,
+}
+
+/// Subcommands for the pergamon web server binary.
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Probe a running server's health endpoint and exit.
+    ///
+    /// Performs an HTTP GET against the given URL and exits with status 0 when
+    /// the response is HTTP 200, or a non-zero status otherwise. Used as the
+    /// container `HEALTHCHECK` so the runtime image needs no `curl`/`wget`.
+    HealthCheck(HealthCheckArgs),
+}
+
+/// Arguments for the `health-check` subcommand.
+#[derive(Debug, clap::Args)]
+struct HealthCheckArgs {
+    /// URL of the health endpoint to probe.
+    #[arg(long, default_value = "http://127.0.0.1:3000/health")]
+    url: String,
 }
 
 // ======================================================================
@@ -118,6 +141,35 @@ async fn shutdown_signal() {
 }
 
 // ======================================================================
+// Health check subcommand
+// ======================================================================
+
+/// Probe a server health endpoint and return an error if it is not healthy.
+///
+/// Sends an HTTP GET to `url` with a short timeout and succeeds only when the
+/// response status is 2xx. This backs the container `HEALTHCHECK`, avoiding the
+/// need for `curl`/`wget` in the minimal runtime image.
+async fn run_health_check(url: &str) -> Result<()> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .context("failed to build HTTP client")?;
+
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .with_context(|| format!("health check request to {url} failed"))?;
+
+    let status = response.status();
+    if status.is_success() {
+        Ok(())
+    } else {
+        anyhow::bail!("health check for {url} returned HTTP {status}");
+    }
+}
+
+// ======================================================================
 // Default database path
 // ======================================================================
 
@@ -145,6 +197,11 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
+
+    // Subcommands short-circuit before opening the database or binding a port.
+    if let Some(Command::HealthCheck(hc)) = &args.command {
+        return run_health_check(&hc.url).await;
+    }
 
     // Resolve database path.
     let db_path = args.db_path.unwrap_or_else(default_db_path);
@@ -251,6 +308,49 @@ mod tests {
         let req = Request::get("/nonexistent").body(Body::empty()).unwrap();
         let response = app.oneshot(req).await.unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ── Health check subcommand ────────────────────────────────────
+
+    #[test]
+    fn health_check_subcommand_parses() {
+        let args = Args::parse_from([
+            "pergamon-server",
+            "health-check",
+            "--url",
+            "http://x/health",
+        ]);
+        match args.command {
+            Some(Command::HealthCheck(hc)) => assert_eq!(hc.url, "http://x/health"),
+            other => unreachable!("expected health-check subcommand, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_subcommand_runs_server() {
+        let args = Args::parse_from(["pergamon-server"]);
+        assert!(args.command.is_none());
+    }
+
+    #[tokio::test]
+    async fn health_check_fails_for_unreachable_url() {
+        // Port 1 is privileged and not listening: the request must fail.
+        let result = run_health_check("http://127.0.0.1:1/health").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn health_check_succeeds_against_running_server() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = test_app();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let url = format!("http://{addr}/health");
+        let result = run_health_check(&url).await;
+        assert!(result.is_ok(), "health check failed: {result:?}");
     }
 
     // ── Items ──────────────────────────────────────────────────────

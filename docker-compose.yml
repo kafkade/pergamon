@@ -1,0 +1,21 @@
+services:
+  pergamon:
+    build: .
+    image: pergamon:latest
+    # Map the host port to the container. Adjust the host side (left) if 3000
+    # is taken, e.g. "8080:3000". For production, front this with a reverse
+    # proxy (TLS) instead of exposing the port directly — see docs/docker.md.
+    ports:
+      - "3000:3000"
+    volumes:
+      - pergamon-data:/data
+    environment:
+      # Override the log level/filter as needed (error, warn, info, debug, trace).
+      RUST_LOG: ${RUST_LOG:-info}
+      # Pre-computed Argon2id password hash for headless setup (ADR-017).
+      # Leave unset to use interactive first-run setup.
+      # PERGAMON_PASSWORD_HASH: ${PERGAMON_PASSWORD_HASH}
+    restart: unless-stopped
+
+volumes:
+  pergamon-data:

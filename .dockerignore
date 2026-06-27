@@ -1,0 +1,39 @@
+# Build artifacts
+target/
+
+# Version control
+.git/
+.gitignore
+
+# Documentation and metadata (not needed to build the binaries)
+docs/
+*.md
+LICENSE
+CODE_OF_CONDUCT.md
+CONTRIBUTING.md
+CHANGELOG.md
+README.md
+
+# Editor / OS noise
+.vscode/
+.idea/
+.DS_Store
+
+# Test fixtures
+crates/*/tests/fixtures/
+**/fixtures/
+
+# Local databases and exports
+*.db
+*.db-wal
+*.db-shm
+exports/
+
+# CI / tooling configs not needed for the image
+.github/
+.markdownlint-cli2.jsonc
+
+# Docker files themselves
+Dockerfile
+.dockerignore
+docker-compose.yml
