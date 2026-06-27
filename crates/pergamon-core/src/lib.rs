@@ -15,6 +15,7 @@
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod content_type;
+pub mod diagnostics;
 pub mod error;
 pub mod fsrs;
 pub mod model;

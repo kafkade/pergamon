@@ -6,6 +6,8 @@ use std::sync::Arc;
 
 use pergamon_storage::Database;
 
+use crate::auth::AdminCredentials;
+
 /// Shared application state available to all request handlers.
 ///
 /// Uses `std::sync::Mutex` because database operations are blocking and
@@ -18,4 +20,6 @@ pub struct AppState {
     pub db: Arc<std::sync::Mutex<Database>>,
     /// HTTP client for fetching URLs (save, feed subscribe/sync).
     pub http: reqwest::Client,
+    /// Optional admin credentials. When `None`, the admin routes are open.
+    pub admin_auth: Option<AdminCredentials>,
 }

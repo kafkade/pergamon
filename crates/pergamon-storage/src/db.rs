@@ -13,6 +13,11 @@ use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
 use pergamon_core::content_type::ContentType;
+use pergamon_core::diagnostics::{
+    BrokenLinkRow, ContentTypeCount, ExtractionEvent, ExtractionSource, ExtractionStats,
+    FeedHealthRow, FeedHealthStatus, ImportLogEntry, ImportSource, RuleMonitorRow, StatusCount,
+    SystemStats,
+};
 use pergamon_core::fsrs::{CardState, Rating};
 use pergamon_core::model::{
     BookmarkMeta, Collection, ContentItem, DailyReviewSummary, DailyUsageSummary, Feed, FeedFolder,
@@ -151,6 +156,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         11,
         "read_at_column",
         include_str!("../migrations/V11__read_at_column.sql"),
+    ),
+    (
+        12,
+        "diagnostics_logs",
+        include_str!("../migrations/V12__diagnostics_logs.sql"),
     ),
 ];
 
@@ -2815,6 +2825,317 @@ impl Database {
         Ok(())
     }
 
+    // ==================================================================
+    // Diagnostics: import history
+    // ==================================================================
+
+    /// Record an import run in the import history log.
+    pub fn insert_import_log(&self, entry: &ImportLogEntry) -> Result<(), StorageError> {
+        self.conn.execute(
+            "INSERT INTO import_log
+                (id, source, file_name, items_added, items_existing, items_skipped,
+                 errors, error_detail, dry_run, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                entry.id.to_string(),
+                entry.source.as_str(),
+                entry.file_name,
+                entry.items_added,
+                entry.items_existing,
+                entry.items_skipped,
+                entry.errors,
+                entry.error_detail,
+                i32::from(entry.dry_run),
+                fmt_time(entry.created_at),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// List the most recent import runs, newest first.
+    pub fn list_import_logs(&self, limit: u32) -> Result<Vec<ImportLogEntry>, StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, source, file_name, items_added, items_existing, items_skipped,
+                    errors, error_detail, dry_run, created_at
+             FROM import_log ORDER BY created_at DESC, id DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit], |row| Ok(row_to_import_log(row)))?;
+        let mut entries = Vec::new();
+        for row in rows {
+            entries.push(row?);
+        }
+        Ok(entries)
+    }
+
+    // ==================================================================
+    // Diagnostics: extraction events
+    // ==================================================================
+
+    /// Record a content-extraction attempt.
+    pub fn insert_extraction_event(&self, event: &ExtractionEvent) -> Result<(), StorageError> {
+        self.conn.execute(
+            "INSERT INTO extraction_log
+                (id, content_item_id, url, source, success, extractor, error_message, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                event.id.to_string(),
+                event.content_item_id.map(|id| id.to_string()),
+                event.url,
+                event.source.as_str(),
+                i32::from(event.success),
+                event.extractor,
+                event.error_message,
+                fmt_time(event.created_at),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// List the most recent extraction events, newest first.
+    ///
+    /// When `only_failures` is true, only failed attempts are returned.
+    pub fn list_extraction_events(
+        &self,
+        limit: u32,
+        only_failures: bool,
+    ) -> Result<Vec<ExtractionEvent>, StorageError> {
+        let sql = if only_failures {
+            "SELECT id, content_item_id, url, source, success, extractor, error_message, created_at
+             FROM extraction_log WHERE success = 0
+             ORDER BY created_at DESC, id DESC LIMIT ?1"
+        } else {
+            "SELECT id, content_item_id, url, source, success, extractor, error_message, created_at
+             FROM extraction_log ORDER BY created_at DESC, id DESC LIMIT ?1"
+        };
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query_map(params![limit], |row| Ok(row_to_extraction_event(row)))?;
+        let mut events = Vec::new();
+        for row in rows {
+            events.push(row?);
+        }
+        Ok(events)
+    }
+
+    /// Aggregate extraction success / failure statistics over the whole log.
+    pub fn extraction_stats(&self) -> Result<ExtractionStats, StorageError> {
+        let (succeeded, failed): (i64, i64) = self.conn.query_row(
+            "SELECT
+                COALESCE(SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END), 0)
+             FROM extraction_log",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        Ok(ExtractionStats::new(succeeded, failed))
+    }
+
+    // ==================================================================
+    // Diagnostics: feed health
+    // ==================================================================
+
+    /// Build a feed-health report classifying each feed and flagging stale ones.
+    ///
+    /// A feed is stale when its last successful fetch is older than
+    /// `stale_after_days` (or it has never been fetched).
+    pub fn feed_health(
+        &self,
+        stale_after_days: i64,
+        now: OffsetDateTime,
+    ) -> Result<Vec<FeedHealthRow>, StorageError> {
+        let feeds = self.list_feeds()?;
+        let stale_cutoff = now - time::Duration::days(stale_after_days);
+        let rows = feeds
+            .into_iter()
+            .map(|f| {
+                let is_stale = f.last_fetched_at.is_none_or(|t| t < stale_cutoff);
+                FeedHealthRow {
+                    feed_id: f.id,
+                    title: f.title,
+                    url: f.url,
+                    status: FeedHealthStatus::from_error_count(f.error_count),
+                    error_count: f.error_count,
+                    last_error: f.last_error,
+                    last_fetched_at: f.last_fetched_at,
+                    is_stale,
+                }
+            })
+            .collect();
+        Ok(rows)
+    }
+
+    // ==================================================================
+    // Diagnostics: system statistics
+    // ==================================================================
+
+    /// Collect high-level system statistics for the admin overview.
+    pub fn system_stats(&self) -> Result<SystemStats, StorageError> {
+        let count = |sql: &str| -> Result<i64, StorageError> {
+            Ok(self.conn.query_row(sql, [], |row| row.get(0))?)
+        };
+
+        let total_items = count("SELECT COUNT(*) FROM content_items")?;
+        let total_feeds = count("SELECT COUNT(*) FROM feeds")?;
+        let total_tags = count("SELECT COUNT(*) FROM tags")?;
+        let total_collections = count("SELECT COUNT(*) FROM collections")?;
+        let total_highlights =
+            count("SELECT COUNT(*) FROM content_items WHERE content_type = 'highlight'")?;
+        let total_notes = count("SELECT COUNT(*) FROM notes")?;
+        let total_review_cards = count("SELECT COUNT(*) FROM review_cards")?;
+
+        let page_count: i64 = self
+            .conn
+            .query_row("PRAGMA page_count", [], |row| row.get(0))?;
+        let page_size: i64 = self
+            .conn
+            .query_row("PRAGMA page_size", [], |row| row.get(0))?;
+        let db_size_bytes = page_count * page_size;
+
+        let fts_ok = self
+            .conn
+            .execute(
+                "INSERT INTO content_items_fts(content_items_fts) VALUES('integrity-check')",
+                [],
+            )
+            .is_ok();
+
+        let content_types = self.content_type_distribution()?;
+        let statuses = self.status_distribution()?;
+
+        Ok(SystemStats {
+            total_items,
+            total_feeds,
+            total_tags,
+            total_collections,
+            total_highlights,
+            total_notes,
+            total_review_cards,
+            db_size_bytes,
+            fts_ok,
+            content_types,
+            statuses,
+        })
+    }
+
+    /// Distribution of content items by content type, descending by count.
+    pub fn content_type_distribution(&self) -> Result<Vec<ContentTypeCount>, StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT content_type, COUNT(*) FROM content_items
+             GROUP BY content_type ORDER BY COUNT(*) DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(ContentTypeCount {
+                content_type: row.get(0)?,
+                count: row.get(1)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Distribution of content items by lifecycle status, descending by count.
+    pub fn status_distribution(&self) -> Result<Vec<StatusCount>, StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT status, COUNT(*) FROM content_items
+             GROUP BY status ORDER BY COUNT(*) DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(StatusCount {
+                status: row.get(0)?,
+                count: row.get(1)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    // ==================================================================
+    // Diagnostics: broken links
+    // ==================================================================
+
+    /// List content items whose last link-health check recorded a problem
+    /// (non-2xx HTTP status or a transport error), newest check first.
+    pub fn list_broken_links(&self, limit: u32) -> Result<Vec<BrokenLinkRow>, StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT lh.content_item_id, ci.title, ci.url, lh.http_status,
+                    lh.error_message, lh.last_checked_at
+             FROM link_health lh
+             JOIN content_items ci ON ci.id = lh.content_item_id
+             WHERE lh.error_message IS NOT NULL
+                OR lh.http_status IS NULL
+                OR lh.http_status < 200
+                OR lh.http_status >= 400
+             ORDER BY lh.last_checked_at DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit], |row| {
+            Ok(BrokenLinkRow {
+                content_item_id: parse_uuid(&row.get::<_, String>(0)?),
+                title: row.get(1)?,
+                url: row.get(2)?,
+                http_status: row.get(3)?,
+                error_message: row.get(4)?,
+                last_checked_at: parse_time(&row.get::<_, String>(5)?),
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    // ==================================================================
+    // Diagnostics: content-rules monitor
+    // ==================================================================
+
+    /// Build a rule-monitor report: every rule with the number of content
+    /// items currently matching its filter.
+    pub fn rule_monitor(&self) -> Result<Vec<RuleMonitorRow>, StorageError> {
+        let rules = self.list_rules()?;
+        let mut out = Vec::with_capacity(rules.len());
+        for rule in rules {
+            let match_count = self.count_items_matching_filter(&rule.filter_query)?;
+            let action_summary = if rule.actions.is_empty() {
+                "(none)".to_owned()
+            } else {
+                rule.actions
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            out.push(RuleMonitorRow {
+                rule_id: rule.id,
+                name: rule.name,
+                enabled: rule.enabled,
+                priority: i64::from(rule.priority),
+                filter_query: rule.filter_query,
+                match_count,
+                action_summary,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Count content items currently matching an arbitrary smart-filter query.
+    pub fn count_items_matching_filter(&self, filter_query: &str) -> Result<i64, StorageError> {
+        let smart = pergamon_core::smart_filter::SmartFilter::parse(filter_query)
+            .map_err(|e| StorageError::Generic(format!("invalid filter: {e}")))?;
+        let (sql, param_values) = build_smart_filter_count(&smart);
+        let mut stmt = self.conn.prepare(&sql)?;
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
+            .iter()
+            .map(|v| v as &dyn rusqlite::types::ToSql)
+            .collect();
+        let count: i64 = stmt.query_row(param_refs.as_slice(), |row| row.get(0))?;
+        Ok(count)
+    }
+
     /// List all feed item metadata rows.
     #[allow(clippy::missing_errors_doc)]
     pub fn list_all_feed_item_meta(&self) -> Result<Vec<FeedItemMeta>, StorageError> {
@@ -4438,5 +4759,43 @@ fn row_to_rule(row: &rusqlite::Row<'_>) -> ContentRule {
         actions,
         created_at: parse_time(&row.get::<_, String>(6).unwrap_or_default()),
         updated_at: parse_time(&row.get::<_, String>(7).unwrap_or_default()),
+    }
+}
+
+/// Map a row from `import_log` to an [`ImportLogEntry`].
+fn row_to_import_log(row: &rusqlite::Row<'_>) -> ImportLogEntry {
+    let source = ImportSource::from_db_str(&row.get::<_, String>(1).unwrap_or_default())
+        .unwrap_or(ImportSource::Backup);
+    ImportLogEntry {
+        id: parse_uuid(&row.get::<_, String>(0).unwrap_or_default()),
+        source,
+        file_name: row.get(2).unwrap_or_default(),
+        items_added: row.get(3).unwrap_or_default(),
+        items_existing: row.get(4).unwrap_or_default(),
+        items_skipped: row.get(5).unwrap_or_default(),
+        errors: row.get(6).unwrap_or_default(),
+        error_detail: row.get(7).unwrap_or_default(),
+        dry_run: row.get::<_, i32>(8).unwrap_or(0) != 0,
+        created_at: parse_time(&row.get::<_, String>(9).unwrap_or_default()),
+    }
+}
+
+/// Map a row from `extraction_log` to an [`ExtractionEvent`].
+fn row_to_extraction_event(row: &rusqlite::Row<'_>) -> ExtractionEvent {
+    let source = ExtractionSource::from_db_str(&row.get::<_, String>(3).unwrap_or_default())
+        .unwrap_or(ExtractionSource::Save);
+    let content_item_id = row
+        .get::<_, Option<String>>(1)
+        .unwrap_or_default()
+        .map(|s| parse_uuid(&s));
+    ExtractionEvent {
+        id: parse_uuid(&row.get::<_, String>(0).unwrap_or_default()),
+        content_item_id,
+        url: row.get(2).unwrap_or_default(),
+        source,
+        success: row.get::<_, i32>(4).unwrap_or(0) != 0,
+        extractor: row.get(5).unwrap_or_default(),
+        error_message: row.get(6).unwrap_or_default(),
+        created_at: parse_time(&row.get::<_, String>(7).unwrap_or_default()),
     }
 }
