@@ -138,10 +138,23 @@ pergamon/
 | **Spaced repetition** | FSRS-5 (pure Rust implementation) |
 | **HTTP** | reqwest (rustls) |
 
+## Self-hosting with Docker
+
+Run the pergamon web server in a container with persistent storage:
+
+```sh
+docker compose up -d
+# server on http://localhost:3000
+```
+
+See **[docs/docker.md](docs/docker.md)** for configuration, data persistence,
+reverse-proxy (TLS) setup, and backups.
+
 ## Documentation
 
 - **[Product Roadmap](docs/roadmap.md)** — full phased roadmap with milestones
-- **[Architecture Decision Records](docs/adr/)** — 10 ADRs covering core design choices
+- **[Architecture Decision Records](docs/adr/)** — ADRs covering core design choices
+- **[Docker / self-hosting guide](docs/docker.md)** — run the web server with Docker
 
 ## Related Projects
 

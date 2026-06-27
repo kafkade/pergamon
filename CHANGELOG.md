@@ -54,6 +54,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Web Collections view: browse regular and smart collections, create collections, edit smart-collection filters, and rename/delete collections (#69)
 - Drag-and-drop reordering of items within a collection, with move up/down controls when JavaScript is unavailable (#69)
 - Web header navigation links for Search, Bookmarks, Tags, and Collections pages (#69)
+- Docker image for self-hosting the web server: multi-stage build, minimal `debian:bookworm-slim` runtime, runs as a non-root user, with `docker-compose.yml` and a `.dockerignore` (#71)
+- `pergamon-server health-check` subcommand that probes the `/health` endpoint and exits non-zero when unhealthy; used as the container `HEALTHCHECK` so no `curl`/`wget` is needed in the image (#71)
+- Self-hosting guide (`docs/docker.md`) covering quick start, configuration, data persistence, reverse-proxy (Caddy/nginx) setup, and backups (#71)
 
 ### Changed
 
