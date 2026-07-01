@@ -5,8 +5,9 @@ on:
     tags:
       - "v*"
 
+# Least privilege by default: only the release job needs write access.
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -32,18 +33,17 @@ jobs:
             os: windows-latest
 
     steps:
-      - uses: actions/checkout@v7
-
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+        with:
+          toolchain: stable
           targets: ${{ matrix.target }}
 
       - name: Ensure compilation target is installed
         run: rustup target add ${{ matrix.target }}
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
 
       - name: Install cross (for cross-compilation)
         if: matrix.cross
@@ -65,22 +65,29 @@ jobs:
 
       - name: Package binary (unix)
         if: runner.os != 'Windows'
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          TARGET: ${{ matrix.target }}
         run: |
-          cd target/${{ matrix.target }}/release
-          tar czf ../../../pergamon-${{ github.ref_name }}-${{ matrix.target }}.tar.gz pergamon
+          cd target/"$TARGET"/release
+          tar czf "../../../pergamon-${REF_NAME}-${TARGET}.tar.gz" pergamon
           cd ../../..
-          sha256sum pergamon-${{ github.ref_name }}-${{ matrix.target }}.tar.gz > pergamon-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256
+          sha256sum "pergamon-${REF_NAME}-${TARGET}.tar.gz" > "pergamon-${REF_NAME}-${TARGET}.tar.gz.sha256"
 
       - name: Package binary (windows)
         if: runner.os == 'Windows'
         shell: pwsh
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          TARGET: ${{ matrix.target }}
         run: |
-          Compress-Archive -Path "target/${{ matrix.target }}/release/pergamon.exe" -DestinationPath "pergamon-${{ github.ref_name }}-${{ matrix.target }}.zip"
-          $hash = (Get-FileHash "pergamon-${{ github.ref_name }}-${{ matrix.target }}.zip" -Algorithm SHA256).Hash.ToLower()
-          "$hash  pergamon-${{ github.ref_name }}-${{ matrix.target }}.zip" | Out-File -Encoding ascii "pergamon-${{ github.ref_name }}-${{ matrix.target }}.zip.sha256"
+          $archive = "pergamon-${env:REF_NAME}-${env:TARGET}.zip"
+          Compress-Archive -Path "target/${env:TARGET}/release/pergamon.exe" -DestinationPath $archive
+          $hash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLower()
+          "$hash  $archive" | Out-File -Encoding ascii "$archive.sha256"
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: pergamon-${{ matrix.target }}
           path: |
@@ -92,12 +99,18 @@ jobs:
     name: Create GitHub Release
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
 
       - name: Verify tag matches Cargo.toml version
+        env:
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          TAG_VERSION="${REF_NAME#v}"
           CARGO_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
           if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
             echo "::error::Tag version ($TAG_VERSION) does not match Cargo.toml version ($CARGO_VERSION)"
@@ -105,19 +118,21 @@ jobs:
           fi
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: artifacts
           merge-multiple: true
 
       - name: Extract release notes from CHANGELOG.md
         id: extract
-        uses: ffurrer2/extract-release-notes@v3
+        uses: ffurrer2/extract-release-notes@273da39a24fb7db106a35526c8162815faffd31d # v3.1.0
 
       - name: Determine pre-release status
         id: prerelease
+        env:
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${REF_NAME#v}"
           MAJOR="${VERSION%%.*}"
           if [ "$MAJOR" = "0" ]; then
             echo "flag=--prerelease" >> "$GITHUB_OUTPUT"
@@ -129,10 +144,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_NOTES: ${{ steps.extract.outputs.release_notes }}
+          REF_NAME: ${{ github.ref_name }}
+          PRERELEASE_FLAG: ${{ steps.prerelease.outputs.flag }}
         run: |
           echo "$RELEASE_NOTES" > "$RUNNER_TEMP/release-notes.md"
-          gh release create "${{ github.ref_name }}" \
-            --title "${{ github.ref_name }}" \
+          gh release create "$REF_NAME" \
+            --title "$REF_NAME" \
             --notes-file "$RUNNER_TEMP/release-notes.md" \
-            ${{ steps.prerelease.outputs.flag }} \
+            $PRERELEASE_FLAG \
             artifacts/*
