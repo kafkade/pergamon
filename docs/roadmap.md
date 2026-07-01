@@ -2786,7 +2786,10 @@ Predictable, portable, well-maintained, and aligned with the rest of the Rust ec
 
 ## Section 13: Phased Roadmap with Milestones
 
-### Phase 0: First Feed 🟢
+> **Status legend:** ✅ complete · 🟡 in progress · 🔴 not started · ⛔ blocked / gated.
+> As of 2026-06: Phases 0–5 are complete (web interface shipped). Phase 6 has begun (UniFFI binding + iOS spike landed). Phases 7–8 are planned and broken into GitHub issues under their milestones.
+
+### Phase 0: First Feed ✅
 
 **Theme:** *“One feed, one article, end to end.”*  
 **Goal:** prove the core stack by subscribing to a feed, fetching entries, storing them locally, and opening a readable article in the CLI/TUI. **[Validated]**
@@ -2829,7 +2832,7 @@ Predictable, portable, well-maintained, and aligned with the rest of the Rust ec
 
 ---
 
-### Phase 1: Minimum Usable Reader (MVP) 🟡
+### Phase 1: Minimum Usable Reader (MVP) ✅
 
 **Theme:** *“I can replace my daily reading stack.”*  
 **Goal:** ship a credible local-first replacement for core RSS reading plus basic read-later and bookmark capture. This is the first phase where pergamon must become part of the maintainer’s daily routine. **[Validated]**
@@ -2873,7 +2876,7 @@ Predictable, portable, well-maintained, and aligned with the rest of the Rust ec
 
 ---
 
-### Phase 2: Bookmark Manager (Raindrop Replacement) 🟡
+### Phase 2: Bookmark Manager (Raindrop Replacement) ✅
 
 **Theme:** *“Everything I save lands in one organized library.”*  
 **Goal:** turn pergamon from “reader with save support” into a real bookmark manager that can absorb a Raindrop or Pinboard export and stay pleasant to organize over time. **[Validated]**
@@ -2961,7 +2964,7 @@ Predictable, portable, well-maintained, and aligned with the rest of the Rust ec
 
 ---
 
-### Phase 4: Obsidian & Polish 🟡
+### Phase 4: Obsidian & Polish ✅
 
 **Theme:** *“pergamon becomes my ingestion engine.”*  
 **Goal:** connect pergamon cleanly to Obsidian, add rule-based organization, and polish the product enough that it feels like a stable daily system instead of a powerful prototype. **[Validated]**
@@ -3005,7 +3008,7 @@ Predictable, portable, well-maintained, and aligned with the rest of the Rust ec
 
 ---
 
-### Phase 5: Web Interface (Axum + Web UI + Docker) 🔴
+### Phase 5: Web Interface (Axum + Web UI + Docker) ✅
 
 **Theme:** *“The library is available anywhere with a browser.”*  
 **Goal:** ship a deployable web interface for browsing, reading, searching, and organizing the pergamon library without abandoning the Rust core or the local-first philosophy. **[Validation Required]**
@@ -3050,7 +3053,7 @@ Predictable, portable, well-maintained, and aligned with the rest of the Rust ec
 
 ---
 
-### Phase 6: iOS App (SwiftUI via UniFFI) 🔴
+### Phase 6: iOS App (SwiftUI via UniFFI) 🟡
 
 **Theme:** *“Capture and review on the phone.”*  
 **Goal:** deliver a native-feeling iPhone app for reading, saving, reviewing, and quick ingestion while reusing the Rust core through UniFFI. **[Validation Required]**
