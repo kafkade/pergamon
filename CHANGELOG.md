@@ -65,6 +65,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Review statistics API now includes monthly activity history (`monthly_history`) in `/api/review/stats`
+- SQLite databases now open in WAL (Write-Ahead Logging) mode with `synchronous=NORMAL` and a 5s `busy_timeout`, allowing the web server and CLI to access the same database concurrently. WAL creates `*.db-wal` and `*.db-shm` sidecar files that are part of the live database — include them in raw file backups or use `export backup` while running (#83)
 
 ### Fixed
 

@@ -207,6 +207,27 @@ impl Database {
     /// Returns an error if the connection cannot be established or migrations fail.
     pub fn open(path: &Path) -> Result<Self, StorageError> {
         let conn = Connection::open(path)?;
+        // Enable WAL (Write-Ahead Logging) mode so concurrent readers do not
+        // block a writer (and vice versa) — required for concurrent access from
+        // the web server and CLI against the same database file (ADR-018).
+        //
+        // WAL creates two sidecar files alongside the main database that are
+        // part of the live database state:
+        //   * `<db>-wal` — the write-ahead log
+        //   * `<db>-shm` — the shared-memory index
+        // A raw file copy must include these (or stop all connections first);
+        // application-level `export backup` is safe while running.
+        //
+        // `synchronous = NORMAL` is the recommended companion for WAL: durable
+        // across application crashes with better performance than FULL.
+        // `busy_timeout` waits on brief lock contention instead of returning
+        // `SQLITE_BUSY` immediately. WAL requires a local filesystem with proper
+        // locking (network filesystems such as NFS/SMB are unsupported).
+        conn.execute_batch(
+            "PRAGMA journal_mode = WAL;\n\
+             PRAGMA synchronous = NORMAL;\n\
+             PRAGMA busy_timeout = 5000;",
+        )?;
         Self::init(&conn)?;
         Ok(Self { conn })
     }
@@ -4797,5 +4818,39 @@ fn row_to_extraction_event(row: &rusqlite::Row<'_>) -> ExtractionEvent {
         extractor: row.get(5).unwrap_or_default(),
         error_message: row.get(6).unwrap_or_default(),
         created_at: parse_time(&row.get::<_, String>(7).unwrap_or_default()),
+    }
+}
+
+#[cfg(test)]
+mod wal_tests {
+    use super::*;
+
+    /// Opening a file-backed database enables WAL journal mode and sets a
+    /// non-zero busy timeout for concurrent access (issue #83).
+    #[test]
+    fn open_enables_wal_and_busy_timeout() {
+        let mut path = std::env::temp_dir();
+        path.push(format!("pergamon-wal-test-{}.db", Uuid::new_v4()));
+
+        let db =
+            Database::open(&path).unwrap_or_else(|e| unreachable!("failed to open file DB: {e}"));
+
+        let journal_mode: String = db
+            .conn
+            .query_row("PRAGMA journal_mode;", [], |row| row.get(0))
+            .unwrap_or_else(|e| unreachable!("query journal_mode: {e}"));
+        assert_eq!(journal_mode.to_lowercase(), "wal");
+
+        let busy_timeout: i64 = db
+            .conn
+            .query_row("PRAGMA busy_timeout;", [], |row| row.get(0))
+            .unwrap_or_else(|e| unreachable!("query busy_timeout: {e}"));
+        assert_eq!(busy_timeout, 5000);
+
+        // Clean up the database and its WAL/SHM sidecar files.
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
     }
 }
