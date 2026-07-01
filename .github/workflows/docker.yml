@@ -1,0 +1,147 @@
+name: Docker
+
+# Builds the Docker image on PRs that touch image-relevant files (build-only, no
+# push) to catch Dockerfile regressions, and publishes versioned images to GHCR on
+# version tags. This workflow is intentionally standalone and is NOT part of the
+# required status checks in the Terraform-managed branch protection
+# (kafkade/github-infra) — Docker builds are slow and should not gate every PR.
+on:
+  pull_request:
+    paths:
+      - "Dockerfile"
+      - ".dockerignore"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/docker.yml"
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege by default.
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: kafkade/pergamon-web
+  # Compressed image size budget (ADR-018): < 100 MB.
+  MAX_COMPRESSED_BYTES: "104857600"
+
+jobs:
+  docker:
+    name: Build image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Needed only on tag pushes to log in and push to GHCR.
+      packages: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+
+      - name: Extract image metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # Semantic version tags per ADR-018: 0.7.0, 0.7, 0, plus latest (added
+          # automatically for the highest non-prerelease semver). On pull requests
+          # (which never push) a `pr-<number>` tag is produced so the build can be
+          # loaded locally for the smoke test and size check.
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=ref,event=pr
+          labels: |
+            org.opencontainers.image.description=pergamon web server — a unified, local-first personal information system (RSS, read-later, bookmarks, spaced repetition).
+
+      - name: Log in to GHCR
+        # Only authenticate on tag pushes, which are the only builds that push.
+        if: github.event_name == 'push'
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build image (load into local Docker for testing)
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/amd64
+          # Load the built image into the runner's Docker daemon so the smoke test
+          # and size check run against the exact artifact. Pushing happens in a
+          # later step (only on tag builds) using the same locally tagged images.
+          load: true
+          push: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test (/health responds 200)
+        env:
+          IMAGE_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          echo "Starting container from $IMAGE_REF"
+          docker run -d --name pergamon-smoke -p 3000:3000 "$IMAGE_REF"
+
+          ok=false
+          for i in $(seq 1 30); do
+            code=$(curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/health || true)
+            if [ "$code" = "200" ]; then
+              echo "Health check passed after ${i} attempt(s)."
+              ok=true
+              break
+            fi
+            echo "Attempt ${i}: /health returned '${code:-no response}', retrying..."
+            sleep 2
+          done
+
+          if [ "$ok" != "true" ]; then
+            echo "::error::Health check did not return 200 within timeout."
+            echo "----- container logs -----"
+            docker logs pergamon-smoke || true
+            docker rm -f pergamon-smoke >/dev/null 2>&1 || true
+            exit 1
+          fi
+
+          docker rm -f pergamon-smoke >/dev/null 2>&1 || true
+
+      - name: Check compressed image size (< 100 MB)
+        env:
+          IMAGE_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          bytes=$(docker save "$IMAGE_REF" | gzip -c | wc -c)
+          mib=$(awk "BEGIN { printf \"%.2f\", $bytes / 1048576 }")
+          echo "Compressed image size: ${bytes} bytes (${mib} MiB)"
+          if [ "$bytes" -ge "$MAX_COMPRESSED_BYTES" ]; then
+            echo "::error::Compressed image size ${mib} MiB exceeds the 100 MB budget (ADR-018)."
+            exit 1
+          fi
+          echo "Image is within the 100 MB compressed budget."
+
+      - name: Push image to GHCR
+        # Only publish on version tags, after smoke test and size check pass.
+        if: github.event_name == 'push'
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          echo "$TAGS" | while IFS= read -r tag; do
+            [ -z "$tag" ] && continue
+            echo "Pushing $tag"
+            docker push "$tag"
+          done
