@@ -12,9 +12,11 @@ services:
     environment:
       # Override the log level/filter as needed (error, warn, info, debug, trace).
       RUST_LOG: ${RUST_LOG:-info}
-      # Pre-computed Argon2id password hash for headless setup (ADR-017).
-      # Leave unset to use interactive first-run setup.
-      # PERGAMON_PASSWORD_HASH: ${PERGAMON_PASSWORD_HASH}
+      # Protect the /admin diagnostics routes with HTTP Basic auth. Both must be
+      # set to enable it. The rest of the UI has no built-in auth — front it with
+      # a reverse proxy for authentication and TLS (see docs/docker.md).
+      # PERGAMON_ADMIN_USER: admin
+      # PERGAMON_ADMIN_PASSWORD: ${PERGAMON_ADMIN_PASSWORD}
     restart: unless-stopped
 
 volumes:
