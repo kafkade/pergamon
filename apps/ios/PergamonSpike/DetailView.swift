@@ -1,12 +1,16 @@
 import SwiftUI
+import PergamonKit
 
 /// Detail / reader view. Demonstrates the "open" path: rather than passing the
 /// already-loaded struct, it re-fetches the item from Rust by id via
-/// `getItem(id:)`, proving a round-trip lookup across the FFI boundary.
+/// `library.item(id:)`, proving a round-trip lookup across the FFI boundary.
+/// The lookup throws `PergamonError` (mapped from Rust `Result`), so a missing
+/// or malformed id renders the unavailable state.
 struct DetailView: View {
+    let library: Library
     let itemID: String
 
-    private var item: ContentItem? { getItem(id: itemID) }
+    private var item: ContentItem? { try? library.item(id: itemID) }
 
     var body: some View {
         Group {
@@ -79,7 +83,8 @@ struct DetailView: View {
 }
 
 #Preview {
-    NavigationStack {
-        DetailView(itemID: sampleItems().first?.id ?? "")
+    let library = Library()
+    return NavigationStack {
+        DetailView(library: library, itemID: library.items().first?.id ?? "")
     }
 }

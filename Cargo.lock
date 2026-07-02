@@ -2322,6 +2322,7 @@ name = "pergamon-uniffi"
 version = "0.6.1"
 dependencies = [
  "pergamon-core",
+ "thiserror 2.0.18",
  "time",
  "uniffi",
  "uuid",
