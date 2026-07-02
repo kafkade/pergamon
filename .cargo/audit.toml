@@ -1,0 +1,24 @@
+# cargo-audit configuration (https://github.com/rustsec/rustsec/tree/main/cargo-audit)
+#
+# Consumed both by local `cargo audit` runs and by the CI "Security audit" job
+# (rustsec/audit-check), which invokes cargo-audit from the repo root.
+
+[advisories]
+# Transitive DoS advisories against `quick-xml 0.37.5`, pulled in only via
+# `feed-rs 2.3.1` (latest release), which pins `quick-xml = "^0.37"` and so
+# cannot accept a patched release. Our own direct dependency already uses the
+# fixed `quick-xml 0.41`, so first-party XML parsing is not affected.
+#
+# There is no feed-rs release on `quick-xml >= 0.41` yet, leaving no clean
+# version-bump fix. These are ignored until feed-rs upgrades quick-xml, at which
+# point this entry should be removed.
+#
+#   RUSTSEC-2026-0195 - unbounded namespace-declaration allocation in NsReader
+#   RUSTSEC-2026-0194 - quadratic runtime on duplicated attribute names
+#
+# Tracking: bump `feed-rs` once it releases against quick-xml >= 0.41 and drop
+# these ignores.
+ignore = [
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]
