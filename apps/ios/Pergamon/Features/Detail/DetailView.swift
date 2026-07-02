@@ -15,6 +15,7 @@ struct DetailView: View {
 
     @State private var item: ContentItem?
     @State private var loadFailed = false
+    @State private var showingOrganize = false
 
     var body: some View {
         Group {
@@ -33,7 +34,21 @@ struct DetailView: View {
         .toolbar {
             if let item {
                 ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        showingOrganize = true
+                    } label: {
+                        Label("Organize", systemImage: "tag")
+                    }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
                     actionsMenu(for: item)
+                }
+            }
+        }
+        .sheet(isPresented: $showingOrganize) {
+            if let item {
+                OrganizeSheet(library: library, item: item) { updated in
+                    self.item = updated
                 }
             }
         }
@@ -76,6 +91,8 @@ struct DetailView: View {
                     metadata(icon: "link", text: url)
                 }
 
+                organization(for: item)
+
                 Divider()
 
                 articleBody(for: item)
@@ -92,6 +109,48 @@ struct DetailView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding()
         }
+    }
+
+    /// A compact display of the item's tags and collection memberships, with a
+    /// tap target to open the organize sheet. Hidden entirely when the item has
+    /// neither, to keep the reader clean.
+    @ViewBuilder
+    private func organization(for item: ContentItem) -> some View {
+        let collectionNames = collectionNames(for: item)
+        if !item.tags.isEmpty || !collectionNames.isEmpty {
+            Divider()
+            Button {
+                showingOrganize = true
+            } label: {
+                VStack(alignment: .leading, spacing: 8) {
+                    if !item.tags.isEmpty {
+                        WrapHStack(item.tags) { tag in
+                            Text("#\(tag)")
+                                .font(.caption)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 4)
+                                .background(Color.accentColor.opacity(0.12), in: Capsule())
+                                .foregroundStyle(Color.accentColor)
+                        }
+                    }
+                    if !collectionNames.isEmpty {
+                        Label(collectionNames.joined(separator: " · "), systemImage: Collection.systemImage)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    /// Resolves the item's collection ids to display names via the library.
+    private func collectionNames(for item: ContentItem) -> [String] {
+        let membership = Set(item.collectionIds)
+        return library.collections()
+            .filter { membership.contains($0.id) }
+            .map(\.name)
     }
 
     /// The reader body: the normalized extracted text when present, falling back

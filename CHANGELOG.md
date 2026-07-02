@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- iOS search, bookmarks, and organization (#116): faceted search screen (content type, status, tag, source, and a published-within date preset) with active-facet chips; collection and tag browsing folded into the Saved tab via a scope picker (All / Status / Collections / Tags), including a nested collection tree; and tag/collection assignment from the item detail (assign existing entries or create new ones inline)
+- UniFFI surface additions for iOS organization (#116): new `Tag`, `Collection`, and `SearchFacets` records; `ContentItem` now carries `tags` and `collection_ids`; and `Library` gains `search_filtered`, `tags`, `collections`, `items_with_tag`, `items_in_collection`, `add_tag`/`remove_tag`, `create_collection`, and `add_to_collection`/`remove_from_collection`. `search_filtered` matches title/author/excerpt/URL/content AND-combined with the facet set for parity with the CLI/web search
 - Admin diagnostics view for pergamon-server: authenticated `/admin` dashboard covering feed health, extraction status, import history, system statistics, broken links, and a content-rules monitor (#72)
 - Optional HTTP Basic auth for the admin subtree via `--admin-user`/`--admin-password` flags or `PERGAMON_ADMIN_USER`/`PERGAMON_ADMIN_PASSWORD` env vars (routes stay open with a startup warning when unset)
 - Diagnostics logging: new `import_log` and `extraction_log` tables (migration V12) with CLI import/save and server feed-sync instrumentation

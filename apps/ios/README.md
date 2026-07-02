@@ -38,6 +38,16 @@ behind the same `Library` surface.
   triage mutations and refresh in place. The reader offers the same actions from
   its toolbar. Mutations apply to the in-memory corpus today; the SQLite store
   (#118) persists them across launches behind the same surface.
+- **Search** (`SearchView`) runs `library.searchFiltered(query:facets:)` with
+  faceted filters — content type, status, tag, source, and a published-within
+  date preset — mirroring the CLI/web facet set. Active facets show as removable
+  chips.
+- **Bookmarks & organization** (`SavedView`) folds collection and tag browsing
+  into the Saved tab via a scope picker (All / Status / Collections / Tags),
+  including a nested collection tree with per-collection counts. The reader's
+  **Organize** sheet (`OrganizeSheet`) assigns and removes tags and collection
+  memberships — assigning existing entries or creating new ones inline — through
+  the `Library` organization mutations.
 
 ## Layout
 
@@ -48,8 +58,8 @@ behind the same `Library` surface.
 | `PergamonKit/Tests/PergamonKitTests/*.swift` | yes | XCTest suite (`swift test`) |
 | `Pergamon/App/*.swift` | yes | app entry point, DI container, ADR-020 storage seam |
 | `Pergamon/Root/RootView.swift` | yes | tab/navigation shell |
-| `Pergamon/Features/**/*.swift` | yes | Inbox, Saved, Search, Review, Detail screens |
-| `Pergamon/Components/*.swift` | yes | shared list row |
+| `Pergamon/Features/**/*.swift` | yes | Inbox, Saved, Search, Review, Detail, Organize screens |
+| `Pergamon/Components/*.swift` | yes | shared list row, wrapping chip layout |
 | `Pergamon/Presentation/*.swift` | yes | SwiftUI styling (SF Symbols, tints) |
 | `Pergamon/Pergamon.entitlements` | yes | App Group `group.dev.pergamon` |
 | `HostSmoke/main.swift` | yes | host-side smoke test (`scripts/smoke-macos.sh`) |

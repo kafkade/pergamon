@@ -148,4 +148,121 @@ final class PergamonKitTests: XCTestCase {
             }
         }
     }
+
+    // MARK: - Organization: tags & collections
+
+    private func uuid(_ n: UInt64) -> String {
+        String(format: "00000000-0000-0000-0000-%012x", n)
+    }
+
+    func testSeededItemExposesTagsAndCollections() throws {
+        let item = try library.item(id: uuid(1))
+        XCTAssertEqual(item.tags, ["local-first", "reading"])
+        XCTAssertEqual(item.collectionIds, [uuid(101)])
+    }
+
+    func testTagsAreSortedWithCounts() {
+        let tags = library.tags()
+        XCTAssertEqual(tags.map(\.name), ["ios", "local-first", "memory", "reading", "rust"])
+        XCTAssertEqual(tags.first { $0.name == "reading" }?.itemCount, 3)
+    }
+
+    func testCollectionsAreTreeOrderedWithDepth() {
+        let collections = library.collections()
+        XCTAssertEqual(
+            collections.map { [$0.name, "\($0.depth)", "\($0.itemCount)"] },
+            [
+                ["Reading List", "0", "2"],
+                ["Deep Dives", "1", "1"],
+                ["Tech", "0", "1"],
+            ]
+        )
+    }
+
+    func testItemsWithTagIsCaseInsensitive() {
+        XCTAssertEqual(library.itemsWithTag(tag: "READING").count, 3)
+        XCTAssertTrue(library.itemsWithTag(tag: "   ").isEmpty)
+    }
+
+    func testItemsInCollectionListsMembersAndThrowsForUnknown() throws {
+        XCTAssertEqual(try library.itemsInCollection(collectionId: uuid(101)).count, 2)
+        XCTAssertThrowsError(try library.itemsInCollection(collectionId: uuid(999))) { error in
+            guard case PergamonError.NotFound = error else {
+                return XCTFail("expected NotFound, got \(error)")
+            }
+        }
+    }
+
+    func testAddTagCreatesAndIsIdempotent() throws {
+        let tagged = try library.addTag(id: uuid(4), name: "Focus")
+        XCTAssertEqual(tagged.tags, ["Focus"])
+        // Case-insensitive idempotency: no duplicate.
+        let again = try library.addTag(id: uuid(4), name: "focus")
+        XCTAssertEqual(again.tags, ["Focus"])
+    }
+
+    func testAddTagRejectsBlank() {
+        XCTAssertThrowsError(try library.addTag(id: uuid(1), name: "  ")) { error in
+            guard case PergamonError.InvalidInput = error else {
+                return XCTFail("expected InvalidInput, got \(error)")
+            }
+        }
+    }
+
+    func testRemoveTagIsIdempotent() throws {
+        let removed = try library.removeTag(id: uuid(1), name: "READING")
+        XCTAssertEqual(removed.tags, ["local-first"])
+        let again = try library.removeTag(id: uuid(1), name: "reading")
+        XCTAssertEqual(again.tags, ["local-first"])
+    }
+
+    func testCreateCollectionNestsAndValidates() throws {
+        let created = try library.createCollection(name: "Later Reads", parentId: uuid(101))
+        XCTAssertEqual(created.parentId, uuid(101))
+        XCTAssertEqual(created.depth, 1)
+        XCTAssertThrowsError(try library.createCollection(name: "  ", parentId: nil)) { error in
+            guard case PergamonError.InvalidInput = error else {
+                return XCTFail("expected InvalidInput, got \(error)")
+            }
+        }
+    }
+
+    func testAddAndRemoveFromCollectionAreIdempotent() throws {
+        let added = try library.addToCollection(id: uuid(4), collectionId: uuid(103))
+        XCTAssertEqual(added.collectionIds, [uuid(103)])
+        let again = try library.addToCollection(id: uuid(4), collectionId: uuid(103))
+        XCTAssertEqual(again.collectionIds, [uuid(103)])
+        let removed = try library.removeFromCollection(id: uuid(4), collectionId: uuid(103))
+        XCTAssertTrue(removed.collectionIds.isEmpty)
+    }
+
+    func testSearchFilteredCombinesFacets() {
+        // Status facet.
+        let later = SearchFacets(
+            contentType: nil, status: .later, tag: nil, source: nil,
+            sinceMillis: nil, beforeMillis: nil
+        )
+        XCTAssertEqual(library.searchFiltered(query: "", facets: later).count, 1)
+
+        // Tag facet with a text query (AND-combined).
+        let rust = SearchFacets(
+            contentType: nil, status: nil, tag: "rust", source: nil,
+            sinceMillis: nil, beforeMillis: nil
+        )
+        let hits = library.searchFiltered(query: "word", facets: rust)
+        XCTAssertEqual(hits.count, 1)
+        XCTAssertTrue(hits[0].tags.contains("rust"))
+
+        // Empty query with no facets matches nothing.
+        XCTAssertTrue(
+            library.searchFiltered(
+                query: "",
+                facets: SearchFacets(
+                    contentType: nil, status: nil, tag: nil, source: nil,
+                    sinceMillis: nil, beforeMillis: nil
+                )
+            ).isEmpty
+        )
+    }
 }
+
