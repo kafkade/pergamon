@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Spike findings doc on UniFFI ergonomics and binary size (`docs/spikes/uniffi-ios-findings.md`)
 - Hardened UniFFI binding per ADR-019: flat `PergamonError` enum mapped to Swift `throws`, and a stateful `Library` object handle (`inbox`/`items`/`itemsWithStatus`/`item`/`search`) replacing the spike's free list/open functions (#113)
 - `PergamonKit` Swift package (`apps/ios/PergamonKit`): idiomatic wrapper over the generated UniFFI bindings, with an XCTest suite runnable via `swift test`; the app consumes it with no hand-written FFI glue (#113)
+- Production SwiftUI iPhone app (`apps/ios/Pergamon`) replacing the `PergamonSpike` sample: tab/navigation shell (Inbox, Saved, Search, Review), an `AppEnvironment` DI container owning the single `Library` handle, and a launch-time storage bootstrap (`StorageLocation`) that resolves the ADR-020 App Group container (`group.dev.pergamon`) and excludes the blob cache from backup, with a Simulator fallback so the app always launches (#114)
 - macOS host slice added to `PergamonFFI.xcframework` so PergamonKit unit tests run natively on the host without a Simulator (#113)
 - `pergamon-server` crate: Axum-based web server for pergamon (AGPL-3.0-only)
 - REST API for content items: list, save URL, update status/tags, delete (`/api/items`)
