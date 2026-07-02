@@ -16,6 +16,18 @@ public extension ContentItem {
     var publishedDate: Date? {
         publishedAtMillis.map { Date(timeIntervalSince1970: Double($0) / 1000.0) }
     }
+
+    /// When the item was marked read, derived from the Rust-provided epoch
+    /// milliseconds, or `nil` when the item is unread.
+    var readDate: Date? {
+        readAtMillis.map { Date(timeIntervalSince1970: Double($0) / 1000.0) }
+    }
+
+    /// Whether the item has been read. Read state is tracked independently of
+    /// triage `status` (archiving also marks an item read).
+    var isRead: Bool {
+        readAtMillis != nil
+    }
 }
 
 public extension Status {

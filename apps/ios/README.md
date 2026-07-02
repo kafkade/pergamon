@@ -28,8 +28,16 @@ behind the same `Library` surface.
   provisioned (e.g. a bare Simulator with no signing team) it falls back to the
   app container, so the app always launches.
 - **`RootView`** is the `TabView` shell; each tab owns its own
-  `NavigationStack`. `DetailView` is shared and re-fetches by id via
-  `library.item(id:)` (exercising the throwing FFI path).
+  `NavigationStack`. `DetailView` is the shared **reader**: it re-fetches by id
+  via `library.item(id:)` (exercising the throwing FFI path) and renders the
+  normalized extracted content (`contentText`) as a readable article. Because
+  the content is served entirely from the local core, the reader works offline.
+- **Inbox triage** (`InboxView`) filters by status, feed/source
+  (`library.sources()`), and read/unread state, and exposes per-item swipe
+  actions — mark read/unread, save for later, archive — that call the `Library`
+  triage mutations and refresh in place. The reader offers the same actions from
+  its toolbar. Mutations apply to the in-memory corpus today; the SQLite store
+  (#118) persists them across launches behind the same surface.
 
 ## Layout
 
