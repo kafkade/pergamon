@@ -1,17 +1,22 @@
 import SwiftUI
+import PergamonKit
 
 /// The inbox: lists items returned by the Rust core and lets you filter by
-/// triage status. Tapping a row opens it (a fresh `getItem(id:)` round-trip
+/// triage status. Tapping a row opens it (a fresh `library.item(id:)` round-trip
 /// into Rust) in `DetailView`.
 struct InboxView: View {
     @State private var filter: StatusFilter = .all
 
+    /// The stateful entry point into the Rust core. Backed by an in-memory
+    /// seeded corpus today; the on-device SQLite store lands with #118.
+    private let library = Library()
+
     private var items: [ContentItem] {
         switch filter {
         case .all:
-            return sampleItems()
+            return library.items()
         case .status(let status):
-            return itemsWithStatus(status: status)
+            return library.itemsWithStatus(status: status)
         }
     }
 
@@ -32,7 +37,7 @@ struct InboxView: View {
             .listStyle(.plain)
             .navigationTitle("pergamon")
             .navigationDestination(for: ContentItem.self) { item in
-                DetailView(itemID: item.id)
+                DetailView(library: library, itemID: item.id)
             }
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {

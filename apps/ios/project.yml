@@ -19,6 +19,13 @@ settings:
     MARKETING_VERSION: "0.1.0"
     CURRENT_PROJECT_VERSION: "1"
 
+# The app consumes the Rust core exclusively through the PergamonKit Swift
+# package (which vendors the generated bindings + PergamonFFI.xcframework built
+# by scripts/build-ios.sh). There is no hand-written FFI glue in the app.
+packages:
+  PergamonKit:
+    path: PergamonKit
+
 targets:
   PergamonSpike:
     type: application
@@ -27,11 +34,8 @@ targets:
     sources:
       - path: PergamonSpike
     dependencies:
-      # Static-library XCFramework produced by scripts/build-ios.sh. It is not
-      # embedded (static linkage); its module.modulemap exposes the
-      # `pergamon_uniffiFFI` Clang module the generated Swift imports.
-      - framework: Frameworks/PergamonFFI.xcframework
-        embed: false
+      - package: PergamonKit
+        product: PergamonKit
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.pergamon.spike

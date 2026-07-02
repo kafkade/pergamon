@@ -26,6 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - iOS sample app (`apps/ios`): SwiftUI app that lists and opens items served by the Rust core via UniFFI
 - `scripts/build-ios.sh` and `scripts/smoke-macos.sh` for building the iOS XCFramework and running a host-side binding smoke test
 - Spike findings doc on UniFFI ergonomics and binary size (`docs/spikes/uniffi-ios-findings.md`)
+- Hardened UniFFI binding per ADR-019: flat `PergamonError` enum mapped to Swift `throws`, and a stateful `Library` object handle (`inbox`/`items`/`itemsWithStatus`/`item`/`search`) replacing the spike's free list/open functions (#113)
+- `PergamonKit` Swift package (`apps/ios/PergamonKit`): idiomatic wrapper over the generated UniFFI bindings, with an XCTest suite runnable via `swift test`; the app consumes it with no hand-written FFI glue (#113)
+- macOS host slice added to `PergamonFFI.xcframework` so PergamonKit unit tests run natively on the host without a Simulator (#113)
 - `pergamon-server` crate: Axum-based web server for pergamon (AGPL-3.0-only)
 - REST API for content items: list, save URL, update status/tags, delete (`/api/items`)
 - REST API for feeds: subscribe, list, delete, sync all, OPML import (`/api/feeds`)

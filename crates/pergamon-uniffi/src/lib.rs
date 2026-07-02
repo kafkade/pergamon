@@ -1,23 +1,24 @@
 //! # pergamon-uniffi
 //!
 //! UniFFI facade exposing a deliberately **narrow** slice of [`pergamon_core`]
-//! to Apple (Swift / SwiftUI) clients. This crate is the spike deliverable for
-//! issue #29: it validates that the zero-I/O Rust core can be consumed natively
-//! from iOS via UniFFI-generated Swift bindings.
+//! to Apple (Swift / SwiftUI) clients. This crate is the single, exclusive
+//! UniFFI export surface for Apple: Swift never links `pergamon-core` or any
+//! internal crate directly. It implements the conventions ratified in
+//! **ADR-019** (UniFFI boundary and error mapping).
 //!
-//! ## Scope
+//! ## Exported surface
 //!
-//! Because `pergamon-core` is zero-I/O and there is no SQLite binding on the
-//! Apple side yet, this facade serves an **in-memory seeded sample store**. That
-//! is enough to demonstrate the two things the spike must prove:
-//!
-//! - *list*: Swift can receive a `Vec` of records built in Rust, and
-//! - *open*: Swift can fetch a single record by id.
-//!
-//! It also exercises real core logic across the FFI boundary
-//! ([`reading_time_from_text`](pergamon_core::reading_time::reading_time_from_text))
-//! and real core types (`Uuid`, `OffsetDateTime`, `ContentType`, `DocumentStatus`)
-//! which are mapped to FFI-friendly shapes here.
+//! - **Records** ([`ContentItem`]): plain value views of core types.
+//! - **Enums** ([`ContentType`], [`Status`]): mirrored discriminators that
+//!   decouple the FFI ABI from the internal `pergamon_core` enums.
+//! - **Error** ([`PergamonError`]): a single, flat error enum mapped to Swift
+//!   `throws`.
+//! - **Object handle** ([`Library`]): the stateful entry point the app drives
+//!   (`inbox`, `items`, `item`, `search`, ...). Backed by an in-memory seeded
+//!   corpus for now; the on-device SQLite store lands with the offline-database
+//!   work (#118 / ADR-020).
+//! - **Free functions** ([`library_version`], [`reading_minutes`]): stateless
+//!   helpers.
 //!
 //! ## Boundary mapping
 //!
@@ -28,11 +29,15 @@
 //! | `Option<T>`       | Swift optional             |
 //! | `ContentType`     | [`ContentType`] enum        |
 //! | `DocumentStatus`  | [`Status`] enum             |
+//! | `Result<T, E>`    | Swift `throws` ([`PergamonError`]) |
 
 // Product/tech names (UniFFI, SwiftUI, SQLite, ...) recur throughout the docs.
 #![allow(clippy::doc_markdown)]
 
+use std::sync::Arc;
+
 use pergamon_core::content_type::ContentType as CoreContentType;
+use pergamon_core::error::CoreError;
 use pergamon_core::model::ContentItem as CoreContentItem;
 use pergamon_core::reading_time::reading_time_from_text;
 use pergamon_core::status::DocumentStatus as CoreStatus;
@@ -170,9 +175,71 @@ impl From<&CoreContentItem> for ContentItem {
     }
 }
 
+/// A single, **flat** error type mapped to Swift `throws`, per ADR-019.
+///
+/// The facade collapses internal crate errors into a small, stable set of
+/// categories the app can act on. Each variant carries a human-readable
+/// `message`; Swift shows the message and can `switch` on the case. Fine-grained
+/// internal variants are intentionally *not* exported — they survive only as the
+/// message string, keeping the FFI ABI stable across internal refactors.
+#[derive(Debug, Clone, thiserror::Error, uniffi::Error)]
+pub enum PergamonError {
+    /// A requested entity does not exist.
+    #[error("{message}")]
+    NotFound {
+        /// Human-readable detail.
+        message: String,
+    },
+    /// Caller-supplied input was malformed or failed validation.
+    #[error("{message}")]
+    InvalidInput {
+        /// Human-readable detail.
+        message: String,
+    },
+    /// An on-device storage operation failed.
+    ///
+    /// Reserved for the SQLite-backed `Library` (#118); unused while the corpus
+    /// is in-memory.
+    #[error("{message}")]
+    Storage {
+        /// Human-readable detail.
+        message: String,
+    },
+    /// A network operation failed.
+    ///
+    /// Reserved for the orchestration layer that wraps HTTP (never
+    /// `pergamon-core`); unused today.
+    #[error("{message}")]
+    Network {
+        /// Human-readable detail.
+        message: String,
+    },
+    /// An unexpected internal error the app cannot act on.
+    #[error("{message}")]
+    Internal {
+        /// Human-readable detail.
+        message: String,
+    },
+}
+
+impl From<CoreError> for PergamonError {
+    fn from(err: CoreError) -> Self {
+        match err {
+            // Every current `CoreError` variant is a parse/validation failure of
+            // caller-controlled input, so they map to `InvalidInput`. The
+            // exhaustive match makes a new core variant a compile error here.
+            CoreError::UnknownContentType(_)
+            | CoreError::UnknownDocumentStatus(_)
+            | CoreError::UnknownCardState(_) => Self::InvalidInput {
+                message: err.to_string(),
+            },
+        }
+    }
+}
+
 /// Build the seeded in-memory corpus of core content items.
 ///
-/// Uses fixed UUIDs and timestamps so `get_item` is deterministic across runs.
+/// Uses fixed UUIDs and timestamps so [`Library::item`] is deterministic across runs.
 fn seed() -> Vec<CoreContentItem> {
     fn at(secs: i64) -> OffsetDateTime {
         OffsetDateTime::from_unix_timestamp(secs).unwrap_or(OffsetDateTime::UNIX_EPOCH)
@@ -272,47 +339,18 @@ fn seed() -> Vec<CoreContentItem> {
 }
 
 /// Returns the version of the underlying `pergamon-core` library.
+///
+/// A stateless helper that needs no [`Library`] handle.
 #[uniffi::export]
 #[must_use]
 pub fn library_version() -> String {
     pergamon_core::VERSION.to_owned()
 }
 
-/// Returns the full seeded list of sample items (the "list" path).
-#[uniffi::export]
-#[must_use]
-pub fn sample_items() -> Vec<ContentItem> {
-    seed().iter().map(ContentItem::from).collect()
-}
-
-/// Returns sample items filtered to a single triage [`Status`].
-#[uniffi::export]
-#[must_use]
-pub fn items_with_status(status: Status) -> Vec<ContentItem> {
-    let core_status: CoreStatus = status.into();
-    seed()
-        .iter()
-        .filter(|item| item.status == core_status)
-        .map(ContentItem::from)
-        .collect()
-}
-
-/// Fetches a single item by its UUID string (the "open" path).
-///
-/// Returns `None` if the id is malformed or not present in the corpus.
-#[uniffi::export]
-#[must_use]
-#[allow(clippy::needless_pass_by_value)] // owned args are the idiomatic UniFFI signature
-pub fn get_item(id: String) -> Option<ContentItem> {
-    let wanted = Uuid::parse_str(&id).ok()?;
-    seed()
-        .iter()
-        .find(|item| item.id == wanted)
-        .map(ContentItem::from)
-}
-
 /// Estimates reading time in minutes for arbitrary text, delegating to the core
 /// reading-time engine. Demonstrates calling pure core logic across the FFI.
+///
+/// A stateless helper that needs no [`Library`] handle.
 #[uniffi::export]
 #[must_use]
 #[allow(clippy::needless_pass_by_value)] // owned args are the idiomatic UniFFI signature
@@ -320,29 +358,163 @@ pub fn reading_minutes(text: String) -> u32 {
     reading_time_from_text(&text)
 }
 
+/// The stateful entry point the app drives, per ADR-019.
+///
+/// `Library` is a `#[uniffi::export]` object handle: Swift holds it as a
+/// reference type (`Arc`), and its methods are the primary way the app reads the
+/// core. It owns interior state behind `Send + Sync` (an immutable seeded corpus
+/// for now), so its methods are safe to call from any thread. The on-device
+/// SQLite store replaces the seed with the offline-database work (#118 /
+/// ADR-020); the method surface is designed to absorb that change additively.
+///
+/// Calls are **synchronous and blocking** by design (ADR-019): core logic and
+/// future local-DB access do not wait on anything, so the app invokes these off
+/// the main actor rather than paying for `async`.
+#[derive(uniffi::Object)]
+pub struct Library {
+    items: Vec<CoreContentItem>,
+}
+
+#[uniffi::export]
+impl Library {
+    /// Opens a library backed by the built-in seeded corpus.
+    ///
+    /// Deterministic (fixed UUIDs and timestamps) so lookups are stable across
+    /// runs and tests.
+    #[uniffi::constructor]
+    #[must_use]
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self { items: seed() })
+    }
+
+    /// Returns every item in triage-`Inbox` status (the primary landing screen).
+    #[must_use]
+    pub fn inbox(&self) -> Vec<ContentItem> {
+        self.items_with_status(Status::Inbox)
+    }
+
+    /// Returns all items in the library (the "list" path).
+    #[must_use]
+    pub fn items(&self) -> Vec<ContentItem> {
+        self.items.iter().map(ContentItem::from).collect()
+    }
+
+    /// Returns items filtered to a single triage [`Status`].
+    #[must_use]
+    pub fn items_with_status(&self, status: Status) -> Vec<ContentItem> {
+        let core_status: CoreStatus = status.into();
+        self.items
+            .iter()
+            .filter(|item| item.status == core_status)
+            .map(ContentItem::from)
+            .collect()
+    }
+
+    /// Fetches a single item by its UUID string (the "open" path).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PergamonError::InvalidInput`] if `id` is not a valid UUID, and
+    /// [`PergamonError::NotFound`] if no item with that id exists. This exercises
+    /// the ADR-019 error mapping across the FFI boundary (Swift `throws`).
+    #[allow(clippy::needless_pass_by_value)] // owned args are the idiomatic UniFFI signature
+    pub fn item(&self, id: String) -> Result<ContentItem, PergamonError> {
+        let wanted = Uuid::parse_str(&id).map_err(|_| PergamonError::InvalidInput {
+            message: format!("not a valid UUID: {id}"),
+        })?;
+        self.items
+            .iter()
+            .find(|item| item.id == wanted)
+            .map(ContentItem::from)
+            .ok_or(PergamonError::NotFound {
+                message: format!("no item with id {id}"),
+            })
+    }
+
+    /// Returns items whose title, author, excerpt, or URL contains `query`
+    /// (case-insensitive). An empty query matches nothing.
+    #[must_use]
+    #[allow(clippy::needless_pass_by_value)] // owned args are the idiomatic UniFFI signature
+    pub fn search(&self, query: String) -> Vec<ContentItem> {
+        let needle = query.trim().to_lowercase();
+        if needle.is_empty() {
+            return Vec::new();
+        }
+        let hit = |field: Option<&String>| {
+            field.is_some_and(|value| value.to_lowercase().contains(&needle))
+        };
+        self.items
+            .iter()
+            .filter(|item| {
+                item.title.to_lowercase().contains(&needle)
+                    || hit(item.author.as_ref())
+                    || hit(item.excerpt.as_ref())
+                    || hit(item.url.as_ref())
+            })
+            .map(ContentItem::from)
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn library() -> Arc<Library> {
+        Library::new()
+    }
+
     #[test]
-    fn lists_all_sample_items() {
-        assert_eq!(sample_items().len(), 5);
+    fn lists_all_items() {
+        assert_eq!(library().items().len(), 5);
     }
 
     #[test]
     fn filters_by_status() {
-        assert_eq!(items_with_status(Status::Archived).len(), 1);
-        assert_eq!(items_with_status(Status::Inbox).len(), 1);
-        assert!(items_with_status(Status::Discarded).is_empty());
+        let lib = library();
+        assert_eq!(lib.items_with_status(Status::Archived).len(), 1);
+        assert_eq!(lib.items_with_status(Status::Inbox).len(), 1);
+        assert!(lib.items_with_status(Status::Discarded).is_empty());
     }
 
     #[test]
-    fn opens_known_item_and_rejects_unknown() {
-        let first = &sample_items()[0];
-        let fetched = get_item(first.id.clone()).expect("seeded id must resolve");
+    fn inbox_returns_only_inbox_items() {
+        let inbox = library().inbox();
+        assert_eq!(inbox.len(), 1);
+        assert!(inbox.iter().all(|item| item.status == Status::Inbox));
+    }
+
+    #[test]
+    fn opens_known_item() {
+        let lib = library();
+        let first = &lib.items()[0];
+        let fetched = lib.item(first.id.clone()).expect("seeded id must resolve");
         assert_eq!(fetched.title, first.title);
-        assert!(get_item("not-a-uuid".to_owned()).is_none());
-        assert!(get_item(Uuid::from_u128(999).to_string()).is_none());
+    }
+
+    #[test]
+    fn open_rejects_malformed_id_as_invalid_input() {
+        match library().item("not-a-uuid".to_owned()) {
+            Err(PergamonError::InvalidInput { .. }) => {}
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn open_reports_unknown_id_as_not_found() {
+        match library().item(Uuid::from_u128(999).to_string()) {
+            Err(PergamonError::NotFound { .. }) => {}
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn search_matches_title_and_author_case_insensitively() {
+        let lib = library();
+        assert_eq!(lib.search("inoreader".to_owned()).len(), 1);
+        assert_eq!(lib.search("RESEARCHER".to_owned()).len(), 1);
+        assert!(lib.search("   ".to_owned()).is_empty());
+        assert!(lib.search("no-such-content".to_owned()).is_empty());
     }
 
     #[test]
@@ -353,7 +525,15 @@ mod tests {
 
     #[test]
     fn maps_published_at_to_millis() {
-        let item = get_item(Uuid::from_u128(1).to_string()).expect("seeded");
+        let item = library()
+            .item(Uuid::from_u128(1).to_string())
+            .expect("seeded");
         assert_eq!(item.published_at_millis, Some(1_577_836_800_000));
+    }
+
+    #[test]
+    fn maps_core_error_to_invalid_input() {
+        let err: PergamonError = CoreError::UnknownContentType("bogus".to_owned()).into();
+        assert!(matches!(err, PergamonError::InvalidInput { .. }));
     }
 }

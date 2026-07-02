@@ -35,6 +35,7 @@ pedantic = { level = "warn", priority = -1 }
 
 [dependencies]
 pergamon-core = { workspace = true }
+thiserror = { workspace = true }
 time = { workspace = true }
 uuid = { workspace = true }
 uniffi = { version = "0.32", features = ["cli"] }
