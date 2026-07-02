@@ -39,7 +39,7 @@ apps/ios/build/
 apps/ios/build-rel/
 apps/ios/*.xcodeproj/
 apps/ios/Frameworks/
-apps/ios/PergamonSpike/Generated/
+apps/ios/Pergamon/Generated/
 # PergamonKit Swift package: the XCFramework and generated UniFFI bindings are
 # build artifacts (scripts/build-ios.sh); the wrapper + tests are committed.
 apps/ios/PergamonKit/Frameworks/

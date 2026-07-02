@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- App Group shared between the main app and the future share extension
+	     (#119), per ADR-020. Both processes mount the same canonical library
+	     (pergamon.db + blobs/) from this container. Must match
+	     StorageLocation.appGroupIdentifier. -->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.dev.pergamon</string>
+	</array>
+</dict>
+</plist>

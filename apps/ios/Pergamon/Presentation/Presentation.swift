@@ -1,12 +1,13 @@
 import SwiftUI
 import PergamonKit
 
-// App-layer, SwiftUI-specific styling for the model types. Pure model
+// App-layer, SwiftUI-specific styling for the core model types. Pure model
 // conveniences (`Identifiable`, `publishedDate`, `label`) live in PergamonKit;
 // only presentation concerns that depend on SwiftUI (SF Symbols, `Color`) stay
 // here.
 
 extension Status {
+    /// SF Symbol representing this triage status.
     var systemImage: String {
         switch self {
         case .inbox: return "tray"
@@ -18,6 +19,7 @@ extension Status {
         }
     }
 
+    /// Accent color used for this status across rows and badges.
     var tint: Color {
         switch self {
         case .inbox: return .blue
@@ -31,6 +33,7 @@ extension Status {
 }
 
 extension ContentType {
+    /// SF Symbol representing this content type.
     var systemImage: String {
         switch self {
         case .feedItem: return "dot.radiowaves.up.forward"
