@@ -57,3 +57,18 @@ public extension ContentType {
         }
     }
 }
+
+extension Tag: Identifiable {
+    // `Tag` already carries a stable `String` id from Rust, so Identifiable
+    // conformance is free and drives SwiftUI `List` / `ForEach` directly.
+}
+
+extension Collection: Identifiable {
+    // Same as `Tag`: the Rust-provided `id` backs Identifiable directly.
+}
+
+public extension Collection {
+    /// Whether this collection is nested under a parent (`depth > 0`).
+    var isNested: Bool { depth > 0 }
+}
+

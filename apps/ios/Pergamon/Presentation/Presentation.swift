@@ -45,3 +45,13 @@ extension ContentType {
         }
     }
 }
+
+extension Tag {
+    /// SF Symbol used to represent a tag across the app.
+    static var systemImage: String { "tag" }
+}
+
+extension Collection {
+    /// SF Symbol used to represent a collection across the app.
+    static var systemImage: String { "folder" }
+}
