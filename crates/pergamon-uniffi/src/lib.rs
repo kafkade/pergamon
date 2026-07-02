@@ -14,9 +14,10 @@
 //! - **Error** ([`PergamonError`]): a single, flat error enum mapped to Swift
 //!   `throws`.
 //! - **Object handle** ([`Library`]): the stateful entry point the app drives
-//!   (`inbox`, `items`, `item`, `search`, ...). Backed by an in-memory seeded
-//!   corpus for now; the on-device SQLite store lands with the offline-database
-//!   work (#118 / ADR-020).
+//!   (`inbox`, `items`, `item`, `search`, and triage mutations `mark_read`,
+//!   `archive`, `save_for_later`, ...). Backed by an in-memory seeded corpus for
+//!   now; the on-device SQLite store lands with the offline-database work
+//!   (#118 / ADR-020).
 //! - **Free functions** ([`library_version`], [`reading_minutes`]): stateless
 //!   helpers.
 //!
@@ -34,7 +35,7 @@
 // Product/tech names (UniFFI, SwiftUI, SQLite, ...) recur throughout the docs.
 #![allow(clippy::doc_markdown)]
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use pergamon_core::content_type::ContentType as CoreContentType;
 use pergamon_core::error::CoreError;
@@ -141,8 +142,17 @@ pub struct ContentItem {
     pub status: Status,
     /// Short excerpt or summary.
     pub excerpt: Option<String>,
+    /// Normalized extracted body text, used to render the offline reader. `None`
+    /// when the item has no extracted content yet.
+    pub content_text: Option<String>,
+    /// Feed / source name this item was captured from, if any. Drives the
+    /// inbox's feed filter.
+    pub source_name: Option<String>,
     /// Publication time as Unix epoch milliseconds, if known.
     pub published_at_millis: Option<i64>,
+    /// When the item was marked read, as Unix epoch milliseconds. `None` means
+    /// unread.
+    pub read_at_millis: Option<i64>,
     /// Estimated reading time in minutes, computed by the core engine.
     pub reading_minutes: u32,
 }
@@ -155,8 +165,20 @@ fn millis(dt: OffsetDateTime) -> i64 {
     ms
 }
 
-impl From<&CoreContentItem> for ContentItem {
-    fn from(item: &CoreContentItem) -> Self {
+/// An internal seed row: a core content item plus the FFI-only feed/source name
+/// it was captured from. The source lives here (not on `pergamon_core`) so the
+/// facade can offer feed filtering without changing the core model.
+#[derive(Debug, Clone)]
+struct Row {
+    item: CoreContentItem,
+    source: Option<String>,
+}
+
+impl ContentItem {
+    /// Builds the FFI view from a seed [`Row`], folding in the FFI-only source
+    /// name alongside the core fields.
+    fn from_row(row: &Row) -> Self {
+        let item = &row.item;
         let reading_minutes = item
             .content_text
             .as_deref()
@@ -169,7 +191,10 @@ impl From<&CoreContentItem> for ContentItem {
             content_type: item.content_type.into(),
             status: item.status.into(),
             excerpt: item.excerpt.clone(),
+            content_text: item.content_text.clone(),
+            source_name: row.source.clone(),
             published_at_millis: item.published_at.map(millis),
+            read_at_millis: item.read_at.map(millis),
             reading_minutes,
         }
     }
@@ -240,7 +265,8 @@ impl From<CoreError> for PergamonError {
 /// Build the seeded in-memory corpus of core content items.
 ///
 /// Uses fixed UUIDs and timestamps so [`Library::item`] is deterministic across runs.
-fn seed() -> Vec<CoreContentItem> {
+#[allow(clippy::too_many_lines)] // a flat, readable table of seed rows
+fn seed() -> Vec<Row> {
     fn at(secs: i64) -> OffsetDateTime {
         OffsetDateTime::from_unix_timestamp(secs).unwrap_or(OffsetDateTime::UNIX_EPOCH)
     }
@@ -256,9 +282,10 @@ fn seed() -> Vec<CoreContentItem> {
         excerpt: &str,
         text: &str,
         published: i64,
-    ) -> CoreContentItem {
+        source: Option<&str>,
+    ) -> Row {
         let created = at(published + 60);
-        CoreContentItem {
+        let core = CoreContentItem {
             id: Uuid::from_u128(n),
             url: Some(url.to_owned()),
             title: title.to_owned(),
@@ -275,6 +302,10 @@ fn seed() -> Vec<CoreContentItem> {
             } else {
                 None
             },
+        };
+        Row {
+            item: core,
+            source: source.map(ToOwned::to_owned),
         }
     }
 
@@ -290,6 +321,7 @@ fn seed() -> Vec<CoreContentItem> {
             "Seven ideals for software that keeps your data on your own devices.",
             &lorem,
             1_577_836_800,
+            Some("Ink & Switch"),
         ),
         item(
             2,
@@ -301,6 +333,7 @@ fn seed() -> Vec<CoreContentItem> {
             "How the Free Spaced Repetition Scheduler models memory stability.",
             &"word ".repeat(1400),
             1_609_459_200,
+            Some("Memory Weekly"),
         ),
         item(
             3,
@@ -312,6 +345,7 @@ fn seed() -> Vec<CoreContentItem> {
             "Sharing a Rust core across iOS and Android without hand-written FFI.",
             &"word ".repeat(300),
             1_640_995_200,
+            Some("Rust Mobile Weekly"),
         ),
         item(
             4,
@@ -323,6 +357,7 @@ fn seed() -> Vec<CoreContentItem> {
             "Working notes captured as a PDF for later reference.",
             &"word ".repeat(90),
             1_672_531_200,
+            None,
         ),
         item(
             5,
@@ -334,6 +369,7 @@ fn seed() -> Vec<CoreContentItem> {
             "A migration story toward a unified, local-first reading workflow.",
             &"word ".repeat(210),
             1_704_067_200,
+            Some("Reader Diaries"),
         ),
     ]
 }
@@ -361,18 +397,57 @@ pub fn reading_minutes(text: String) -> u32 {
 /// The stateful entry point the app drives, per ADR-019.
 ///
 /// `Library` is a `#[uniffi::export]` object handle: Swift holds it as a
-/// reference type (`Arc`), and its methods are the primary way the app reads the
-/// core. It owns interior state behind `Send + Sync` (an immutable seeded corpus
-/// for now), so its methods are safe to call from any thread. The on-device
-/// SQLite store replaces the seed with the offline-database work (#118 /
-/// ADR-020); the method surface is designed to absorb that change additively.
+/// reference type (`Arc`), and its methods are the primary way the app reads and
+/// triages the core. It owns interior state behind `Send + Sync` — a seeded
+/// corpus guarded by a `Mutex`, so reads (`inbox`, `items`, ...) and triage
+/// mutations (`mark_read`, `archive`, `save_for_later`, ...) are safe to call
+/// from any thread. Mutations are visible within the process session; the
+/// on-device SQLite store replaces the seed with the offline-database work
+/// (#118 / ADR-020), persisting them across launches behind this same surface.
 ///
 /// Calls are **synchronous and blocking** by design (ADR-019): core logic and
 /// future local-DB access do not wait on anything, so the app invokes these off
 /// the main actor rather than paying for `async`.
 #[derive(uniffi::Object)]
 pub struct Library {
-    items: Vec<CoreContentItem>,
+    rows: Mutex<Vec<Row>>,
+}
+
+impl Library {
+    /// Runs `f` against the locked rows, recovering from a poisoned mutex.
+    ///
+    /// A panic in another thread while the lock was held could poison it; since
+    /// the corpus is plain data with no broken invariants, we deliberately
+    /// recover the guard rather than propagate the poison.
+    fn with_rows<T>(&self, f: impl FnOnce(&mut Vec<Row>) -> T) -> T {
+        let mut guard = self.rows.lock().unwrap_or_else(PoisonError::into_inner);
+        f(&mut guard)
+    }
+
+    /// Applies `mutate` to the row with `id`, returning the updated FFI view.
+    ///
+    /// # Errors
+    ///
+    /// [`PergamonError::InvalidInput`] for a malformed UUID, or
+    /// [`PergamonError::NotFound`] when no row matches.
+    fn mutate_item(
+        &self,
+        id: &str,
+        mutate: impl FnOnce(&mut Row),
+    ) -> Result<ContentItem, PergamonError> {
+        let wanted = Uuid::parse_str(id).map_err(|_| PergamonError::InvalidInput {
+            message: format!("not a valid UUID: {id}"),
+        })?;
+        self.with_rows(|rows| {
+            let row = rows.iter_mut().find(|row| row.item.id == wanted).ok_or(
+                PergamonError::NotFound {
+                    message: format!("no item with id {id}"),
+                },
+            )?;
+            mutate(row);
+            Ok(ContentItem::from_row(row))
+        })
+    }
 }
 
 #[uniffi::export]
@@ -384,7 +459,9 @@ impl Library {
     #[uniffi::constructor]
     #[must_use]
     pub fn new() -> Arc<Self> {
-        Arc::new(Self { items: seed() })
+        Arc::new(Self {
+            rows: Mutex::new(seed()),
+        })
     }
 
     /// Returns every item in triage-`Inbox` status (the primary landing screen).
@@ -396,18 +473,31 @@ impl Library {
     /// Returns all items in the library (the "list" path).
     #[must_use]
     pub fn items(&self) -> Vec<ContentItem> {
-        self.items.iter().map(ContentItem::from).collect()
+        self.with_rows(|rows| rows.iter().map(ContentItem::from_row).collect())
     }
 
     /// Returns items filtered to a single triage [`Status`].
     #[must_use]
     pub fn items_with_status(&self, status: Status) -> Vec<ContentItem> {
         let core_status: CoreStatus = status.into();
-        self.items
-            .iter()
-            .filter(|item| item.status == core_status)
-            .map(ContentItem::from)
-            .collect()
+        self.with_rows(|rows| {
+            rows.iter()
+                .filter(|row| row.item.status == core_status)
+                .map(ContentItem::from_row)
+                .collect()
+        })
+    }
+
+    /// Returns the distinct feed/source names present in the corpus, sorted
+    /// alphabetically. Drives the inbox's feed filter.
+    #[must_use]
+    pub fn sources(&self) -> Vec<String> {
+        self.with_rows(|rows| {
+            let mut names: Vec<String> = rows.iter().filter_map(|row| row.source.clone()).collect();
+            names.sort_unstable();
+            names.dedup();
+            names
+        })
     }
 
     /// Fetches a single item by its UUID string (the "open" path).
@@ -422,13 +512,14 @@ impl Library {
         let wanted = Uuid::parse_str(&id).map_err(|_| PergamonError::InvalidInput {
             message: format!("not a valid UUID: {id}"),
         })?;
-        self.items
-            .iter()
-            .find(|item| item.id == wanted)
-            .map(ContentItem::from)
-            .ok_or(PergamonError::NotFound {
-                message: format!("no item with id {id}"),
-            })
+        self.with_rows(|rows| {
+            rows.iter()
+                .find(|row| row.item.id == wanted)
+                .map(ContentItem::from_row)
+                .ok_or(PergamonError::NotFound {
+                    message: format!("no item with id {id}"),
+                })
+        })
     }
 
     /// Returns items whose title, author, excerpt, or URL contains `query`
@@ -443,16 +534,86 @@ impl Library {
         let hit = |field: Option<&String>| {
             field.is_some_and(|value| value.to_lowercase().contains(&needle))
         };
-        self.items
-            .iter()
-            .filter(|item| {
-                item.title.to_lowercase().contains(&needle)
-                    || hit(item.author.as_ref())
-                    || hit(item.excerpt.as_ref())
-                    || hit(item.url.as_ref())
-            })
-            .map(ContentItem::from)
-            .collect()
+        self.with_rows(|rows| {
+            rows.iter()
+                .filter(|row| {
+                    let item = &row.item;
+                    item.title.to_lowercase().contains(&needle)
+                        || hit(item.author.as_ref())
+                        || hit(item.excerpt.as_ref())
+                        || hit(item.url.as_ref())
+                })
+                .map(ContentItem::from_row)
+                .collect()
+        })
+    }
+
+    /// Marks the item read, stamping `read_at` with `now` (idempotent — an
+    /// already-read item keeps its original timestamp). Returns the updated item.
+    ///
+    /// # Errors
+    ///
+    /// [`PergamonError::InvalidInput`] for a malformed id, or
+    /// [`PergamonError::NotFound`] when no item matches.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn mark_read(&self, id: String) -> Result<ContentItem, PergamonError> {
+        self.mutate_item(&id, |row| {
+            if row.item.read_at.is_none() {
+                let now = OffsetDateTime::now_utc();
+                row.item.read_at = Some(now);
+                row.item.updated_at = now;
+            }
+        })
+    }
+
+    /// Marks the item unread, clearing `read_at`. Returns the updated item.
+    ///
+    /// # Errors
+    ///
+    /// [`PergamonError::InvalidInput`] for a malformed id, or
+    /// [`PergamonError::NotFound`] when no item matches.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn mark_unread(&self, id: String) -> Result<ContentItem, PergamonError> {
+        self.mutate_item(&id, |row| {
+            if row.item.read_at.is_some() {
+                row.item.read_at = None;
+                row.item.updated_at = OffsetDateTime::now_utc();
+            }
+        })
+    }
+
+    /// Archives the item (status → `Archived`) and marks it read. Returns the
+    /// updated item.
+    ///
+    /// # Errors
+    ///
+    /// [`PergamonError::InvalidInput`] for a malformed id, or
+    /// [`PergamonError::NotFound`] when no item matches.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn archive(&self, id: String) -> Result<ContentItem, PergamonError> {
+        self.mutate_item(&id, |row| {
+            let now = OffsetDateTime::now_utc();
+            row.item.status = CoreStatus::Archived;
+            if row.item.read_at.is_none() {
+                row.item.read_at = Some(now);
+            }
+            row.item.updated_at = now;
+        })
+    }
+
+    /// Moves the item to the read-later queue (status → `Later`). Returns the
+    /// updated item.
+    ///
+    /// # Errors
+    ///
+    /// [`PergamonError::InvalidInput`] for a malformed id, or
+    /// [`PergamonError::NotFound`] when no item matches.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn save_for_later(&self, id: String) -> Result<ContentItem, PergamonError> {
+        self.mutate_item(&id, |row| {
+            row.item.status = CoreStatus::Later;
+            row.item.updated_at = OffsetDateTime::now_utc();
+        })
     }
 }
 
@@ -535,5 +696,84 @@ mod tests {
     fn maps_core_error_to_invalid_input() {
         let err: PergamonError = CoreError::UnknownContentType("bogus".to_owned()).into();
         assert!(matches!(err, PergamonError::InvalidInput { .. }));
+    }
+
+    #[test]
+    fn exposes_content_text_and_source_for_reader_and_filtering() {
+        let item = library()
+            .item(Uuid::from_u128(1).to_string())
+            .expect("seeded");
+        assert!(item.content_text.is_some_and(|text| !text.is_empty()));
+        assert_eq!(item.source_name.as_deref(), Some("Ink & Switch"));
+    }
+
+    #[test]
+    fn sources_are_distinct_and_sorted() {
+        let sources = library().sources();
+        assert_eq!(
+            sources,
+            vec![
+                "Ink & Switch".to_owned(),
+                "Memory Weekly".to_owned(),
+                "Reader Diaries".to_owned(),
+                "Rust Mobile Weekly".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn seeded_inbox_item_starts_unread() {
+        let inbox = library().inbox();
+        assert!(inbox.iter().all(|item| item.read_at_millis.is_none()));
+    }
+
+    #[test]
+    fn mark_read_then_unread_toggles_read_state() {
+        let lib = library();
+        let id = Uuid::from_u128(1).to_string();
+
+        let read = lib.mark_read(id.clone()).expect("seeded");
+        assert!(read.read_at_millis.is_some());
+
+        // Idempotent: marking read again keeps the original timestamp.
+        let again = lib.mark_read(id.clone()).expect("seeded");
+        assert_eq!(again.read_at_millis, read.read_at_millis);
+
+        let unread = lib.mark_unread(id).expect("seeded");
+        assert!(unread.read_at_millis.is_none());
+    }
+
+    #[test]
+    fn archive_sets_status_and_marks_read() {
+        let lib = library();
+        let id = Uuid::from_u128(1).to_string();
+        let archived = lib.archive(id).expect("seeded");
+        assert_eq!(archived.status, Status::Archived);
+        assert!(archived.read_at_millis.is_some());
+        // The change is observable through subsequent reads.
+        assert_eq!(lib.items_with_status(Status::Archived).len(), 2);
+        assert!(lib.inbox().is_empty());
+    }
+
+    #[test]
+    fn save_for_later_moves_item_to_later() {
+        let lib = library();
+        let id = Uuid::from_u128(1).to_string();
+        let saved = lib.save_for_later(id).expect("seeded");
+        assert_eq!(saved.status, Status::Later);
+        assert_eq!(lib.items_with_status(Status::Later).len(), 2);
+    }
+
+    #[test]
+    fn mutations_reject_malformed_and_unknown_ids() {
+        let lib = library();
+        assert!(matches!(
+            lib.mark_read("not-a-uuid".to_owned()),
+            Err(PergamonError::InvalidInput { .. })
+        ));
+        assert!(matches!(
+            lib.archive(Uuid::from_u128(999).to_string()),
+            Err(PergamonError::NotFound { .. })
+        ));
     }
 }

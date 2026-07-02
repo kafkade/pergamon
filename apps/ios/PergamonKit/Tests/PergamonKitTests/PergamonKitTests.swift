@@ -88,4 +88,64 @@ final class PergamonKitTests: XCTestCase {
         XCTAssertEqual(Status.archived.label, "Archived")
         XCTAssertEqual(ContentType.pdf.label, "PDF")
     }
+
+    func testExposesContentTextAndSource() throws {
+        let item = try library.item(id: "00000000-0000-0000-0000-000000000001")
+        XCTAssertFalse(item.contentText?.isEmpty ?? true)
+        XCTAssertEqual(item.sourceName, "Ink & Switch")
+    }
+
+    func testSourcesAreDistinctAndSorted() {
+        XCTAssertEqual(
+            library.sources(),
+            ["Ink & Switch", "Memory Weekly", "Reader Diaries", "Rust Mobile Weekly"]
+        )
+    }
+
+    func testSeededInboxItemStartsUnread() {
+        XCTAssertTrue(library.inbox().allSatisfy { !$0.isRead })
+    }
+
+    func testMarkReadThenUnreadTogglesReadState() throws {
+        let id = "00000000-0000-0000-0000-000000000001"
+
+        let read = try library.markRead(id: id)
+        XCTAssertTrue(read.isRead)
+        XCTAssertNotNil(read.readDate)
+
+        let unread = try library.markUnread(id: id)
+        XCTAssertFalse(unread.isRead)
+        XCTAssertNil(unread.readDate)
+    }
+
+    func testArchiveSetsStatusAndMarksRead() throws {
+        let id = "00000000-0000-0000-0000-000000000001"
+        let archived = try library.archive(id: id)
+        XCTAssertEqual(archived.status, .archived)
+        XCTAssertTrue(archived.isRead)
+        XCTAssertEqual(library.itemsWithStatus(status: .archived).count, 2)
+        XCTAssertTrue(library.inbox().isEmpty)
+    }
+
+    func testSaveForLaterMovesItemToLater() throws {
+        let id = "00000000-0000-0000-0000-000000000001"
+        let saved = try library.saveForLater(id: id)
+        XCTAssertEqual(saved.status, .later)
+        XCTAssertEqual(library.itemsWithStatus(status: .later).count, 2)
+    }
+
+    func testMutationsThrowForMalformedAndUnknownIds() {
+        XCTAssertThrowsError(try library.markRead(id: "not-a-uuid")) { error in
+            guard case PergamonError.InvalidInput = error else {
+                return XCTFail("expected InvalidInput, got \(error)")
+            }
+        }
+        XCTAssertThrowsError(
+            try library.archive(id: "00000000-0000-0000-0000-0000000003e7")
+        ) { error in
+            guard case PergamonError.NotFound = error else {
+                return XCTFail("expected NotFound, got \(error)")
+            }
+        }
+    }
 }

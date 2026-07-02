@@ -16,8 +16,11 @@ let items = library.items()
 print("Library().items(): \(items.count) items")
 for it in items {
     let published = it.publishedAtMillis.map { String($0) } ?? "—"
-    print("  • [\(it.status)] \(it.title)  type=\(it.contentType) read=\(it.readingMinutes)min pub=\(published)")
+    let source = it.sourceName ?? "—"
+    print("  • [\(it.status)] \(it.title)  type=\(it.contentType) read=\(it.readingMinutes)min src=\(source) unread=\(it.readAtMillis == nil) pub=\(published)")
 }
+
+print("sources(): \(library.sources())")
 
 let archived = library.itemsWithStatus(status: .archived)
 print("itemsWithStatus(.archived): \(archived.count)")
@@ -25,7 +28,16 @@ print("itemsWithStatus(.archived): \(archived.count)")
 do {
     if let first = items.first {
         let opened = try library.item(id: first.id)
-        print("item(\(first.id)) → opened \"\(opened.title)\" by \(opened.author ?? "unknown")")
+        let bodyLen = opened.contentText?.count ?? 0
+        print("item(\(first.id)) → opened \"\(opened.title)\" by \(opened.author ?? "unknown"), body=\(bodyLen) chars")
+
+        // Exercise the triage mutations end-to-end.
+        let read = try library.markRead(id: first.id)
+        print("markRead → read=\(read.readAtMillis != nil)")
+        let saved = try library.saveForLater(id: first.id)
+        print("saveForLater → status=\(saved.status)")
+        let arch = try library.archive(id: first.id)
+        print("archive → status=\(arch.status) read=\(arch.readAtMillis != nil)")
     }
     // Exercise the ADR-019 error mapping: malformed ids throw PergamonError.
     _ = try library.item(id: "not-a-uuid")

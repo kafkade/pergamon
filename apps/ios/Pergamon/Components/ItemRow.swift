@@ -15,9 +15,15 @@ struct ItemRow: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(item.title)
                     .font(.headline)
+                    .fontWeight(item.isRead ? .regular : .semibold)
+                    .foregroundStyle(item.isRead ? .secondary : .primary)
                     .lineLimit(2)
 
-                if let author = item.author {
+                if let source = item.sourceName {
+                    Text(source)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                } else if let author = item.author {
                     Text(author)
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
@@ -34,6 +40,16 @@ struct ItemRow: View {
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 0)
+
+            if !item.isRead {
+                Circle()
+                    .fill(Color.accentColor)
+                    .frame(width: 8, height: 8)
+                    .padding(.top, 6)
+                    .accessibilityLabel("Unread")
             }
         }
         .padding(.vertical, 4)

@@ -3,15 +3,18 @@ import PergamonKit
 
 /// Detail / reader view, shared by every list in the app.
 ///
-/// Rather than passing the already-loaded struct, it re-fetches the item from
-/// Rust by id via `library.item(id:)`, proving a round-trip lookup across the
-/// FFI boundary. The lookup throws `PergamonError` (mapped from a Rust
-/// `Result`), so a missing or malformed id renders the unavailable state.
+/// It loads the item from Rust by id via `library.item(id:)` — a round-trip
+/// lookup across the FFI boundary that throws `PergamonError` — then renders the
+/// normalized extracted content (`contentText`) as a readable article. Because
+/// the content is served entirely from the local core, the reader works offline;
+/// no network path is involved. Triage actions (mark read/unread, save for
+/// later, archive) mutate the core and refresh the view in place.
 struct DetailView: View {
     let library: Library
     let itemID: String
 
-    private var item: ContentItem? { try? library.item(id: itemID) }
+    @State private var item: ContentItem?
+    @State private var loadFailed = false
 
     var body: some View {
         Group {
@@ -25,8 +28,16 @@ struct DetailView: View {
                 )
             }
         }
-        .navigationTitle("Item")
+        .navigationTitle("Reader")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if let item {
+                ToolbarItem(placement: .topBarTrailing) {
+                    actionsMenu(for: item)
+                }
+            }
+        }
+        .onAppear(perform: load)
     }
 
     @ViewBuilder
@@ -44,9 +55,16 @@ struct DetailView: View {
                         .foregroundStyle(item.status.tint)
                     Label(item.contentType.label, systemImage: item.contentType.systemImage)
                         .foregroundStyle(.secondary)
+                    if item.isRead {
+                        Label("Read", systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 .font(.caption)
 
+                if let source = item.sourceName {
+                    metadata(icon: "dot.radiowaves.up.forward", text: source)
+                }
                 if let author = item.author {
                     metadata(icon: "person", text: author)
                 }
@@ -58,14 +76,14 @@ struct DetailView: View {
                     metadata(icon: "link", text: url)
                 }
 
-                if let excerpt = item.excerpt {
-                    Divider()
-                    Text(excerpt)
-                        .font(.body)
-                        .foregroundStyle(.primary)
-                }
+                Divider()
+
+                articleBody(for: item)
 
                 Divider()
+                Label("Available offline · served from the local core", systemImage: "wifi.slash")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
                 Text("id \(item.id)")
                     .font(.caption2.monospaced())
                     .foregroundStyle(.tertiary)
@@ -76,10 +94,67 @@ struct DetailView: View {
         }
     }
 
+    /// The reader body: the normalized extracted text when present, falling back
+    /// to the excerpt, then a placeholder. Tuned for comfortable reading.
+    @ViewBuilder
+    private func articleBody(for item: ContentItem) -> some View {
+        if let text = item.contentText, !text.isEmpty {
+            Text(text)
+                .font(.body)
+                .lineSpacing(6)
+                .textSelection(.enabled)
+        } else if let excerpt = item.excerpt {
+            Text(excerpt)
+                .font(.body)
+                .italic()
+                .foregroundStyle(.secondary)
+        } else {
+            Text("No extracted content for this item yet.")
+                .font(.body)
+                .foregroundStyle(.tertiary)
+        }
+    }
+
+    private func actionsMenu(for item: ContentItem) -> some View {
+        Menu {
+            let toggle = TriageAction.readToggle(for: item)
+            Button {
+                perform(toggle)
+            } label: {
+                Label(toggle.label, systemImage: toggle.systemImage)
+            }
+            Button {
+                perform(.saveForLater)
+            } label: {
+                Label(TriageAction.saveForLater.label, systemImage: TriageAction.saveForLater.systemImage)
+            }
+            Button {
+                perform(.archive)
+            } label: {
+                Label(TriageAction.archive.label, systemImage: TriageAction.archive.systemImage)
+            }
+        } label: {
+            Label("Actions", systemImage: "ellipsis.circle")
+        }
+    }
+
     private func metadata(icon: String, text: String) -> some View {
         Label(text, systemImage: icon)
             .font(.subheadline)
             .foregroundStyle(.secondary)
+    }
+
+    private func load() {
+        item = try? library.item(id: itemID)
+    }
+
+    /// Applies a triage action and updates the view with the returned item.
+    private func perform(_ action: TriageAction) {
+        do {
+            item = try action.apply(to: itemID, using: library)
+        } catch {
+            print("[reader] \(action.label) failed for \(itemID): \(error)")
+        }
     }
 }
 
