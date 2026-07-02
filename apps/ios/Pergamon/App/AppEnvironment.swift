@@ -1,6 +1,13 @@
 import Foundation
 import PergamonKit
 
+extension Notification.Name {
+    /// Posted whenever review state changes (a highlight is captured or deleted,
+    /// or a card is graded) so the Review tab's due-count badge can refresh
+    /// without polling. Kept app-level so any surface can raise it.
+    static let pergamonReviewStateChanged = Notification.Name("pergamonReviewStateChanged")
+}
+
 /// The app's dependency-injection container and single owner of the Rust core
 /// handle.
 ///

@@ -264,5 +264,81 @@ final class PergamonKitTests: XCTestCase {
             ).isEmpty
         )
     }
+
+    // MARK: - Highlights & spaced-repetition review
+
+    func testSeededDueCardsAndSummary() {
+        // Two highlights are seeded, each with a card due now.
+        XCTAssertEqual(library.dueCards().count, 2)
+        let summary = library.reviewSummary()
+        XCTAssertEqual(summary.dueCount, 2)
+        XCTAssertEqual(summary.totalCards, 2)
+        XCTAssertEqual(summary.newCount, 2)
+        XCTAssertEqual(summary.reviewsToday, 0)
+    }
+
+    func testAddHighlightCreatesDueCard() throws {
+        let item = try XCTUnwrap(library.items().first { $0.status == .reading })
+        let before = library.dueCards().count
+
+        let highlight = try library.addHighlight(
+            itemId: item.id,
+            quoteText: "  a captured quote  ",
+            note: "a note"
+        )
+        XCTAssertEqual(highlight.quoteText, "a captured quote") // trimmed
+        XCTAssertEqual(highlight.note, "a note")
+        XCTAssertTrue(highlight.hasReviewCard)
+
+        XCTAssertEqual(try library.highlights(itemId: item.id).count, 1)
+        XCTAssertEqual(library.dueCards().count, before + 1)
+        XCTAssertEqual(Int(library.reviewSummary().dueCount), before + 1)
+    }
+
+    func testAddHighlightRejectsBlankQuote() throws {
+        let item = try XCTUnwrap(library.items().first)
+        XCTAssertThrowsError(try library.addHighlight(itemId: item.id, quoteText: "   ", note: nil)) { error in
+            guard case PergamonError.InvalidInput = error else {
+                return XCTFail("expected InvalidInput, got \(error)")
+            }
+        }
+    }
+
+    func testSetHighlightNoteUpdatesAndClears() throws {
+        let item = try XCTUnwrap(library.items().first)
+        let highlight = try library.addHighlight(itemId: item.id, quoteText: "quote", note: nil)
+
+        let noted = try library.setHighlightNote(highlightId: highlight.id, note: "added later")
+        XCTAssertEqual(noted.note, "added later")
+
+        let cleared = try library.setHighlightNote(highlightId: highlight.id, note: "  ")
+        XCTAssertNil(cleared.note)
+    }
+
+    func testGradeCardAdvancesScheduleAndWritesLog() throws {
+        let card = try XCTUnwrap(library.dueCards().first)
+        XCTAssertEqual(card.reviewCount, 0)
+        XCTAssertEqual(card.state, .new)
+
+        let graded = try library.gradeCard(cardId: card.cardId, grade: .good)
+        XCTAssertEqual(graded.reviewCount, 1)
+        XCTAssertEqual(graded.state, .review)
+        XCTAssertGreaterThan(graded.dueAtMillis, card.dueAtMillis)
+        XCTAssertNotNil(graded.lastReviewedAtMillis)
+
+        // Graded card is scheduled out, so the queue shrinks and a review logs.
+        XCTAssertEqual(library.dueCards().count, 1)
+        XCTAssertEqual(library.reviewSummary().reviewsToday, 1)
+    }
+
+    func testDeleteHighlightRemovesCard() throws {
+        let item = try XCTUnwrap(library.items().first { $0.status == .reading })
+        let highlight = try library.addHighlight(itemId: item.id, quoteText: "quote", note: nil)
+        let dueBefore = library.dueCards().count
+
+        try library.deleteHighlight(highlightId: highlight.id)
+        XCTAssertTrue(try library.highlights(itemId: item.id).isEmpty)
+        XCTAssertEqual(library.dueCards().count, dueBefore - 1)
+    }
 }
 

@@ -39,6 +39,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use pergamon_core::content_type::ContentType as CoreContentType;
 use pergamon_core::error::CoreError;
+use pergamon_core::fsrs::{CardState, MemoryState, Parameters, Rating, Scheduler};
 use pergamon_core::model::ContentItem as CoreContentItem;
 use pergamon_core::reading_time::reading_time_from_text;
 use pergamon_core::status::DocumentStatus as CoreStatus;
@@ -118,6 +119,59 @@ impl From<Status> for CoreStatus {
             Status::Reading => Self::Reading,
             Status::Archived => Self::Archived,
             Status::Discarded => Self::Discarded,
+        }
+    }
+}
+
+/// The grade a user assigns a review card, mirroring
+/// `pergamon_core::fsrs::Rating`. Drives the FSRS scheduler: `Again` means the
+/// material was forgotten (reschedule soon), `Easy` means it was recalled
+/// effortlessly (longest interval).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum ReviewGrade {
+    /// Forgot the material — schedule again soon.
+    Again,
+    /// Recalled with significant difficulty.
+    Hard,
+    /// Recalled correctly.
+    Good,
+    /// Recalled effortlessly.
+    Easy,
+}
+
+impl From<ReviewGrade> for Rating {
+    fn from(value: ReviewGrade) -> Self {
+        match value {
+            ReviewGrade::Again => Self::Again,
+            ReviewGrade::Hard => Self::Hard,
+            ReviewGrade::Good => Self::Good,
+            ReviewGrade::Easy => Self::Easy,
+        }
+    }
+}
+
+/// The lifecycle state of a review card, mirroring
+/// `pergamon_core::fsrs::CardState`. Surfaced so the app can badge cards
+/// (new vs. learning vs. review vs. relearning).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum ReviewState {
+    /// Card has never been reviewed.
+    New,
+    /// Card is in the initial learning phase.
+    Learning,
+    /// Card is in the long-term review phase.
+    Review,
+    /// Card was forgotten and is being relearned.
+    Relearning,
+}
+
+impl From<CardState> for ReviewState {
+    fn from(value: CardState) -> Self {
+        match value {
+            CardState::New => Self::New,
+            CardState::Learning => Self::Learning,
+            CardState::Review => Self::Review,
+            CardState::Relearning => Self::Relearning,
         }
     }
 }
@@ -221,6 +275,78 @@ pub struct ContentItem {
     pub collection_ids: Vec<String>,
 }
 
+/// An FFI-friendly view of a user highlight captured from an item, mirroring
+/// `pergamon_core::model::HighlightMeta` plus the review-card link the app
+/// needs.
+///
+/// A highlight is a quote pulled from a source item, optionally annotated with a
+/// note. `id` is a UUID string and `created_at_millis` is Unix epoch
+/// milliseconds. `has_review_card` reflects whether a spaced-repetition card was
+/// created for this highlight (the facade creates one automatically on capture).
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct Highlight {
+    /// Stable UUID, serialized as a string.
+    pub id: String,
+    /// UUID string of the content item this highlight was captured from.
+    pub item_id: String,
+    /// The highlighted quote text.
+    pub quote_text: String,
+    /// User note attached to the highlight, if any.
+    pub note: Option<String>,
+    /// Title of the source item, denormalized for display.
+    pub source_title: String,
+    /// When the highlight was captured, as Unix epoch milliseconds.
+    pub created_at_millis: i64,
+    /// Whether a spaced-repetition review card exists for this highlight.
+    pub has_review_card: bool,
+}
+
+/// An FFI-friendly view of a spaced-repetition review card, joined with its
+/// backing highlight for display in the review queue.
+///
+/// Mirrors the scheduling fields of `pergamon_core::model::ReviewCard` the app
+/// needs, plus the highlight's quote/note/source so a queue card renders without
+/// a second round-trip. `due_at_millis` and `last_reviewed_at_millis` are Unix
+/// epoch milliseconds.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ReviewCardView {
+    /// Stable UUID of the review card, serialized as a string.
+    pub card_id: String,
+    /// UUID string of the highlight this card reviews.
+    pub highlight_id: String,
+    /// UUID string of the content item the highlight came from.
+    pub item_id: String,
+    /// The highlighted quote text (the review prompt).
+    pub quote_text: String,
+    /// User note attached to the highlight, revealed as the answer, if any.
+    pub note: Option<String>,
+    /// Title of the source item, denormalized for display.
+    pub source_title: String,
+    /// Current lifecycle state of the card.
+    pub state: ReviewState,
+    /// When the card is next due, as Unix epoch milliseconds.
+    pub due_at_millis: i64,
+    /// Total number of reviews performed on this card.
+    pub review_count: u32,
+    /// When the card was last reviewed, as Unix epoch milliseconds. `None` if
+    /// never reviewed.
+    pub last_reviewed_at_millis: Option<i64>,
+}
+
+/// Aggregate review counters for surfacing the due-count and queue health,
+/// mirroring the fields of `pergamon_core::model::ReviewStats` the app shows.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ReviewSummary {
+    /// Number of cards currently due for review (`due_at <= now`).
+    pub due_count: u32,
+    /// Total number of review cards across the library.
+    pub total_cards: u32,
+    /// Number of cards that have never been reviewed.
+    pub new_count: u32,
+    /// Number of reviews completed today (UTC).
+    pub reviews_today: u32,
+}
+
 fn millis(dt: OffsetDateTime) -> i64 {
     // nanoseconds since the Unix epoch, narrowed to milliseconds. Any realistic
     // calendar date fits comfortably in i64 milliseconds.
@@ -261,15 +387,58 @@ struct CollectionRow {
     parent_id: Option<Uuid>,
 }
 
+/// An internal highlight row: a quote captured from a content item plus an
+/// optional note. Mirrors the fields of `pergamon_core::model::HighlightMeta`
+/// the facade exposes, with its own identity and capture timestamp.
+#[derive(Debug, Clone)]
+struct HighlightRow {
+    id: Uuid,
+    item_id: Uuid,
+    quote_text: String,
+    note: Option<String>,
+    created_at: OffsetDateTime,
+}
+
+/// An internal spaced-repetition card row, mirroring the scheduling fields of
+/// `pergamon_core::model::ReviewCard`. One card backs one highlight. Scheduling
+/// is driven by `pergamon_core::fsrs::Scheduler`, the same engine the CLI uses,
+/// so review state stays consistent across clients on the same library.
+#[derive(Debug, Clone)]
+struct ReviewCardRow {
+    id: Uuid,
+    highlight_id: Uuid,
+    state: CardState,
+    stability: Option<f64>,
+    difficulty: Option<f64>,
+    due_at: OffsetDateTime,
+    last_reviewed_at: Option<OffsetDateTime>,
+    review_count: i32,
+    lapse_count: i32,
+    scheduled_days: Option<f64>,
+}
+
+/// An internal review-log row recording a single grade event, mirroring
+/// `pergamon_core::model::ReviewLog`. Grade buttons append one of these so the
+/// facade can report reviews-per-day and keep a per-card history.
+#[derive(Debug, Clone)]
+struct ReviewLogRow {
+    card_id: Uuid,
+    reviewed_at: OffsetDateTime,
+}
+
 /// The facade's in-memory state: content rows plus the tag and collection
-/// registries. Guarded by a single `Mutex` so multi-entity mutations (adding a
-/// tag both registers it and stamps the row) stay consistent without lock
-/// ordering concerns.
+/// registries, and the highlight / review-card / review-log tables. Guarded by
+/// a single `Mutex` so multi-entity mutations (adding a tag both registers it
+/// and stamps the row; capturing a highlight both records it and creates a card)
+/// stay consistent without lock ordering concerns.
 #[derive(Debug, Clone)]
 struct Store {
     rows: Vec<Row>,
     tags: Vec<TagRow>,
     collections: Vec<CollectionRow>,
+    highlights: Vec<HighlightRow>,
+    review_cards: Vec<ReviewCardRow>,
+    review_logs: Vec<ReviewLogRow>,
 }
 
 /// Case-insensitive matching key for a tag name: trimmed and lowercased.
@@ -283,6 +452,12 @@ fn parse_uuid(id: &str) -> Result<Uuid, PergamonError> {
     Uuid::parse_str(id).map_err(|_| PergamonError::InvalidInput {
         message: format!("not a valid UUID: {id}"),
     })
+}
+
+/// Normalizes an optional note: trims whitespace and collapses a blank note to
+/// `None`, so an empty text field clears the note rather than storing "".
+fn clean_note(note: Option<String>) -> Option<String> {
+    note.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty())
 }
 
 /// Whether a row matches the (already lowercased) search `needle` across title,
@@ -440,6 +615,51 @@ impl ContentItem {
             tags: row.tags.clone(),
             collection_ids: row.collection_ids.iter().map(Uuid::to_string).collect(),
         }
+    }
+}
+
+impl Store {
+    /// The display title of the content item a highlight/card belongs to,
+    /// denormalized into the FFI views so the app renders a queue card without a
+    /// second lookup. Falls back to a placeholder for an orphaned reference.
+    fn source_title(&self, item_id: Uuid) -> String {
+        self.rows
+            .iter()
+            .find(|row| row.item.id == item_id)
+            .map_or_else(|| "Unknown source".to_owned(), |row| row.item.title.clone())
+    }
+
+    /// Builds the FFI [`Highlight`] view from an internal row, folding in the
+    /// source title and whether a review card exists.
+    fn highlight_view(&self, hl: &HighlightRow) -> Highlight {
+        Highlight {
+            id: hl.id.to_string(),
+            item_id: hl.item_id.to_string(),
+            quote_text: hl.quote_text.clone(),
+            note: hl.note.clone(),
+            source_title: self.source_title(hl.item_id),
+            created_at_millis: millis(hl.created_at),
+            has_review_card: self.review_cards.iter().any(|c| c.highlight_id == hl.id),
+        }
+    }
+
+    /// Builds the FFI [`ReviewCardView`] by joining a card with its backing
+    /// highlight. Returns `None` if the highlight has gone (a dangling card),
+    /// which callers filter out.
+    fn card_view(&self, card: &ReviewCardRow) -> Option<ReviewCardView> {
+        let hl = self.highlights.iter().find(|h| h.id == card.highlight_id)?;
+        Some(ReviewCardView {
+            card_id: card.id.to_string(),
+            highlight_id: hl.id.to_string(),
+            item_id: hl.item_id.to_string(),
+            quote_text: hl.quote_text.clone(),
+            note: hl.note.clone(),
+            source_title: self.source_title(hl.item_id),
+            state: card.state.into(),
+            due_at_millis: millis(card.due_at),
+            review_count: u32::try_from(card.review_count).unwrap_or(0),
+            last_reviewed_at_millis: card.last_reviewed_at.map(millis),
+        })
     }
 }
 
@@ -663,10 +883,63 @@ fn seed() -> Store {
     rows[4].tags = vec!["reading".to_owned()];
     rows[4].collection_ids = vec![reading_list];
 
+    // Seed a couple of highlights (with fixed ids) so the reader shows captured
+    // annotations and the review queue / due-count are populated on first
+    // launch. Each highlight gets a New card due at seed time (well in the past),
+    // so both are due immediately.
+    let due = at(1_577_836_800); // 2020-01-01, comfortably in the past
+    let hl_local = Uuid::from_u128(301);
+    let hl_fsrs = Uuid::from_u128(302);
+    let highlights = vec![
+        HighlightRow {
+            id: hl_local,
+            item_id: Uuid::from_u128(1),
+            quote_text: "You own your data, in spite of the cloud.".to_owned(),
+            note: Some("The core promise of local-first software.".to_owned()),
+            created_at: due,
+        },
+        HighlightRow {
+            id: hl_fsrs,
+            item_id: Uuid::from_u128(2),
+            quote_text: "FSRS models memory as stability and difficulty.".to_owned(),
+            note: None,
+            created_at: due,
+        },
+    ];
+    let review_cards = vec![
+        ReviewCardRow {
+            id: Uuid::from_u128(401),
+            highlight_id: hl_local,
+            state: CardState::New,
+            stability: None,
+            difficulty: None,
+            due_at: due,
+            last_reviewed_at: None,
+            review_count: 0,
+            lapse_count: 0,
+            scheduled_days: None,
+        },
+        ReviewCardRow {
+            id: Uuid::from_u128(402),
+            highlight_id: hl_fsrs,
+            state: CardState::New,
+            stability: None,
+            difficulty: None,
+            due_at: due,
+            last_reviewed_at: None,
+            review_count: 0,
+            lapse_count: 0,
+            scheduled_days: None,
+        },
+    ];
+
     Store {
         rows,
         tags,
         collections,
+        highlights,
+        review_cards,
+        review_logs: Vec::new(),
     }
 }
 
@@ -1179,6 +1452,267 @@ impl Library {
             row.item.updated_at = OffsetDateTime::now_utc();
         })
     }
+
+    // ---- Highlights & spaced-repetition review -------------------------------
+
+    /// Lists the highlights captured from a content item, oldest first.
+    ///
+    /// # Errors
+    ///
+    /// [`PergamonError::InvalidInput`] for a malformed id, or
+    /// [`PergamonError::NotFound`] when no item matches.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn highlights(&self, item_id: String) -> Result<Vec<Highlight>, PergamonError> {
+        let wanted = parse_uuid(&item_id)?;
+        self.with_store(|store| {
+            if !store.rows.iter().any(|row| row.item.id == wanted) {
+                return Err(PergamonError::NotFound {
+                    message: format!("no item with id {item_id}"),
+                });
+            }
+            let mut list: Vec<&HighlightRow> = store
+                .highlights
+                .iter()
+                .filter(|h| h.item_id == wanted)
+                .collect();
+            list.sort_by_key(|h| h.created_at);
+            Ok(list.into_iter().map(|h| store.highlight_view(h)).collect())
+        })
+    }
+
+    /// Captures a highlight from a content item and creates a spaced-repetition
+    /// review card for it (New, due immediately) so it enters the review queue.
+    ///
+    /// The `quote_text` is trimmed and must be non-empty; `note` is trimmed and
+    /// treated as absent when blank. Returns the newly captured highlight.
+    ///
+    /// # Errors
+    ///
+    /// [`PergamonError::InvalidInput`] for a malformed id or blank quote, or
+    /// [`PergamonError::NotFound`] when no item matches.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn add_highlight(
+        &self,
+        item_id: String,
+        quote_text: String,
+        note: Option<String>,
+    ) -> Result<Highlight, PergamonError> {
+        let wanted = parse_uuid(&item_id)?;
+        let quote = quote_text.trim().to_owned();
+        if quote.is_empty() {
+            return Err(PergamonError::InvalidInput {
+                message: "highlight quote must not be empty".to_owned(),
+            });
+        }
+        let note = clean_note(note);
+        self.with_store(|store| {
+            if !store.rows.iter().any(|row| row.item.id == wanted) {
+                return Err(PergamonError::NotFound {
+                    message: format!("no item with id {item_id}"),
+                });
+            }
+            let now = OffsetDateTime::now_utc();
+            let highlight_id = Uuid::new_v4();
+            let row = HighlightRow {
+                id: highlight_id,
+                item_id: wanted,
+                quote_text: quote,
+                note,
+                created_at: now,
+            };
+            // Build the FFI view up front from known data (the highlight always
+            // gets a card, below), then move the row into the store.
+            let view = Highlight {
+                id: highlight_id.to_string(),
+                item_id: wanted.to_string(),
+                quote_text: row.quote_text.clone(),
+                note: row.note.clone(),
+                source_title: store.source_title(wanted),
+                created_at_millis: millis(now),
+                has_review_card: true,
+            };
+            store.highlights.push(row);
+            // Auto-create a New card, due now, so the highlight lands in the
+            // queue and bumps the due-count immediately.
+            store.review_cards.push(ReviewCardRow {
+                id: Uuid::new_v4(),
+                highlight_id,
+                state: CardState::New,
+                stability: None,
+                difficulty: None,
+                due_at: now,
+                last_reviewed_at: None,
+                review_count: 0,
+                lapse_count: 0,
+                scheduled_days: None,
+            });
+            Ok(view)
+        })
+    }
+
+    /// Sets or clears the note on a highlight. A blank note clears it. Returns
+    /// the updated highlight.
+    ///
+    /// # Errors
+    ///
+    /// [`PergamonError::InvalidInput`] for a malformed id, or
+    /// [`PergamonError::NotFound`] when no highlight matches.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn set_highlight_note(
+        &self,
+        highlight_id: String,
+        note: Option<String>,
+    ) -> Result<Highlight, PergamonError> {
+        let wanted = parse_uuid(&highlight_id)?;
+        let note = clean_note(note);
+        self.with_store(|store| {
+            let Some(hl) = store.highlights.iter_mut().find(|h| h.id == wanted) else {
+                return Err(PergamonError::NotFound {
+                    message: format!("no highlight with id {highlight_id}"),
+                });
+            };
+            hl.note = note;
+            let updated = hl.clone();
+            Ok(store.highlight_view(&updated))
+        })
+    }
+
+    /// Deletes a highlight along with its review card and logs. Idempotent: a
+    /// no-op if the highlight is already gone.
+    ///
+    /// # Errors
+    ///
+    /// [`PergamonError::InvalidInput`] for a malformed id.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn delete_highlight(&self, highlight_id: String) -> Result<(), PergamonError> {
+        let wanted = parse_uuid(&highlight_id)?;
+        self.with_store(|store| {
+            let card_ids: Vec<Uuid> = store
+                .review_cards
+                .iter()
+                .filter(|c| c.highlight_id == wanted)
+                .map(|c| c.id)
+                .collect();
+            store.highlights.retain(|h| h.id != wanted);
+            store.review_cards.retain(|c| c.highlight_id != wanted);
+            store.review_logs.retain(|l| !card_ids.contains(&l.card_id));
+        });
+        Ok(())
+    }
+
+    /// Returns the review cards currently due (`due_at <= now`), soonest-due
+    /// first. This is the review queue the app grades through.
+    #[must_use]
+    pub fn due_cards(&self) -> Vec<ReviewCardView> {
+        let now = OffsetDateTime::now_utc();
+        self.with_store(|store| {
+            let mut due: Vec<&ReviewCardRow> = store
+                .review_cards
+                .iter()
+                .filter(|c| c.due_at <= now)
+                .collect();
+            due.sort_by_key(|c| c.due_at);
+            due.into_iter().filter_map(|c| store.card_view(c)).collect()
+        })
+    }
+
+    /// Grades a review card, advancing its FSRS schedule and appending a review
+    /// log. Uses the same engine and default parameters as the CLI, so review
+    /// state stays consistent across clients on one library. Returns the updated
+    /// card view (with its new due date and state).
+    ///
+    /// # Errors
+    ///
+    /// [`PergamonError::InvalidInput`] for a malformed id, or
+    /// [`PergamonError::NotFound`] when no card matches.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn grade_card(
+        &self,
+        card_id: String,
+        grade: ReviewGrade,
+    ) -> Result<ReviewCardView, PergamonError> {
+        let wanted = parse_uuid(&card_id)?;
+        let rating: Rating = grade.into();
+        self.with_store(|store| {
+            let Some(card) = store.review_cards.iter().find(|c| c.id == wanted) else {
+                return Err(PergamonError::NotFound {
+                    message: format!("no review card with id {card_id}"),
+                });
+            };
+
+            let now = OffsetDateTime::now_utc();
+            let elapsed_days = card
+                .last_reviewed_at
+                .map_or(0.0, |last| (now - last).as_seconds_f64() / 86_400.0);
+            let memory = match (card.stability, card.difficulty) {
+                (Some(stability), Some(difficulty)) => Some(MemoryState {
+                    stability,
+                    difficulty,
+                }),
+                _ => None,
+            };
+
+            let scheduler = Scheduler::new(&Parameters::default());
+            let output = scheduler.schedule(card.state, memory, elapsed_days, rating);
+            let due_at = now + time::Duration::seconds_f64(output.scheduled_days * 86_400.0);
+
+            let Some(card) = store.review_cards.iter_mut().find(|c| c.id == wanted) else {
+                return Err(PergamonError::NotFound {
+                    message: format!("no review card with id {card_id}"),
+                });
+            };
+            card.state = output.next_state;
+            card.stability = Some(output.memory.stability);
+            card.difficulty = Some(output.memory.difficulty);
+            card.due_at = due_at;
+            card.last_reviewed_at = Some(now);
+            card.review_count += 1;
+            if rating == Rating::Again {
+                card.lapse_count += 1;
+            }
+            card.scheduled_days = Some(output.scheduled_days);
+            let updated = card.clone();
+
+            store.review_logs.push(ReviewLogRow {
+                card_id: wanted,
+                reviewed_at: now,
+            });
+
+            store.card_view(&updated).ok_or(PergamonError::NotFound {
+                message: format!("highlight for card {card_id} is gone"),
+            })
+        })
+    }
+
+    /// Returns aggregate review counters for surfacing the due-count badge and
+    /// queue health.
+    #[must_use]
+    pub fn review_summary(&self) -> ReviewSummary {
+        let now = OffsetDateTime::now_utc();
+        self.with_store(|store| {
+            let due_count = store
+                .review_cards
+                .iter()
+                .filter(|c| c.due_at <= now)
+                .count();
+            let new_count = store
+                .review_cards
+                .iter()
+                .filter(|c| c.state == CardState::New)
+                .count();
+            let reviews_today = store
+                .review_logs
+                .iter()
+                .filter(|l| l.reviewed_at.date() == now.date())
+                .count();
+            ReviewSummary {
+                due_count: u32::try_from(due_count).unwrap_or(u32::MAX),
+                total_cards: u32::try_from(store.review_cards.len()).unwrap_or(u32::MAX),
+                new_count: u32::try_from(new_count).unwrap_or(u32::MAX),
+                reviews_today: u32::try_from(reviews_today).unwrap_or(u32::MAX),
+            }
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1581,5 +2115,184 @@ mod tests {
                 .search_filtered(String::new(), SearchFacets::default())
                 .is_empty()
         );
+    }
+
+    // ---- Highlights & spaced-repetition review -------------------------------
+
+    #[test]
+    fn seeded_highlights_and_due_cards_are_present() {
+        let lib = library();
+        // Item 1 has one seeded highlight, with a note.
+        let highlights = lib.highlights(id(1)).expect("seeded item");
+        assert_eq!(highlights.len(), 1);
+        assert!(highlights[0].note.is_some());
+        assert!(highlights[0].has_review_card);
+        assert_eq!(
+            highlights[0].source_title,
+            "Local-first software: you own your data"
+        );
+
+        // Two seeded cards, both due now.
+        assert_eq!(lib.due_cards().len(), 2);
+        let summary = lib.review_summary();
+        assert_eq!(summary.due_count, 2);
+        assert_eq!(summary.total_cards, 2);
+        assert_eq!(summary.new_count, 2);
+        assert_eq!(summary.reviews_today, 0);
+    }
+
+    #[test]
+    fn highlights_validates_item_id() {
+        let lib = library();
+        assert!(matches!(
+            lib.highlights("not-a-uuid".to_owned()),
+            Err(PergamonError::InvalidInput { .. })
+        ));
+        assert!(matches!(
+            lib.highlights(id(999)),
+            Err(PergamonError::NotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn add_highlight_captures_and_auto_creates_a_due_card() {
+        let lib = library();
+        let before = lib.due_cards().len();
+
+        let hl = lib
+            .add_highlight(
+                id(3),
+                "  A captured quote  ".to_owned(),
+                Some("my note".to_owned()),
+            )
+            .expect("valid item");
+        // Quote is trimmed; note preserved; card created.
+        assert_eq!(hl.quote_text, "A captured quote");
+        assert_eq!(hl.note.as_deref(), Some("my note"));
+        assert!(hl.has_review_card);
+        assert_eq!(hl.item_id, id(3));
+
+        // The new highlight shows up for its item and the queue grew by one.
+        assert_eq!(lib.highlights(id(3)).expect("item").len(), 1);
+        assert_eq!(lib.due_cards().len(), before + 1);
+        assert_eq!(
+            lib.review_summary().due_count,
+            u32::try_from(before + 1).unwrap()
+        );
+    }
+
+    #[test]
+    fn add_highlight_rejects_blank_quote_and_unknown_item() {
+        let lib = library();
+        assert!(matches!(
+            lib.add_highlight(id(1), "   ".to_owned(), None),
+            Err(PergamonError::InvalidInput { .. })
+        ));
+        assert!(matches!(
+            lib.add_highlight(id(999), "quote".to_owned(), None),
+            Err(PergamonError::NotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn add_highlight_treats_blank_note_as_absent() {
+        let lib = library();
+        let hl = lib
+            .add_highlight(id(3), "quote".to_owned(), Some("   ".to_owned()))
+            .expect("valid item");
+        assert!(hl.note.is_none());
+    }
+
+    #[test]
+    fn set_highlight_note_updates_and_clears() {
+        let lib = library();
+        let hl = lib
+            .add_highlight(id(3), "quote".to_owned(), None)
+            .expect("valid");
+
+        let noted = lib
+            .set_highlight_note(hl.id.clone(), Some("added later".to_owned()))
+            .expect("exists");
+        assert_eq!(noted.note.as_deref(), Some("added later"));
+
+        // Blank note clears it.
+        let cleared = lib
+            .set_highlight_note(hl.id.clone(), Some("  ".to_owned()))
+            .expect("exists");
+        assert!(cleared.note.is_none());
+
+        assert!(matches!(
+            lib.set_highlight_note(id(999), None),
+            Err(PergamonError::NotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn delete_highlight_removes_highlight_and_card() {
+        let lib = library();
+        let hl = lib
+            .add_highlight(id(3), "quote".to_owned(), None)
+            .expect("valid");
+        let due_before = lib.due_cards().len();
+
+        lib.delete_highlight(hl.id.clone()).expect("valid id");
+        assert!(lib.highlights(id(3)).expect("item").is_empty());
+        assert_eq!(lib.due_cards().len(), due_before - 1);
+
+        // Idempotent.
+        lib.delete_highlight(hl.id).expect("no-op");
+        // Malformed id still validated.
+        assert!(matches!(
+            lib.delete_highlight("not-a-uuid".to_owned()),
+            Err(PergamonError::InvalidInput { .. })
+        ));
+    }
+
+    #[test]
+    fn grade_card_advances_schedule_and_writes_a_log() {
+        let lib = library();
+        let card = lib.due_cards().into_iter().next().expect("seeded card");
+        assert_eq!(card.review_count, 0);
+        assert_eq!(card.state, ReviewState::New);
+
+        let graded = lib
+            .grade_card(card.card_id.clone(), ReviewGrade::Good)
+            .expect("valid card");
+
+        // A "Good" grade on a new card moves it to Review and schedules it out,
+        // so it is no longer due — the queue shrinks and a review is logged.
+        assert_eq!(graded.review_count, 1);
+        assert_eq!(graded.state, ReviewState::Review);
+        assert!(graded.due_at_millis > card.due_at_millis);
+        assert!(graded.last_reviewed_at_millis.is_some());
+
+        assert_eq!(lib.due_cards().len(), 1);
+        assert_eq!(lib.review_summary().reviews_today, 1);
+        assert_eq!(lib.review_summary().due_count, 1);
+    }
+
+    #[test]
+    fn grade_card_again_keeps_card_due_soon() {
+        let lib = library();
+        let card = lib.due_cards().into_iter().next().expect("seeded card");
+        let graded = lib
+            .grade_card(card.card_id, ReviewGrade::Again)
+            .expect("valid card");
+        // "Again" schedules a short interval; the card is still learning.
+        assert_eq!(graded.state, ReviewState::Learning);
+        assert_eq!(graded.review_count, 1);
+    }
+
+    #[test]
+    fn grade_card_validates_id() {
+        let lib = library();
+        assert!(matches!(
+            lib.grade_card("not-a-uuid".to_owned(), ReviewGrade::Good),
+            Err(PergamonError::InvalidInput { .. })
+        ));
+        assert!(matches!(
+            lib.grade_card(id(999), ReviewGrade::Good),
+            Err(PergamonError::NotFound { .. })
+        ));
     }
 }
