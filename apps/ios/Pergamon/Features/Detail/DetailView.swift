@@ -16,6 +16,9 @@ struct DetailView: View {
     @State private var item: ContentItem?
     @State private var loadFailed = false
     @State private var showingOrganize = false
+    @State private var highlights: [Highlight] = []
+    @State private var showingHighlightComposer = false
+    @State private var editingHighlight: Highlight?
 
     var body: some View {
         Group {
@@ -35,6 +38,13 @@ struct DetailView: View {
             if let item {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
+                        showingHighlightComposer = true
+                    } label: {
+                        Label("Highlight", systemImage: "highlighter")
+                    }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
                         showingOrganize = true
                     } label: {
                         Label("Organize", systemImage: "tag")
@@ -50,6 +60,16 @@ struct DetailView: View {
                 OrganizeSheet(library: library, item: item) { updated in
                     self.item = updated
                 }
+            }
+        }
+        .sheet(isPresented: $showingHighlightComposer) {
+            HighlightComposer(library: library, mode: .capture(itemID: itemID)) {
+                highlightsChanged()
+            }
+        }
+        .sheet(item: $editingHighlight) { highlight in
+            HighlightComposer(library: library, mode: .editNote(highlight: highlight)) {
+                highlightsChanged()
             }
         }
         .onAppear(perform: load)
@@ -96,6 +116,8 @@ struct DetailView: View {
                 Divider()
 
                 articleBody(for: item)
+
+                highlightsSection
 
                 Divider()
                 Label("Available offline · served from the local core", systemImage: "wifi.slash")
@@ -174,6 +196,57 @@ struct DetailView: View {
         }
     }
 
+    /// The captured highlights for this item: a quote, an optional note, and
+    /// per-row actions to edit the note or delete the highlight. Tapping the
+    /// header's plus, or the reader toolbar's highlighter, opens the composer.
+    /// Hidden when the item has no highlights yet (the toolbar is the entry
+    /// point in that case).
+    @ViewBuilder
+    private var highlightsSection: some View {
+        if !highlights.isEmpty {
+            Divider()
+            VStack(alignment: .leading, spacing: 12) {
+                Label("Highlights", systemImage: "highlighter")
+                    .font(.headline)
+
+                ForEach(highlights) { highlight in
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(highlight.quoteText)
+                            .font(.callout)
+                            .padding(.leading, 10)
+                            .overlay(alignment: .leading) {
+                                Rectangle()
+                                    .fill(Color.yellow)
+                                    .frame(width: 3)
+                            }
+                        if let note = highlight.note {
+                            Label(note, systemImage: "note.text")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                        HStack(spacing: 16) {
+                            Button {
+                                editingHighlight = highlight
+                            } label: {
+                                Label(highlight.note == nil ? "Add note" : "Edit note",
+                                      systemImage: "square.and.pencil")
+                            }
+                            Button(role: .destructive) {
+                                deleteHighlight(highlight)
+                            } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
+                        }
+                        .font(.caption)
+                        .buttonStyle(.borderless)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
     private func actionsMenu(for item: ContentItem) -> some View {
         Menu {
             let toggle = TriageAction.readToggle(for: item)
@@ -205,6 +278,29 @@ struct DetailView: View {
 
     private func load() {
         item = try? library.item(id: itemID)
+        loadHighlights()
+    }
+
+    /// Reloads the captured highlights for this item from the core.
+    private func loadHighlights() {
+        highlights = (try? library.highlights(itemId: itemID)) ?? []
+    }
+
+    /// Reloads highlights and signals that review state changed, so the Review
+    /// tab's due-count badge refreshes (capturing a highlight adds a card).
+    private func highlightsChanged() {
+        loadHighlights()
+        NotificationCenter.default.post(name: .pergamonReviewStateChanged, object: nil)
+    }
+
+    /// Removes a highlight (and its review card) from the core, then refreshes.
+    private func deleteHighlight(_ highlight: Highlight) {
+        do {
+            try library.deleteHighlight(highlightId: highlight.id)
+        } catch {
+            print("[reader] delete highlight failed for \(highlight.id): \(error)")
+        }
+        highlightsChanged()
     }
 
     /// Applies a triage action and updates the view with the returned item.

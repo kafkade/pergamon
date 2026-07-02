@@ -55,3 +55,39 @@ extension Collection {
     /// SF Symbol used to represent a collection across the app.
     static var systemImage: String { "folder" }
 }
+
+extension ReviewGrade {
+    /// Accent color used for this grade's button in the review queue. Runs
+    /// red → orange → blue → green as recall improves, matching the FSRS
+    /// Again/Hard/Good/Easy scale.
+    var tint: Color {
+        switch self {
+        case .again: return .red
+        case .hard: return .orange
+        case .good: return .blue
+        case .easy: return .green
+        }
+    }
+
+    /// SF Symbol representing this grade.
+    var systemImage: String {
+        switch self {
+        case .again: return "arrow.counterclockwise"
+        case .hard: return "tortoise"
+        case .good: return "checkmark"
+        case .easy: return "hare"
+        }
+    }
+}
+
+extension ReviewState {
+    /// Accent color used for the card's state badge.
+    var tint: Color {
+        switch self {
+        case .new: return .blue
+        case .learning: return .orange
+        case .review: return .green
+        case .relearning: return .red
+        }
+    }
+}
