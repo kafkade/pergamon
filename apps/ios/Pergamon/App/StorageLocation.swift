@@ -31,7 +31,8 @@ import Foundation
 struct StorageLocation {
     /// The App Group identifier both the app and the share extension share.
     /// Must match `com.apple.security.application-groups` in `Pergamon.entitlements`.
-    static let appGroupIdentifier = "group.dev.pergamon"
+    /// Delegates to ``AppGroup/identifier`` so there is one source of truth.
+    static let appGroupIdentifier = AppGroup.identifier
 
     /// Directory that holds `pergamon.db` and `blobs/`.
     let root: URL

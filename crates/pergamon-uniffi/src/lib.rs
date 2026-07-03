@@ -44,8 +44,9 @@ use pergamon_core::content_type::ContentType as CoreContentType;
 use pergamon_core::error::CoreError;
 use pergamon_core::fsrs::{CardState, MemoryState, Parameters, Rating, Scheduler};
 use pergamon_core::model::{
-    Collection as CoreCollection, ContentItem as CoreContentItem, Feed as CoreFeed,
-    FeedItemMeta as CoreFeedItemMeta, ReviewCard as CoreReviewCard, ReviewLog as CoreReviewLog,
+    BookmarkMeta as CoreBookmarkMeta, Collection as CoreCollection, ContentItem as CoreContentItem,
+    Feed as CoreFeed, FeedItemMeta as CoreFeedItemMeta, HighlightMeta as CoreHighlightMeta,
+    ReviewCard as CoreReviewCard, ReviewLog as CoreReviewLog,
 };
 use pergamon_core::reading_time::reading_time_from_text;
 use pergamon_core::status::DocumentStatus as CoreStatus;
@@ -356,12 +357,157 @@ pub struct ReviewSummary {
     pub reviews_today: u32,
 }
 
+/// What a staged share-sheet capture carries, mirroring ADR-021's
+/// `content_kind` discriminator. It is a *hint* for finalization, not a trust
+/// boundary: the presence of `url` / `selected_text` on [`ShareCapture`] is what
+/// actually drives ingestion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum ShareContentKind {
+    /// A bare URL shared from Safari or another app.
+    Url,
+    /// A URL shared together with a text selection from the page.
+    UrlWithSelection,
+    /// A standalone text selection with no source URL.
+    Text,
+}
+
+/// One staged capture handed off from the iOS share extension, per **ADR-021**.
+///
+/// The extension writes these as atomic JSON drop files to the shared App Group
+/// container; the main app decodes each one and passes it to
+/// [`Library::ingest_share_capture`], which runs the *same* ingestion pipeline
+/// the CLI `save` command uses (canonicalize → dedupe → create/enrich → attach
+/// highlight). The extension itself does no network, extraction, or database
+/// work — it only serializes this record.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ShareCapture {
+    /// Stable UUID (string) for this capture; also the drop-file name and the
+    /// idempotency key for text-only captures. Reprocessing the same
+    /// `capture_id` must converge on the same item rather than duplicate it.
+    pub capture_id: String,
+    /// When the capture happened, as Unix epoch milliseconds (ADR-019 time
+    /// mapping). The app drains oldest-first by this value.
+    pub captured_at_millis: i64,
+    /// The kind of capture (a finalization hint; see [`ShareContentKind`]).
+    pub content_kind: ShareContentKind,
+    /// The raw shared URL, *not* yet canonicalized. Present for `Url` /
+    /// `UrlWithSelection`.
+    pub url: Option<String>,
+    /// The shared / selected text. Present for `UrlWithSelection` / `Text`.
+    pub selected_text: Option<String>,
+    /// Title supplied by the share sheet (e.g. Safari's page title), stored
+    /// without a fetch.
+    pub page_title: Option<String>,
+    /// Best-effort originating bundle id, kept for provenance.
+    pub source_app: Option<String>,
+}
+
+/// The result of finalizing one [`ShareCapture`], so the app can report what
+/// happened and refresh the right surfaces.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ShareIngestOutcome {
+    /// UUID string of the URL-backed content item created or reused, if the
+    /// capture carried a URL. `None` for text-only captures.
+    pub item_id: Option<String>,
+    /// UUID string of the highlight created from the selection, if any.
+    pub highlight_id: Option<String>,
+    /// `true` when the capture matched an existing item/highlight (by canonical
+    /// URL, or by `capture_id` for text-only) and so added nothing new.
+    pub deduped: bool,
+}
+
 fn millis(dt: OffsetDateTime) -> i64 {
     // nanoseconds since the Unix epoch, narrowed to milliseconds. Any realistic
     // calendar date fits comfortably in i64 milliseconds.
     #[allow(clippy::cast_possible_truncation)]
     let ms = (dt.unix_timestamp_nanos() / 1_000_000) as i64;
     ms
+}
+
+/// Inverse of [`millis`]: builds a UTC timestamp from Unix epoch milliseconds,
+/// falling back to the Unix epoch for an out-of-range value rather than failing
+/// (a staged capture's `captured_at` is provenance, not correctness-critical).
+fn from_millis(ms: i64) -> OffsetDateTime {
+    OffsetDateTime::from_unix_timestamp_nanos(i128::from(ms) * 1_000_000)
+        .unwrap_or(OffsetDateTime::UNIX_EPOCH)
+}
+
+/// `BookmarkMeta.saved_from` provenance stamp for items ingested from the iOS
+/// share sheet (ADR-021). Kept distinct from CLI (`browser`) and web (`web`).
+const SHARE_SHEET_SOURCE: &str = "share-sheet";
+
+/// Builds the `BookmarkMeta` for a share-sheet capture: records the raw shared
+/// URL as `original_url` and stamps `saved_from = "share-sheet"` for provenance.
+/// Richer enrichment (favicon, site name, description) is filled by later
+/// extraction, so it is left `None` here.
+fn share_bookmark_meta(content_item_id: Uuid, raw_url: &str) -> CoreBookmarkMeta {
+    CoreBookmarkMeta {
+        content_item_id,
+        original_url: Some(raw_url.to_owned()),
+        saved_from: Some(SHARE_SHEET_SOURCE.to_owned()),
+        thumbnail_url: None,
+        description: None,
+        site_name: None,
+        favicon_url: None,
+    }
+}
+
+/// Inserts the capture's selection as a highlight whose `ContentItem` id is the
+/// `capture_id`, which is what makes finalization idempotent: reprocessing a
+/// drop file that survived a crash finds the highlight already present and
+/// inserts nothing. `source_item_id` links the highlight to its URL item, or is
+/// `None` for a standalone text capture. Returns the highlight id and whether it
+/// was newly inserted.
+fn stage_share_highlight(
+    db: &Database,
+    capture_id: Uuid,
+    source_item_id: Option<Uuid>,
+    quote: &str,
+    captured_at: OffsetDateTime,
+) -> Result<(Uuid, bool), PergamonError> {
+    match db.get_content_item(capture_id) {
+        Ok(_) => return Ok((capture_id, false)),
+        Err(StorageError::NotFound { .. }) => {}
+        Err(e) => return Err(e.into()),
+    }
+
+    let item = CoreContentItem {
+        id: capture_id,
+        url: None,
+        title: share_highlight_title(quote),
+        author: None,
+        content_type: CoreContentType::Highlight,
+        status: CoreStatus::Inbox,
+        content_text: Some(quote.to_owned()),
+        excerpt: None,
+        published_at: None,
+        created_at: captured_at,
+        updated_at: captured_at,
+        read_at: None,
+    };
+    db.insert_content_item(&item)?;
+    db.insert_highlight_meta(&CoreHighlightMeta {
+        content_item_id: capture_id,
+        source_item_id,
+        quote_text: quote.to_owned(),
+        note: None,
+        position_start: None,
+        position_end: None,
+        color: None,
+    })?;
+    Ok((capture_id, true))
+}
+
+/// First-line, ≤80-char title for a share-captured highlight, mirroring
+/// storage's `truncate_for_title` so it reads like a CLI/TUI-captured one.
+fn share_highlight_title(quote: &str) -> String {
+    let first_line = quote.lines().next().unwrap_or(quote);
+    if first_line.chars().count() <= 80 {
+        first_line.to_owned()
+    } else {
+        let truncated: String = first_line.chars().take(77).collect();
+        format!("{truncated}…")
+    }
 }
 
 /// Case-insensitive matching key for a tag name: trimmed and lowercased.
@@ -1525,6 +1671,119 @@ impl Library {
         })
     }
 
+    /// Finalizes one staged share-sheet [`ShareCapture`] into the library,
+    /// running the **same** ingestion pipeline as CLI `save` and web capture per
+    /// **ADR-021**: canonicalize the URL, dedupe on the canonical URL, create or
+    /// reuse the `ContentItem` (attaching `BookmarkMeta` with
+    /// `saved_from = "share-sheet"` and the raw shared URL), and attach any
+    /// selection as a `Highlight`. A text-only capture becomes a standalone
+    /// highlight.
+    ///
+    /// The share extension itself does no network, extraction, or database work
+    /// (that would blow its memory/time budget); this is the app-side finalizer
+    /// it hands off to. The call is **idempotent** and crash-safe: a URL capture
+    /// dedupes on the canonical URL and its highlight on the `capture_id`, and a
+    /// text-only capture dedupes on the `capture_id`, so reprocessing a drop file
+    /// that survived a crash converges on the same rows instead of duplicating
+    /// them. Extraction (fetch + readability) is deferred — a URL capture lands
+    /// as a bookmark and upgrades to an article in place later (ADR-010).
+    ///
+    /// # Errors
+    ///
+    /// [`PergamonError::InvalidInput`] when `capture_id` is not a valid UUID or
+    /// the capture carries neither a usable URL nor selection text, or
+    /// [`PergamonError::Storage`] on a database failure.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ingest_share_capture(
+        &self,
+        capture: ShareCapture,
+    ) -> Result<ShareIngestOutcome, PergamonError> {
+        let capture_id = parse_uuid(&capture.capture_id)?;
+        let captured_at = from_millis(capture.captured_at_millis);
+        let raw_url = capture
+            .url
+            .as_deref()
+            .map(str::trim)
+            .filter(|u| !u.is_empty());
+        let selection = capture
+            .selected_text
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+
+        let db = self.lock();
+
+        // URL-backed capture: canonicalize → dedupe → create/reuse the item,
+        // then attach the selection (if any) as a linked highlight.
+        if let Some(raw) = raw_url {
+            // The exact canonicalization CLI and web use, so dedupe is identical
+            // across every surface (ADR-021).
+            let canonical =
+                pergamon_extract::canonicalize_url(raw).unwrap_or_else(|_| raw.to_owned());
+
+            let (item_id, item_inserted) =
+                if let Some(existing) = db.get_content_item_by_url(&canonical)? {
+                    // Merge on duplicate: enrich provenance without clobbering.
+                    // `upsert_bookmark_meta` COALESCEs, so existing values win.
+                    db.upsert_bookmark_meta(&share_bookmark_meta(existing.id, raw))?;
+                    (existing.id, false)
+                } else {
+                    let title = capture
+                        .page_title
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|t| !t.is_empty())
+                        .map_or_else(|| raw.to_owned(), ToOwned::to_owned);
+                    let item = CoreContentItem {
+                        id: Uuid::new_v4(),
+                        url: Some(canonical),
+                        title,
+                        author: None,
+                        content_type: CoreContentType::Bookmark,
+                        status: CoreStatus::Inbox,
+                        content_text: None,
+                        excerpt: None,
+                        published_at: None,
+                        created_at: captured_at,
+                        updated_at: captured_at,
+                        read_at: None,
+                    };
+                    db.insert_content_item(&item)?;
+                    db.insert_bookmark_meta(&share_bookmark_meta(item.id, raw))?;
+                    (item.id, true)
+                };
+
+            let (highlight_id, hl_inserted) = if let Some(quote) = selection {
+                let (id, inserted) =
+                    stage_share_highlight(&db, capture_id, Some(item_id), quote, captured_at)?;
+                (Some(id.to_string()), inserted)
+            } else {
+                (None, false)
+            };
+
+            return Ok(ShareIngestOutcome {
+                item_id: Some(item_id.to_string()),
+                highlight_id,
+                deduped: !(item_inserted || hl_inserted),
+            });
+        }
+
+        // Text-only capture: a standalone highlight keyed on `capture_id`.
+        if let Some(quote) = selection {
+            let (highlight_id, inserted) =
+                stage_share_highlight(&db, capture_id, None, quote, captured_at)?;
+            return Ok(ShareIngestOutcome {
+                item_id: None,
+                highlight_id: Some(highlight_id.to_string()),
+                deduped: !inserted,
+            });
+        }
+
+        Err(PergamonError::InvalidInput {
+            message: "share capture has neither a URL nor selection text".to_owned(),
+        })
+    }
+
     /// Sets or clears the note on a highlight. A blank note clears it. Returns
     /// the updated highlight.
     ///
@@ -2378,6 +2637,185 @@ mod tests {
         // Malformed id still validated.
         assert!(matches!(
             lib.delete_highlight("not-a-uuid".to_owned()),
+            Err(PergamonError::InvalidInput { .. })
+        ));
+    }
+
+    // ---- Share-sheet ingestion (ADR-021) -------------------------------------
+
+    fn capture(
+        kind: ShareContentKind,
+        url: Option<&str>,
+        text: Option<&str>,
+        title: Option<&str>,
+    ) -> ShareCapture {
+        ShareCapture {
+            capture_id: Uuid::new_v4().to_string(),
+            captured_at_millis: 1_700_000_000_000,
+            content_kind: kind,
+            url: url.map(str::to_owned),
+            selected_text: text.map(str::to_owned),
+            page_title: title.map(str::to_owned),
+            source_app: Some("com.apple.mobilesafari".to_owned()),
+        }
+    }
+
+    #[test]
+    fn ingest_share_capture_url_creates_inbox_bookmark() {
+        let lib = library();
+        let before = lib.items().len();
+
+        let out = lib
+            .ingest_share_capture(capture(
+                ShareContentKind::Url,
+                Some("https://example.com/post"),
+                None,
+                Some("A Great Post"),
+            ))
+            .expect("valid url capture");
+
+        assert!(!out.deduped);
+        assert!(out.highlight_id.is_none());
+        let id = out.item_id.expect("url capture yields an item");
+
+        let item = lib.item(id).expect("item exists");
+        assert_eq!(item.content_type, ContentType::Bookmark);
+        assert_eq!(item.status, Status::Inbox);
+        assert_eq!(item.title, "A Great Post");
+        assert_eq!(lib.items().len(), before + 1);
+    }
+
+    #[test]
+    fn ingest_share_capture_falls_back_to_url_as_title() {
+        let lib = library();
+        let out = lib
+            .ingest_share_capture(capture(
+                ShareContentKind::Url,
+                Some("https://example.com/no-title"),
+                None,
+                None,
+            ))
+            .expect("valid");
+        let item = lib.item(out.item_id.expect("item")).expect("exists");
+        assert_eq!(item.title, "https://example.com/no-title");
+    }
+
+    #[test]
+    fn ingest_share_capture_dedupes_on_canonical_url() {
+        let lib = library();
+        let before = lib.items().len();
+
+        let first = lib
+            .ingest_share_capture(capture(
+                ShareContentKind::Url,
+                Some("https://example.com/a"),
+                None,
+                None,
+            ))
+            .expect("first");
+        assert!(!first.deduped);
+
+        // A tracking-param variant canonicalizes to the same URL, so it merges
+        // onto the existing item rather than creating a second one.
+        let second = lib
+            .ingest_share_capture(capture(
+                ShareContentKind::Url,
+                Some("https://example.com/a?utm_source=newsletter"),
+                None,
+                None,
+            ))
+            .expect("second");
+        assert!(second.deduped);
+        assert_eq!(second.item_id, first.item_id);
+        assert_eq!(lib.items().len(), before + 1);
+    }
+
+    #[test]
+    fn ingest_share_capture_url_with_selection_attaches_highlight() {
+        let lib = library();
+        let out = lib
+            .ingest_share_capture(capture(
+                ShareContentKind::UrlWithSelection,
+                Some("https://example.com/read"),
+                Some("  a memorable sentence  "),
+                Some("Readable"),
+            ))
+            .expect("valid");
+
+        assert!(!out.deduped);
+        let item_id = out.item_id.expect("url item");
+        assert!(out.highlight_id.is_some());
+
+        let highlights = lib.highlights(item_id).expect("item exists");
+        assert_eq!(highlights.len(), 1);
+        // Selection text is trimmed, matching CLI capture behavior.
+        assert_eq!(highlights[0].quote_text, "a memorable sentence");
+    }
+
+    #[test]
+    fn ingest_share_capture_text_creates_standalone_highlight() {
+        let lib = library();
+        let cap = capture(
+            ShareContentKind::Text,
+            None,
+            Some("standalone thought"),
+            None,
+        );
+
+        let out = lib.ingest_share_capture(cap.clone()).expect("valid");
+        assert!(!out.deduped);
+        assert!(out.item_id.is_none());
+        let hl_id = out.highlight_id.expect("standalone highlight");
+        // The highlight's id is the capture id (provenance / idempotency key).
+        assert_eq!(hl_id, cap.capture_id);
+
+        // Re-finalizing the same drop file (crash between commit and delete)
+        // must converge, not duplicate.
+        let again = lib.ingest_share_capture(cap).expect("valid");
+        assert!(again.deduped);
+        assert_eq!(again.highlight_id.as_deref(), Some(hl_id.as_str()));
+    }
+
+    #[test]
+    fn ingest_share_capture_url_with_selection_is_idempotent() {
+        let lib = library();
+        let cap = capture(
+            ShareContentKind::UrlWithSelection,
+            Some("https://example.com/idem"),
+            Some("quote once"),
+            None,
+        );
+
+        let first = lib.ingest_share_capture(cap.clone()).expect("valid");
+        let item_id = first.item_id.clone().expect("item");
+
+        let second = lib.ingest_share_capture(cap).expect("valid");
+        assert!(second.deduped);
+        assert_eq!(second.item_id, first.item_id);
+        // Still exactly one highlight, not two.
+        assert_eq!(lib.highlights(item_id).expect("item").len(), 1);
+    }
+
+    #[test]
+    fn ingest_share_capture_rejects_empty_and_malformed() {
+        let lib = library();
+
+        // Neither URL nor text.
+        assert!(matches!(
+            lib.ingest_share_capture(capture(ShareContentKind::Text, None, Some("   "), None)),
+            Err(PergamonError::InvalidInput { .. })
+        ));
+
+        // Malformed capture id.
+        let mut bad = capture(
+            ShareContentKind::Url,
+            Some("https://example.com"),
+            None,
+            None,
+        );
+        bad.capture_id = "not-a-uuid".to_owned();
+        assert!(matches!(
+            lib.ingest_share_capture(bad),
             Err(PergamonError::InvalidInput { .. })
         ));
     }
