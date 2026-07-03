@@ -45,6 +45,11 @@ final class AppEnvironment: ObservableObject {
     /// unwritable database). Surfaced in the backup/settings UI.
     let usingPersistentStore: Bool
 
+    /// The share-extension staging drop folder (ADR-021), or `nil` when the App
+    /// Group is unavailable (a bare Simulator with no signing team). When `nil`,
+    /// share-sheet capture is inert and finalization is a no-op.
+    let staging: StagingInbox?
+
     init() {
         // 1. Resolve + prepare the on-device storage container (ADR-020). This
         //    creates the App Group directory tree and excludes blobs from
@@ -67,7 +72,31 @@ final class AppEnvironment: ObservableObject {
         }
         self.coreVersion = libraryVersion()
 
+        // 3. Resolve the shared staging drop folder the share extension writes
+        //    to (ADR-021). Absent on a Simulator with no provisioned App Group.
+        self.staging = StagingInbox.shared()
+
         logBootstrap()
+    }
+
+    /// Drains any captures the share extension has staged into the library, then
+    /// notifies list surfaces to reload if anything changed.
+    ///
+    /// Runs the ingestion off the main actor (core reads/writes are synchronous
+    /// and thread-safe per ADR-019) and posts ``Notification/Name/pergamonLibraryDidChange``
+    /// back on the main actor. Called on launch and on every foreground, so a
+    /// page saved from the share sheet appears the next time the app is seen.
+    func finalizePendingCaptures() {
+        guard let staging else { return }
+        let library = self.library
+        Task.detached(priority: .utility) {
+            let result = StagingFinalizer(library: library, inbox: staging).drain()
+            guard result.didChange else { return }
+            await MainActor.run {
+                NotificationCenter.default.post(name: .pergamonLibraryDidChange, object: nil)
+                NotificationCenter.default.post(name: .pergamonReviewStateChanged, object: nil)
+            }
+        }
     }
 
     private func logBootstrap() {
@@ -77,5 +106,10 @@ final class AppEnvironment: ObservableObject {
         print("[bootstrap] library: \(store)")
         print("[bootstrap] storage: \(backing) → \(storage.databaseURL.path)")
         print("[bootstrap] blobs (backup-excluded): \(storage.blobsURL.path)")
+        if let staging {
+            print("[bootstrap] share staging: \(staging.directory.path)")
+        } else {
+            print("[bootstrap] share staging: unavailable (App Group not provisioned)")
+        }
     }
 }

@@ -33,9 +33,15 @@ targets:
     deploymentTarget: "17.0"
     sources:
       - path: Pergamon
+      # Cross-process staging model + drop-folder helpers, shared verbatim with
+      # the share extension so both speak one on-disk contract (ADR-021).
+      - path: Shared
     dependencies:
       - package: PergamonKit
         product: PergamonKit
+      # Embeds the share extension into the app bundle (adds the "Embed App
+      # Extensions" phase). xcodegen infers embedding for app-extension targets.
+      - target: PergamonShareExtension
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.pergamon.app
@@ -45,8 +51,31 @@ targets:
         INFOPLIST_KEY_UILaunchScreen_Generation: "YES"
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: "YES"
         INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait"
-        # App Group container shared with the future share extension (#119),
-        # per ADR-020. Applied ad-hoc on the Simulator (no team required);
-        # device builds need a signing team with `group.dev.pergamon`
-        # registered on the provisioning profile.
+        # App Group container shared with the share extension (#119), per
+        # ADR-020. Applied ad-hoc on the Simulator (no team required); device
+        # builds need a signing team with `group.dev.pergamon` registered on the
+        # provisioning profile.
         CODE_SIGN_ENTITLEMENTS: Pergamon/Pergamon.entitlements
+
+  # The share extension (#119 / ADR-021). It stays deliberately lightweight: it
+  # only captures a URL / text / title from the share sheet and writes one atomic
+  # JSON record into the shared App Group staging folder. It does NOT depend on
+  # PergamonKit (the Rust core) — no network, no extraction, no database — so it
+  # comfortably fits the tight share-extension memory/time budget. The main app
+  # finalizes the staged captures on next open.
+  PergamonShareExtension:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: ShareExtension
+      - path: Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.pergamon.app.ShareExtension
+        # Hand-written Info.plist carries the NSExtension activation rules.
+        GENERATE_INFOPLIST_FILE: "NO"
+        INFOPLIST_FILE: ShareExtension/Info.plist
+        TARGETED_DEVICE_FAMILY: "1,2"
+        # Same App Group as the app, so the drop folder is the one the app drains.
+        CODE_SIGN_ENTITLEMENTS: ShareExtension/ShareExtension.entitlements

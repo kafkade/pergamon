@@ -36,6 +36,7 @@ pedantic = { level = "warn", priority = -1 }
 [dependencies]
 pergamon-core = { workspace = true }
 pergamon-storage = { workspace = true }
+pergamon-extract = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true }
 uuid = { workspace = true }

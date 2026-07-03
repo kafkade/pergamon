@@ -340,5 +340,96 @@ final class PergamonKitTests: XCTestCase {
         XCTAssertTrue(try library.highlights(itemId: item.id).isEmpty)
         XCTAssertEqual(library.dueCards().count, dueBefore - 1)
     }
+
+    // MARK: - Share-sheet ingestion (ADR-021)
+
+    private func capture(
+        kind: ShareContentKind,
+        url: String? = nil,
+        text: String? = nil,
+        title: String? = nil
+    ) -> ShareCapture {
+        ShareCapture(
+            captureId: UUID().uuidString,
+            capturedAtMillis: 1_700_000_000_000,
+            contentKind: kind,
+            url: url,
+            selectedText: text,
+            pageTitle: title,
+            sourceApp: "com.apple.mobilesafari"
+        )
+    }
+
+    func testIngestShareCaptureCreatesBookmark() throws {
+        let before = library.items().count
+        let outcome = try library.ingestShareCapture(
+            capture: capture(kind: .url, url: "https://example.com/post", title: "A Post")
+        )
+        XCTAssertFalse(outcome.deduped)
+        XCTAssertNil(outcome.highlightId)
+        let id = try XCTUnwrap(outcome.itemId)
+
+        let item = try library.item(id: id)
+        XCTAssertEqual(item.contentType, .bookmark)
+        XCTAssertEqual(item.status, .inbox)
+        XCTAssertEqual(item.title, "A Post")
+        XCTAssertEqual(library.items().count, before + 1)
+    }
+
+    func testIngestShareCaptureDedupesOnCanonicalUrl() throws {
+        let before = library.items().count
+        let first = try library.ingestShareCapture(
+            capture: capture(kind: .url, url: "https://example.com/a")
+        )
+        let second = try library.ingestShareCapture(
+            capture: capture(kind: .url, url: "https://example.com/a?utm_source=x")
+        )
+        XCTAssertFalse(first.deduped)
+        XCTAssertTrue(second.deduped)
+        XCTAssertEqual(first.itemId, second.itemId)
+        XCTAssertEqual(library.items().count, before + 1)
+    }
+
+    func testIngestShareCaptureAttachesSelectionHighlight() throws {
+        let outcome = try library.ingestShareCapture(
+            capture: capture(
+                kind: .urlWithSelection,
+                url: "https://example.com/read",
+                text: "  a memorable line  "
+            )
+        )
+        let itemId = try XCTUnwrap(outcome.itemId)
+        XCTAssertNotNil(outcome.highlightId)
+
+        let highlights = try library.highlights(itemId: itemId)
+        XCTAssertEqual(highlights.count, 1)
+        XCTAssertEqual(highlights.first?.quoteText, "a memorable line")
+    }
+
+    func testIngestShareCaptureTextIsStandaloneAndIdempotent() throws {
+        let cap = capture(kind: .text, text: "standalone thought")
+
+        let first = try library.ingestShareCapture(capture: cap)
+        XCTAssertNil(first.itemId)
+        XCTAssertFalse(first.deduped)
+        // The core normalizes UUIDs to lowercase; the highlight id is the
+        // capture id (its idempotency key).
+        XCTAssertEqual(first.highlightId, cap.captureId.lowercased())
+
+        // Reprocessing the same capture (crash before delete) must converge.
+        let again = try library.ingestShareCapture(capture: cap)
+        XCTAssertTrue(again.deduped)
+        XCTAssertEqual(again.highlightId, cap.captureId.lowercased())
+    }
+
+    func testIngestShareCaptureRejectsEmptyCapture() {
+        XCTAssertThrowsError(
+            try library.ingestShareCapture(capture: capture(kind: .text, text: "   "))
+        ) { error in
+            guard case PergamonError.InvalidInput = error else {
+                return XCTFail("expected InvalidInput, got \(error)")
+            }
+        }
+    }
 }
 
