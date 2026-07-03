@@ -25,3 +25,4 @@ They follow the [MADR](https://adr.github.io/madr/) format.
 | [ADR-019](019-uniffi-boundary-and-error-mapping.md) | UniFFI Boundary and Error Mapping | Accepted |
 | [ADR-020](020-mobile-storage-ownership-and-cache-policy.md) | Mobile Storage Ownership and Cache Policy | Accepted |
 | [ADR-021](021-share-extension-ingestion-contract.md) | Share Extension Ingestion Contract | Accepted |
+| [ADR-022](022-sync-protocol-and-envelope-model.md) | Sync Protocol and Envelope Model | Accepted |
