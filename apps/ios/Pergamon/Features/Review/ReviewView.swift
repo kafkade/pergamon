@@ -48,6 +48,9 @@ struct ReviewView: View {
             }
         }
         .onAppear(perform: loadQueue)
+        .onReceive(NotificationCenter.default.publisher(for: .pergamonLibraryDidChange)) { _ in
+            loadQueue()
+        }
     }
 
     // MARK: - Card

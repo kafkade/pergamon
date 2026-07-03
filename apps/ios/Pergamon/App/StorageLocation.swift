@@ -15,12 +15,11 @@ import Foundation
 ///
 /// ## Status
 ///
-/// This type is the **bootstrap seam** for the offline database (#118). Today
-/// `Library()` is backed by an in-memory seeded corpus and takes no path, so the
-/// resolved `databaseURL` is not yet handed to the core — but the container is
-/// created, the blob tree is excluded from iCloud backup (ADR-020 §4), and the
-/// path is logged on launch. When #118 lands, the SQLite-backed `Library` opens
-/// `databaseURL` here with no other change to the app.
+/// This type is the **bootstrap seam** for the offline database (#118), now
+/// wired: `AppEnvironment` opens `Library.open(databaseURL.path)` against the
+/// resolved container, the blob tree is excluded from iCloud backup (ADR-020
+/// §4), and the path is logged on launch. If the database cannot be opened the
+/// app falls back to an in-memory seed so it always launches.
 ///
 /// ## Simulator fallback
 ///

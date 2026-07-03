@@ -2311,10 +2311,12 @@ version = "0.6.1"
 dependencies = [
  "pergamon-core",
  "rusqlite",
+ "serde",
  "serde_json",
  "thiserror 2.0.18",
  "time",
  "uuid",
+ "zip",
 ]
 
 [[package]]
@@ -2322,6 +2324,7 @@ name = "pergamon-uniffi"
 version = "0.6.1"
 dependencies = [
  "pergamon-core",
+ "pergamon-storage",
  "thiserror 2.0.18",
  "time",
  "uniffi",

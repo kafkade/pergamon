@@ -5479,239 +5479,61 @@ fn apply_rules_to_item(db: &Database, item: &ContentItem, feed_title: Option<&st
 }
 
 // ------------------------------------------------------------------
-// Backup export
+// Backup export / restore
 // ------------------------------------------------------------------
-
-/// Manifest embedded in every backup archive.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct BackupManifest {
-    /// Application name (always "pergamon").
-    app: String,
-    /// Schema version at the time of the backup.
-    schema_version: i64,
-    /// ISO-8601 timestamp of when the backup was created.
-    created_at: String,
-}
+//
+// The canonical backup archive format (ZIP of JSON) lives in
+// `pergamon_storage::backup` so every client — CLI, web server, and the iOS app
+// (#118) — round-trips the exact same bytes. These handlers only add CLI
+// concerns: file I/O, user-facing summaries, and import-history logging.
 
 /// Create a full backup archive (ZIP with JSON files).
 fn export_backup(db: &Database, output: &std::path::Path) -> Result<()> {
-    use zip::ZipWriter;
-    use zip::write::SimpleFileOptions;
-
     let file = std::fs::File::create(output)
         .with_context(|| format!("failed to create backup file: {}", output.display()))?;
-    let mut zip = ZipWriter::new(file);
-    let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-
-    // Gather all data.
-    let feed_folders = db.list_feed_folders().context("listing feed folders")?;
-    let feeds = db.list_feeds().context("listing feeds")?;
-    let content_items = db
-        .list_all_content_items()
-        .context("listing content items")?;
-    let tags = db.list_tags().context("listing tags")?;
-    let collections = db.list_collections().context("listing collections")?;
-    let feed_item_meta = db
-        .list_all_feed_item_meta()
-        .context("listing feed item meta")?;
-    let bookmark_meta = db
-        .list_all_bookmark_meta()
-        .context("listing bookmark meta")?;
-    let highlight_meta = db
-        .list_all_highlight_meta()
-        .context("listing highlight meta")?;
-    let notes = db.list_all_notes().context("listing notes")?;
-    let review_cards = db.list_all_review_cards().context("listing review cards")?;
-    let review_logs = db.list_all_review_logs().context("listing review logs")?;
-    let rules = db.list_rules().context("listing content rules")?;
-    let content_item_tags = db
-        .list_all_content_item_tags()
-        .context("listing content item tags")?;
-    let collection_items = db
-        .list_all_collection_items()
-        .context("listing collection items")?;
-
-    let manifest = BackupManifest {
-        app: "pergamon".to_owned(),
-        schema_version: db.schema_version().context("reading schema version")?,
-        created_at: OffsetDateTime::now_utc()
-            .format(&time::format_description::well_known::Rfc3339)
-            .unwrap_or_default(),
-    };
-
-    // Write files in deterministic order.
-    write_json_entry(&mut zip, &opts, "manifest.json", &manifest)?;
-    write_json_entry(&mut zip, &opts, "feed_folders.json", &feed_folders)?;
-    write_json_entry(&mut zip, &opts, "feeds.json", &feeds)?;
-    write_json_entry(&mut zip, &opts, "content_items.json", &content_items)?;
-    write_json_entry(&mut zip, &opts, "tags.json", &tags)?;
-    write_json_entry(&mut zip, &opts, "collections.json", &collections)?;
-    write_json_entry(&mut zip, &opts, "feed_item_meta.json", &feed_item_meta)?;
-    write_json_entry(&mut zip, &opts, "bookmark_meta.json", &bookmark_meta)?;
-    write_json_entry(&mut zip, &opts, "highlight_meta.json", &highlight_meta)?;
-    write_json_entry(&mut zip, &opts, "notes.json", &notes)?;
-    write_json_entry(&mut zip, &opts, "review_cards.json", &review_cards)?;
-    write_json_entry(&mut zip, &opts, "review_logs.json", &review_logs)?;
-    write_json_entry(&mut zip, &opts, "content_rules.json", &rules)?;
-    write_json_entry(
-        &mut zip,
-        &opts,
-        "content_item_tags.json",
-        &content_item_tags,
-    )?;
-    write_json_entry(&mut zip, &opts, "collection_items.json", &collection_items)?;
-
-    zip.finish().context("failed to finalize backup archive")?;
-
-    let total = feed_folders.len()
-        + feeds.len()
-        + content_items.len()
-        + tags.len()
-        + collections.len()
-        + feed_item_meta.len()
-        + bookmark_meta.len()
-        + highlight_meta.len()
-        + notes.len()
-        + review_cards.len()
-        + review_logs.len()
-        + rules.len()
-        + content_item_tags.len()
-        + collection_items.len();
+    let stats = pergamon_storage::backup::export(db, file).context("writing backup archive")?;
 
     println!("Backup written to {}", output.display());
     println!(
-        "  {} feeds, {} items, {} tags, {} collections, {} notes, {} review cards, {} rules ({total} records total)",
-        feeds.len(),
-        content_items.len(),
-        tags.len(),
-        collections.len(),
-        notes.len(),
-        review_cards.len(),
-        rules.len(),
+        "  {} feeds, {} items, {} tags, {} collections, {} notes, {} review cards, {} rules ({} records total)",
+        stats.feeds,
+        stats.content_items,
+        stats.tags,
+        stats.collections,
+        stats.notes,
+        stats.review_cards,
+        stats.rules,
+        stats.total,
     );
 
     Ok(())
 }
 
-/// Write a single JSON entry to the ZIP archive.
-fn write_json_entry<W: Write + std::io::Seek, T: serde::Serialize>(
-    zip: &mut zip::ZipWriter<W>,
-    opts: &zip::write::SimpleFileOptions,
-    name: &str,
-    data: &T,
-) -> Result<()> {
-    zip.start_file(name, *opts)
-        .with_context(|| format!("failed to start ZIP entry: {name}"))?;
-    serde_json::to_writer_pretty(&mut *zip, data)
-        .with_context(|| format!("failed to write JSON entry: {name}"))?;
-    Ok(())
-}
-
-// ------------------------------------------------------------------
-// Backup restore
-// ------------------------------------------------------------------
-
 /// Restore from a full backup archive.
 fn restore_backup(db: &Database, path: &std::path::Path) -> Result<()> {
-    use pergamon_core::model::{
-        BookmarkMeta, Collection, HighlightMeta, Note as NoteModel, ReviewCard as ReviewCardModel,
-        ReviewLog as ReviewLogModel, Tag,
-    };
-    use zip::ZipArchive;
-
     let file = std::fs::File::open(path)
         .with_context(|| format!("failed to open backup file: {}", path.display()))?;
-    let mut archive =
-        ZipArchive::new(file).with_context(|| "failed to read backup archive as ZIP")?;
-
-    // Read and validate manifest.
-    let manifest: BackupManifest = read_json_entry(&mut archive, "manifest.json")?;
-    if manifest.app != "pergamon" {
-        bail!("not a pergamon backup (manifest.app = {:?})", manifest.app);
-    }
-
-    let current_version = db
-        .schema_version()
-        .context("reading current schema version")?;
-    if manifest.schema_version > current_version {
-        bail!(
-            "backup schema version {} is newer than current {} — upgrade pergamon first",
-            manifest.schema_version,
-            current_version
-        );
-    }
-
-    // Deserialize all tables.
-    let feed_folders: Vec<FeedFolder> = read_json_entry(&mut archive, "feed_folders.json")?;
-    let feeds: Vec<Feed> = read_json_entry(&mut archive, "feeds.json")?;
-    let content_items: Vec<ContentItem> = read_json_entry(&mut archive, "content_items.json")?;
-    let tags: Vec<Tag> = read_json_entry(&mut archive, "tags.json")?;
-    let collections: Vec<Collection> = read_json_entry(&mut archive, "collections.json")?;
-    let feed_item_meta: Vec<FeedItemMeta> = read_json_entry(&mut archive, "feed_item_meta.json")?;
-    let bookmark_meta: Vec<BookmarkMeta> = read_json_entry(&mut archive, "bookmark_meta.json")?;
-    let highlight_meta: Vec<HighlightMeta> = read_json_entry(&mut archive, "highlight_meta.json")?;
-    let notes: Vec<NoteModel> = read_json_entry(&mut archive, "notes.json").unwrap_or_default();
-    let review_cards: Vec<ReviewCardModel> =
-        read_json_entry(&mut archive, "review_cards.json").unwrap_or_default();
-    let review_logs: Vec<ReviewLogModel> =
-        read_json_entry(&mut archive, "review_logs.json").unwrap_or_default();
-    let rules: Vec<pergamon_core::rule::ContentRule> =
-        read_json_entry(&mut archive, "content_rules.json").unwrap_or_default();
-    let content_item_tags: Vec<(Uuid, Uuid)> =
-        read_json_entry(&mut archive, "content_item_tags.json")?;
-    let collection_items: Vec<(Uuid, Uuid, i32)> =
-        read_json_entry(&mut archive, "collection_items.json")?;
-
-    db.restore_backup(
-        &feed_folders,
-        &feeds,
-        &content_items,
-        &tags,
-        &collections,
-        &feed_item_meta,
-        &bookmark_meta,
-        &highlight_meta,
-        &content_item_tags,
-        &collection_items,
-        &notes,
-        &review_cards,
-        &review_logs,
-        &rules,
-    )
-    .context("failed to restore backup into database")?;
-
-    let total = feed_folders.len()
-        + feeds.len()
-        + content_items.len()
-        + tags.len()
-        + collections.len()
-        + feed_item_meta.len()
-        + bookmark_meta.len()
-        + highlight_meta.len()
-        + notes.len()
-        + review_cards.len()
-        + review_logs.len()
-        + rules.len()
-        + content_item_tags.len()
-        + collection_items.len();
+    let stats = pergamon_storage::backup::restore(db, file)
+        .context("failed to restore backup into database")?;
 
     println!("Backup restored from {}", path.display());
     println!(
-        "  {} feeds, {} items, {} tags, {} collections, {} notes, {} review cards, {} rules ({total} records total)",
-        feeds.len(),
-        content_items.len(),
-        tags.len(),
-        collections.len(),
-        notes.len(),
-        review_cards.len(),
-        rules.len(),
+        "  {} feeds, {} items, {} tags, {} collections, {} notes, {} review cards, {} rules ({} records total)",
+        stats.feeds,
+        stats.content_items,
+        stats.tags,
+        stats.collections,
+        stats.notes,
+        stats.review_cards,
+        stats.rules,
+        stats.total,
     );
 
     record_import_log(
         db,
         ImportSource::Backup,
         path,
-        u64::try_from(total).unwrap_or(u64::MAX),
+        u64::try_from(stats.total).unwrap_or(u64::MAX),
         0,
         0,
         0,
@@ -5720,17 +5542,6 @@ fn restore_backup(db: &Database, path: &std::path::Path) -> Result<()> {
     );
 
     Ok(())
-}
-
-/// Read a JSON entry from a ZIP archive.
-fn read_json_entry<T: serde::de::DeserializeOwned>(
-    archive: &mut zip::ZipArchive<std::fs::File>,
-    name: &str,
-) -> Result<T> {
-    let entry = archive
-        .by_name(name)
-        .with_context(|| format!("missing backup entry: {name}"))?;
-    serde_json::from_reader(entry).with_context(|| format!("failed to parse backup entry: {name}"))
 }
 
 // ------------------------------------------------------------------

@@ -682,6 +682,31 @@ impl Database {
         Ok(())
     }
 
+    /// Set (or clear) a content item's `read_at` timestamp without touching its
+    /// triage status.
+    ///
+    /// Backs the mobile facade's mark-read / mark-unread toggles (#118), which
+    /// flip read state independently of the `inbox → archived` workflow that
+    /// [`Self::update_content_item_status`] drives.
+    pub fn set_content_item_read_at(
+        &self,
+        id: Uuid,
+        read_at: Option<OffsetDateTime>,
+    ) -> Result<(), StorageError> {
+        let now = fmt_time(OffsetDateTime::now_utc());
+        let affected = self.conn.execute(
+            "UPDATE content_items SET read_at = ?1, updated_at = ?2 WHERE id = ?3",
+            params![read_at.map(fmt_time), now, id.to_string()],
+        )?;
+        if affected == 0 {
+            return Err(StorageError::NotFound {
+                entity: "content_item",
+                id: id.to_string(),
+            });
+        }
+        Ok(())
+    }
+
     /// Count content items matching a status filter.
     pub fn count_content_items(&self, status: Option<DocumentStatus>) -> Result<u64, StorageError> {
         let count: i64 = if let Some(st) = status {
@@ -3291,6 +3316,63 @@ impl Database {
             |row| row.get(0),
         )?;
         Ok(count == 0)
+    }
+
+    /// Delete all user data, leaving the schema and migration history intact.
+    ///
+    /// Clears every content, organization, annotation, review, feed, rule, and
+    /// diagnostics-log table (and the FTS index), inside a single transaction
+    /// with foreign keys disabled so table order does not matter. Afterwards
+    /// [`Self::is_empty`] is `true`, which is what a restore-over-existing flow
+    /// (iOS "restore backup", ADR-020) needs before calling
+    /// [`Self::restore_backup`].
+    #[allow(clippy::missing_errors_doc)]
+    pub fn reset(&self) -> Result<(), StorageError> {
+        // Order is irrelevant with FKs off, but child-before-parent keeps intent
+        // clear. `content_items_fts` is a plain FTS5 virtual table maintained by
+        // hand (no sync triggers), so it must be cleared explicitly.
+        const TABLES: &[&str] = &[
+            "content_items_fts",
+            "content_item_tags",
+            "content_item_collections",
+            "review_logs",
+            "review_cards",
+            "highlight_meta",
+            "bookmark_meta",
+            "feed_item_meta",
+            "notes",
+            "link_health",
+            "content_rules",
+            "content_items",
+            "tags",
+            "collections",
+            "feeds",
+            "feed_folders",
+            "import_log",
+            "extraction_log",
+        ];
+
+        self.conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
+        let result = (|| {
+            self.conn.execute_batch("BEGIN;")?;
+            let inner = (|| {
+                for table in TABLES {
+                    self.conn.execute_batch(&format!("DELETE FROM {table};"))?;
+                }
+                Ok::<(), StorageError>(())
+            })();
+            match inner {
+                Ok(()) => self.conn.execute_batch("COMMIT;")?,
+                Err(e) => {
+                    let _ = self.conn.execute_batch("ROLLBACK;");
+                    return Err(e);
+                }
+            }
+            Ok::<(), StorageError>(())
+        })();
+        // Re-enable FK enforcement regardless of outcome.
+        self.conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+        result
     }
 
     /// Restore a full backup into this database.

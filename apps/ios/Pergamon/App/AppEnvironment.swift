@@ -6,6 +6,10 @@ extension Notification.Name {
     /// or a card is graded) so the Review tab's due-count badge can refresh
     /// without polling. Kept app-level so any surface can raise it.
     static let pergamonReviewStateChanged = Notification.Name("pergamonReviewStateChanged")
+
+    /// Posted after a bulk change to the whole library (a backup restore) so
+    /// every list surface reloads from the core instead of showing stale rows.
+    static let pergamonLibraryDidChange = Notification.Name("pergamonLibraryDidChange")
 }
 
 /// The app's dependency-injection container and single owner of the Rust core
@@ -23,28 +27,44 @@ extension Notification.Name {
 /// from view models.
 @MainActor
 final class AppEnvironment: ObservableObject {
-    /// The stateful entry point into `pergamon-core`. Backed by an in-memory
-    /// seeded corpus today; the on-device SQLite store lands with #118 (see
-    /// `StorageLocation`).
+    /// The stateful entry point into `pergamon-core`. Backed by the on-device
+    /// SQLite store at `storage.databaseURL` (#118), or — if that database
+    /// cannot be opened — by an in-memory seeded corpus so the app still
+    /// launches. See `usingPersistentStore`.
     let library: Library
 
     /// Where the on-device store lives (ADR-020). Resolved and prepared on
-    /// launch; not yet handed to `Library` (that is the #118 seam).
+    /// launch and handed to `Library.open` (#118).
     let storage: StorageLocation
 
     /// The resolved `pergamon-core` version, surfaced in the UI as provenance.
     let coreVersion: String
 
+    /// `true` when `library` is backed by the persistent SQLite database;
+    /// `false` when the app fell back to the in-memory seed (e.g. a corrupt or
+    /// unwritable database). Surfaced in the backup/settings UI.
+    let usingPersistentStore: Bool
+
     init() {
         // 1. Resolve + prepare the on-device storage container (ADR-020). This
         //    creates the App Group directory tree and excludes blobs from
-        //    backup, even though the in-memory Library does not read it yet.
+        //    backup.
         let storage = StorageLocation.resolve()
         self.storage = storage
 
-        // 2. Open the core. TODO(#118): open the SQLite-backed library at
-        //    `storage.databaseURL` instead of the in-memory seed.
-        self.library = Library()
+        // 2. Open the SQLite-backed library at `storage.databaseURL` (#118),
+        //    seeding the demo corpus on first launch. If opening fails (a
+        //    corrupt database, an unwritable container), fall back to the
+        //    in-memory seed so the app always launches.
+        do {
+            self.library = try Library.open(path: storage.databaseURL.path)
+            self.usingPersistentStore = true
+        } catch {
+            print("[bootstrap] failed to open SQLite library at \(storage.databaseURL.path): \(error)")
+            print("[bootstrap] falling back to in-memory seeded corpus")
+            self.library = Library()
+            self.usingPersistentStore = false
+        }
         self.coreVersion = libraryVersion()
 
         logBootstrap()
@@ -52,7 +72,9 @@ final class AppEnvironment: ObservableObject {
 
     private func logBootstrap() {
         let backing = storage.usingAppGroup ? "App Group" : "app container (fallback)"
+        let store = usingPersistentStore ? "SQLite" : "in-memory seed (fallback)"
         print("[bootstrap] pergamon-core \(coreVersion)")
+        print("[bootstrap] library: \(store)")
         print("[bootstrap] storage: \(backing) → \(storage.databaseURL.path)")
         print("[bootstrap] blobs (backup-excluded): \(storage.blobsURL.path)")
     }
