@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-02
+
 ### Added
 
 - iOS share extension for URL and text capture (#119): share a link and/or selected text from any app's share sheet straight into pergamon. The extension stages each capture instantly and offline — no network, extraction, or database work happens while you share — and the app finalizes staged captures the next time it opens or comes to the foreground, canonicalizing and de-duplicating the URL, saving it as a bookmark in the inbox, and attaching any shared selection as a highlight. Finalization is crash-safe and idempotent, so a capture is never lost or duplicated
