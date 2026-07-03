@@ -15,9 +15,10 @@
 //!   `throws`.
 //! - **Object handle** ([`Library`]): the stateful entry point the app drives
 //!   (`inbox`, `items`, `item`, `search`, and triage mutations `mark_read`,
-//!   `archive`, `save_for_later`, ...). Backed by an in-memory seeded corpus for
-//!   now; the on-device SQLite store lands with the offline-database work
-//!   (#118 / ADR-020).
+//!   `archive`, `save_for_later`, ...). Backed by the on-device SQLite store
+//!   (`pergamon-storage`) so reads and mutations persist across launches
+//!   (#118 / ADR-020). Open the persistent library with [`Library::open`];
+//!   [`Library::new`] keeps an in-memory seeded corpus for tests and previews.
 //! - **Free functions** ([`library_version`], [`reading_minutes`]): stateless
 //!   helpers.
 //!
@@ -35,14 +36,22 @@
 // Product/tech names (UniFFI, SwiftUI, SQLite, ...) recur throughout the docs.
 #![allow(clippy::doc_markdown)]
 
-use std::sync::{Arc, Mutex, PoisonError};
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use pergamon_core::content_type::ContentType as CoreContentType;
 use pergamon_core::error::CoreError;
 use pergamon_core::fsrs::{CardState, MemoryState, Parameters, Rating, Scheduler};
-use pergamon_core::model::ContentItem as CoreContentItem;
+use pergamon_core::model::{
+    Collection as CoreCollection, ContentItem as CoreContentItem, Feed as CoreFeed,
+    FeedItemMeta as CoreFeedItemMeta, ReviewCard as CoreReviewCard, ReviewLog as CoreReviewLog,
+};
 use pergamon_core::reading_time::reading_time_from_text;
 use pergamon_core::status::DocumentStatus as CoreStatus;
+
+use pergamon_storage::backup;
+use pergamon_storage::{BackupStats, Database, StorageError};
 
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -355,92 +364,6 @@ fn millis(dt: OffsetDateTime) -> i64 {
     ms
 }
 
-/// An internal seed row: a core content item plus the FFI-only feed/source name
-/// it was captured from, the tags assigned to it, and the collections it belongs
-/// to. These organization fields live here (not on `pergamon_core`) so the
-/// facade can offer tagging, collections, and feed filtering without changing
-/// the core model.
-#[derive(Debug, Clone)]
-struct Row {
-    item: CoreContentItem,
-    source: Option<String>,
-    /// Display names of the tags on this item (deduplicated case-insensitively).
-    tags: Vec<String>,
-    /// Ids of the collections this item belongs to.
-    collection_ids: Vec<Uuid>,
-}
-
-/// An internal tag registry entry. Tags are matched case-insensitively via
-/// [`normalize_tag`] but keep their first-seen display form in `name`.
-#[derive(Debug, Clone)]
-struct TagRow {
-    id: Uuid,
-    name: String,
-}
-
-/// An internal collection registry entry mirroring the nesting fields of
-/// `pergamon_core::model::Collection` the facade cares about.
-#[derive(Debug, Clone)]
-struct CollectionRow {
-    id: Uuid,
-    name: String,
-    parent_id: Option<Uuid>,
-}
-
-/// An internal highlight row: a quote captured from a content item plus an
-/// optional note. Mirrors the fields of `pergamon_core::model::HighlightMeta`
-/// the facade exposes, with its own identity and capture timestamp.
-#[derive(Debug, Clone)]
-struct HighlightRow {
-    id: Uuid,
-    item_id: Uuid,
-    quote_text: String,
-    note: Option<String>,
-    created_at: OffsetDateTime,
-}
-
-/// An internal spaced-repetition card row, mirroring the scheduling fields of
-/// `pergamon_core::model::ReviewCard`. One card backs one highlight. Scheduling
-/// is driven by `pergamon_core::fsrs::Scheduler`, the same engine the CLI uses,
-/// so review state stays consistent across clients on the same library.
-#[derive(Debug, Clone)]
-struct ReviewCardRow {
-    id: Uuid,
-    highlight_id: Uuid,
-    state: CardState,
-    stability: Option<f64>,
-    difficulty: Option<f64>,
-    due_at: OffsetDateTime,
-    last_reviewed_at: Option<OffsetDateTime>,
-    review_count: i32,
-    lapse_count: i32,
-    scheduled_days: Option<f64>,
-}
-
-/// An internal review-log row recording a single grade event, mirroring
-/// `pergamon_core::model::ReviewLog`. Grade buttons append one of these so the
-/// facade can report reviews-per-day and keep a per-card history.
-#[derive(Debug, Clone)]
-struct ReviewLogRow {
-    card_id: Uuid,
-    reviewed_at: OffsetDateTime,
-}
-
-/// The facade's in-memory state: content rows plus the tag and collection
-/// registries, and the highlight / review-card / review-log tables. Guarded by
-/// a single `Mutex` so multi-entity mutations (adding a tag both registers it
-/// and stamps the row; capturing a highlight both records it and creates a card)
-/// stay consistent without lock ordering concerns.
-#[derive(Debug, Clone)]
-struct Store {
-    rows: Vec<Row>,
-    tags: Vec<TagRow>,
-    collections: Vec<CollectionRow>,
-    highlights: Vec<HighlightRow>,
-    review_cards: Vec<ReviewCardRow>,
-    review_logs: Vec<ReviewLogRow>,
-}
-
 /// Case-insensitive matching key for a tag name: trimmed and lowercased.
 fn normalize_tag(name: &str) -> String {
     name.trim().to_lowercase()
@@ -460,14 +383,23 @@ fn clean_note(note: Option<String>) -> Option<String> {
     note.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty())
 }
 
-/// Whether a row matches the (already lowercased) search `needle` across title,
-/// author, excerpt, URL, and extracted content. An empty needle matches every
-/// row (facets do the narrowing in that case).
-fn text_matches(row: &Row, needle: &str) -> bool {
+/// Whether a core content item is a *document* (anything the app lists in the
+/// inbox/library) rather than a highlight.
+///
+/// Highlights are stored as `content_items` (type `highlight`) with a linked
+/// `highlight_meta` row, so every document-facing read path must filter them out
+/// or the inbox and per-tag/collection counts would double-count annotations.
+fn is_document(item: &CoreContentItem) -> bool {
+    item.content_type != CoreContentType::Highlight
+}
+
+/// Whether an FFI content item matches the (already lowercased) search `needle`
+/// across title, author, excerpt, URL, and extracted content. An empty needle
+/// matches everything (facets do the narrowing in that case).
+fn item_text_matches(item: &ContentItem, needle: &str) -> bool {
     if needle.is_empty() {
         return true;
     }
-    let item = &row.item;
     let hit = |field: Option<&String>| field.is_some_and(|v| v.to_lowercase().contains(needle));
     item.title.to_lowercase().contains(needle)
         || hit(item.author.as_ref())
@@ -476,24 +408,20 @@ fn text_matches(row: &Row, needle: &str) -> bool {
         || hit(item.content_text.as_ref())
 }
 
-/// Whether a row satisfies every active facet (AND-combined).
-fn facets_match(row: &Row, facets: &SearchFacets) -> bool {
-    let item = &row.item;
+/// Whether an FFI content item satisfies every active facet (AND-combined).
+fn item_facets_match(item: &ContentItem, facets: &SearchFacets) -> bool {
     if facets
         .content_type
-        .is_some_and(|ct| ContentType::from(item.content_type) != ct)
+        .is_some_and(|ct| item.content_type != ct)
     {
         return false;
     }
-    if facets
-        .status
-        .is_some_and(|status| Status::from(item.status) != status)
-    {
+    if facets.status.is_some_and(|status| item.status != status) {
         return false;
     }
     if let Some(tag) = facets.tag.as_ref().filter(|t| !t.trim().is_empty()) {
         let key = normalize_tag(tag);
-        if !row.tags.iter().any(|t| normalize_tag(t) == key) {
+        if !item.tags.iter().any(|t| normalize_tag(t) == key) {
             return false;
         }
     }
@@ -501,11 +429,11 @@ fn facets_match(row: &Row, facets: &SearchFacets) -> bool {
         .source
         .as_ref()
         .filter(|s| !s.trim().is_empty())
-        .is_some_and(|source| row.source.as_deref() != Some(source.as_str()))
+        .is_some_and(|source| item.source_name.as_deref() != Some(source.as_str()))
     {
         return false;
     }
-    date_range_matches(item.published_at.map(millis), facets)
+    date_range_matches(item.published_at_millis, facets)
 }
 
 /// Whether an item's publication time (epoch millis) satisfies the optional
@@ -530,9 +458,19 @@ fn date_range_matches(published: Option<i64>, facets: &SearchFacets) -> bool {
     true
 }
 
+/// Whether the search request has at least one active facet.
+fn has_active_facets(facets: &SearchFacets) -> bool {
+    facets.content_type.is_some()
+        || facets.status.is_some()
+        || facets.tag.as_ref().is_some_and(|t| !t.trim().is_empty())
+        || facets.source.as_ref().is_some_and(|s| !s.trim().is_empty())
+        || facets.since_millis.is_some()
+        || facets.before_millis.is_some()
+}
+
 /// The 0-based nesting depth of a collection (root = 0), walking `parent_id`.
 /// Guards against cycles by capping at the number of collections.
-fn collection_depth(collections: &[CollectionRow], id: Uuid) -> u32 {
+fn collection_depth(collections: &[CoreCollection], id: Uuid) -> u32 {
     let mut depth = 0u32;
     let mut current = collections
         .iter()
@@ -553,114 +491,156 @@ fn collection_depth(collections: &[CollectionRow], id: Uuid) -> u32 {
     depth
 }
 
-/// Builds the FFI collection list in depth-first tree order (each parent
-/// immediately followed by its children), with per-collection item counts and
-/// precomputed depths for indented rendering.
-fn ordered_collections(store: &Store) -> Vec<Collection> {
-    fn item_count(store: &Store, id: Uuid) -> u32 {
-        let count = store
-            .rows
-            .iter()
-            .filter(|row| row.collection_ids.contains(&id))
-            .count();
-        u32::try_from(count).unwrap_or(u32::MAX)
-    }
-
-    fn push_children(store: &Store, parent: Option<Uuid>, depth: u32, out: &mut Vec<Collection>) {
-        let mut children: Vec<&CollectionRow> = store
-            .collections
-            .iter()
-            .filter(|c| c.parent_id == parent)
-            .collect();
-        children.sort_by_key(|c| c.name.to_lowercase());
-        for child in children {
-            out.push(Collection {
-                id: child.id.to_string(),
-                name: child.name.clone(),
-                parent_id: child.parent_id.map(|p| p.to_string()),
-                item_count: item_count(store, child.id),
-                depth,
-            });
-            push_children(store, Some(child.id), depth + 1, out);
-        }
-    }
-
-    let mut out = Vec::with_capacity(store.collections.len());
-    push_children(store, None, 0, &mut out);
-    out
+/// Precomputed per-item organization lookups (source name, tag names, collection
+/// ids), built once per read so list assembly avoids per-item queries.
+struct Lookups {
+    /// content item id → feed title (the FFI `source_name`).
+    source_names: HashMap<Uuid, String>,
+    /// content item id → tag display names, sorted case-insensitively.
+    tag_names: HashMap<Uuid, Vec<String>>,
+    /// content item id → collection id strings, ordered by sort order.
+    collection_ids: HashMap<Uuid, Vec<String>>,
 }
 
-impl ContentItem {
-    /// Builds the FFI view from a seed [`Row`], folding in the FFI-only source
-    /// name alongside the core fields.
-    fn from_row(row: &Row) -> Self {
-        let item = &row.item;
-        let reading_minutes = item
+impl Lookups {
+    /// Builds the lookups from the whole library in a handful of bulk queries.
+    fn build(db: &Database) -> Result<Self, StorageError> {
+        let feed_titles: HashMap<Uuid, String> = db
+            .list_feeds()?
+            .into_iter()
+            .map(|f| (f.id, f.title))
+            .collect();
+        let mut source_names = HashMap::new();
+        for meta in db.list_all_feed_item_meta()? {
+            if let Some(title) = feed_titles.get(&meta.feed_id) {
+                source_names.insert(meta.content_item_id, title.clone());
+            }
+        }
+
+        let tag_names_by_id: HashMap<Uuid, String> = db
+            .list_tags()?
+            .into_iter()
+            .map(|t| (t.id, t.name))
+            .collect();
+        let mut tag_names: HashMap<Uuid, Vec<String>> = HashMap::new();
+        for (item_id, tag_id) in db.list_all_content_item_tags()? {
+            if let Some(name) = tag_names_by_id.get(&tag_id) {
+                tag_names.entry(item_id).or_default().push(name.clone());
+            }
+        }
+        for names in tag_names.values_mut() {
+            names.sort_by_key(|a| a.to_lowercase());
+        }
+
+        let mut coll_rows: HashMap<Uuid, Vec<(i32, Uuid)>> = HashMap::new();
+        for (item_id, coll_id, sort) in db.list_all_collection_items()? {
+            coll_rows.entry(item_id).or_default().push((sort, coll_id));
+        }
+        let mut collection_ids: HashMap<Uuid, Vec<String>> = HashMap::new();
+        for (item_id, mut rows) in coll_rows {
+            rows.sort_by_key(|(sort, _)| *sort);
+            collection_ids.insert(
+                item_id,
+                rows.into_iter().map(|(_, id)| id.to_string()).collect(),
+            );
+        }
+
+        Ok(Self {
+            source_names,
+            tag_names,
+            collection_ids,
+        })
+    }
+
+    /// Builds the FFI [`ContentItem`] view for a core item, folding in the
+    /// FFI-only source name, tags, and collection ids.
+    fn item_view(&self, core: &CoreContentItem) -> ContentItem {
+        let reading_minutes = core
             .content_text
             .as_deref()
             .map_or(0, reading_time_from_text);
-        Self {
-            id: item.id.to_string(),
-            title: item.title.clone(),
-            url: item.url.clone(),
-            author: item.author.clone(),
-            content_type: item.content_type.into(),
-            status: item.status.into(),
-            excerpt: item.excerpt.clone(),
-            content_text: item.content_text.clone(),
-            source_name: row.source.clone(),
-            published_at_millis: item.published_at.map(millis),
-            read_at_millis: item.read_at.map(millis),
+        ContentItem {
+            id: core.id.to_string(),
+            title: core.title.clone(),
+            url: core.url.clone(),
+            author: core.author.clone(),
+            content_type: core.content_type.into(),
+            status: core.status.into(),
+            excerpt: core.excerpt.clone(),
+            content_text: core.content_text.clone(),
+            source_name: self.source_names.get(&core.id).cloned(),
+            published_at_millis: core.published_at.map(millis),
+            read_at_millis: core.read_at.map(millis),
             reading_minutes,
-            tags: row.tags.clone(),
-            collection_ids: row.collection_ids.iter().map(Uuid::to_string).collect(),
+            tags: self.tag_names.get(&core.id).cloned().unwrap_or_default(),
+            collection_ids: self
+                .collection_ids
+                .get(&core.id)
+                .cloned()
+                .unwrap_or_default(),
         }
     }
 }
 
-impl Store {
-    /// The display title of the content item a highlight/card belongs to,
-    /// denormalized into the FFI views so the app renders a queue card without a
-    /// second lookup. Falls back to a placeholder for an orphaned reference.
-    fn source_title(&self, item_id: Uuid) -> String {
-        self.rows
-            .iter()
-            .find(|row| row.item.id == item_id)
-            .map_or_else(|| "Unknown source".to_owned(), |row| row.item.title.clone())
-    }
+/// Assembles the document (non-highlight) items for a status filter, newest
+/// first, with organization fields folded in.
+fn list_documents(
+    db: &Database,
+    status: Option<CoreStatus>,
+) -> Result<Vec<ContentItem>, StorageError> {
+    let lookups = Lookups::build(db)?;
+    let items = match status {
+        Some(st) => db.list_content_items(None, Some(st), None, None)?,
+        None => db.list_all_content_items()?,
+    };
+    Ok(items
+        .iter()
+        .filter(|i| is_document(i))
+        .map(|i| lookups.item_view(i))
+        .collect())
+}
 
-    /// Builds the FFI [`Highlight`] view from an internal row, folding in the
-    /// source title and whether a review card exists.
-    fn highlight_view(&self, hl: &HighlightRow) -> Highlight {
-        Highlight {
-            id: hl.id.to_string(),
-            item_id: hl.item_id.to_string(),
-            quote_text: hl.quote_text.clone(),
-            note: hl.note.clone(),
-            source_title: self.source_title(hl.item_id),
-            created_at_millis: millis(hl.created_at),
-            has_review_card: self.review_cards.iter().any(|c| c.highlight_id == hl.id),
-        }
-    }
+/// Reads a single item and folds in its organization fields.
+fn view_item(db: &Database, id: Uuid) -> Result<ContentItem, StorageError> {
+    let core = db.get_content_item(id)?;
+    let lookups = Lookups::build(db)?;
+    Ok(lookups.item_view(&core))
+}
 
-    /// Builds the FFI [`ReviewCardView`] by joining a card with its backing
-    /// highlight. Returns `None` if the highlight has gone (a dangling card),
-    /// which callers filter out.
-    fn card_view(&self, card: &ReviewCardRow) -> Option<ReviewCardView> {
-        let hl = self.highlights.iter().find(|h| h.id == card.highlight_id)?;
-        Some(ReviewCardView {
-            card_id: card.id.to_string(),
-            highlight_id: hl.id.to_string(),
-            item_id: hl.item_id.to_string(),
-            quote_text: hl.quote_text.clone(),
-            note: hl.note.clone(),
-            source_title: self.source_title(hl.item_id),
-            state: card.state.into(),
-            due_at_millis: millis(card.due_at),
-            review_count: u32::try_from(card.review_count).unwrap_or(0),
-            last_reviewed_at_millis: card.last_reviewed_at.map(millis),
-        })
-    }
+/// Builds the FFI [`ReviewCardView`] by joining a card with its backing
+/// highlight. Returns `None` for a dangling card (highlight gone), which callers
+/// filter out.
+fn card_view(db: &Database, card: &CoreReviewCard) -> Result<Option<ReviewCardView>, StorageError> {
+    let meta = match db.get_highlight_meta(card.content_item_id) {
+        Ok(meta) => meta,
+        Err(StorageError::NotFound { .. }) => return Ok(None),
+        Err(err) => return Err(err),
+    };
+    let source_title = source_title(db, meta.source_item_id);
+    Ok(Some(ReviewCardView {
+        card_id: card.id.to_string(),
+        highlight_id: card.content_item_id.to_string(),
+        item_id: meta
+            .source_item_id
+            .map(|s| s.to_string())
+            .unwrap_or_default(),
+        quote_text: meta.quote_text,
+        note: meta.note,
+        source_title,
+        state: card.state.into(),
+        due_at_millis: millis(card.due_at),
+        review_count: u32::try_from(card.review_count).unwrap_or(0),
+        last_reviewed_at_millis: card.last_reviewed_at.map(millis),
+    }))
+}
+
+/// The display title of a highlight's source document, denormalized into the FFI
+/// views so a queue card renders without a second lookup. Falls back to a
+/// placeholder for an orphaned reference.
+fn source_title(db: &Database, source_item_id: Option<Uuid>) -> String {
+    source_item_id
+        .and_then(|id| db.get_content_item(id).ok())
+        .map_or_else(|| "Unknown source".to_owned(), |item| item.title)
 }
 
 /// A single, **flat** error type mapped to Swift `throws`, per ADR-019.
@@ -685,9 +665,6 @@ pub enum PergamonError {
         message: String,
     },
     /// An on-device storage operation failed.
-    ///
-    /// Reserved for the SQLite-backed `Library` (#118); unused while the corpus
-    /// is in-memory.
     #[error("{message}")]
     Storage {
         /// Human-readable detail.
@@ -725,18 +702,84 @@ impl From<CoreError> for PergamonError {
     }
 }
 
-/// Build the seeded in-memory [`Store`]: content rows plus the tag and
-/// collection registries.
+impl From<StorageError> for PergamonError {
+    fn from(err: StorageError) -> Self {
+        match err {
+            StorageError::NotFound { .. } => Self::NotFound {
+                message: err.to_string(),
+            },
+            StorageError::Domain(core) => core.into(),
+            StorageError::Constraint(message) => Self::InvalidInput { message },
+            other => Self::Storage {
+                message: other.to_string(),
+            },
+        }
+    }
+}
+
+/// Record counts from a completed backup export or restore, surfaced to the app
+/// so it can confirm how much data moved.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct BackupSummary {
+    /// Number of feeds.
+    pub feeds: u32,
+    /// Number of content items (documents and highlights).
+    pub content_items: u32,
+    /// Number of tags.
+    pub tags: u32,
+    /// Number of collections.
+    pub collections: u32,
+    /// Number of standalone notes.
+    pub notes: u32,
+    /// Number of spaced-repetition review cards.
+    pub review_cards: u32,
+    /// Total records moved across every table.
+    pub total: u32,
+}
+
+impl From<BackupStats> for BackupSummary {
+    fn from(stats: BackupStats) -> Self {
+        let cast = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+        Self {
+            feeds: cast(stats.feeds),
+            content_items: cast(stats.content_items),
+            tags: cast(stats.tags),
+            collections: cast(stats.collections),
+            notes: cast(stats.notes),
+            review_cards: cast(stats.review_cards),
+            total: cast(stats.total),
+        }
+    }
+}
+
+/// Provenance and size information about the backing store, for the app's
+/// settings/diagnostics surface.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct StorageInfo {
+    /// Current database schema (migration) version.
+    pub schema_version: u32,
+    /// Number of document (non-highlight) content items.
+    pub document_count: u32,
+    /// Number of captured highlights.
+    pub highlight_count: u32,
+}
+
+/// Writes the seeded demo corpus into an (empty) database.
 ///
-/// Uses fixed UUIDs and timestamps so [`Library::item`] is deterministic across runs.
+/// Uses fixed UUIDs and timestamps so [`Library::item`] is deterministic across
+/// runs and tests. Seeds four feeds (providing the source names), five documents
+/// linked to their feeds, the tag and collection registries with memberships,
+/// and two highlights — each with a New review card due in the past so the
+/// review queue is populated on first launch.
 #[allow(clippy::too_many_lines)] // a flat, readable table of seed rows
-fn seed() -> Store {
+fn seed(db: &Database) -> Result<(), StorageError> {
     fn at(secs: i64) -> OffsetDateTime {
         OffsetDateTime::from_unix_timestamp(secs).unwrap_or(OffsetDateTime::UNIX_EPOCH)
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn item(
+    fn insert_item(
+        db: &Database,
         n: u128,
         title: &str,
         url: &str,
@@ -746,10 +789,10 @@ fn seed() -> Store {
         excerpt: &str,
         text: &str,
         published: i64,
-        source: Option<&str>,
-    ) -> Row {
+        feed_id: Option<Uuid>,
+    ) -> Result<(), StorageError> {
         let created = at(published + 60);
-        let core = CoreContentItem {
+        let item = CoreContentItem {
             id: Uuid::from_u128(n),
             url: Some(url.to_owned()),
             title: title.to_owned(),
@@ -767,149 +810,189 @@ fn seed() -> Store {
                 None
             },
         };
-        Row {
-            item: core,
-            source: source.map(ToOwned::to_owned),
-            tags: Vec::new(),
-            collection_ids: Vec::new(),
+        db.insert_content_item(&item)?;
+        if let Some(feed_id) = feed_id {
+            db.insert_feed_item_meta(&CoreFeedItemMeta {
+                content_item_id: item.id,
+                feed_id,
+                guid: None,
+                summary: None,
+            })?;
         }
+        Ok(())
     }
 
-    // Fixed collection ids (offset from the item id space to avoid collisions).
+    let feed_created = at(1_577_836_800);
+    let ink_switch = Uuid::from_u128(2001);
+    let memory_weekly = Uuid::from_u128(2002);
+    let rust_mobile = Uuid::from_u128(2003);
+    let reader_diaries = Uuid::from_u128(2004);
+    let feeds = [
+        (
+            ink_switch,
+            "Ink & Switch",
+            "https://www.inkandswitch.com/feed.xml",
+        ),
+        (
+            memory_weekly,
+            "Memory Weekly",
+            "https://example.org/memory-weekly.xml",
+        ),
+        (
+            rust_mobile,
+            "Rust Mobile Weekly",
+            "https://example.org/rust-mobile.xml",
+        ),
+        (
+            reader_diaries,
+            "Reader Diaries",
+            "https://example.org/reader-diaries.xml",
+        ),
+    ];
+    for (id, title, url) in feeds {
+        db.insert_feed(&CoreFeed {
+            id,
+            title: title.to_owned(),
+            url: url.to_owned(),
+            site_url: None,
+            description: None,
+            etag: None,
+            last_modified_header: None,
+            error_count: 0,
+            last_error: None,
+            last_fetched_at: None,
+            folder_id: None,
+            created_at: feed_created,
+            updated_at: feed_created,
+        })?;
+    }
+
+    insert_item(
+        db,
+        1,
+        "Local-first software: you own your data",
+        "https://www.inkandswitch.com/local-first/",
+        Some("Ink & Switch"),
+        CoreContentType::Article,
+        CoreStatus::Inbox,
+        "Seven ideals for software that keeps your data on your own devices.",
+        &"word ".repeat(620),
+        1_577_836_800,
+        Some(ink_switch),
+    )?;
+    insert_item(
+        db,
+        2,
+        "Designing a spaced-repetition scheduler with FSRS",
+        "https://example.org/fsrs-deep-dive",
+        Some("A. Researcher"),
+        CoreContentType::Article,
+        CoreStatus::Later,
+        "How the Free Spaced Repetition Scheduler models memory stability.",
+        &"word ".repeat(1400),
+        1_609_459_200,
+        Some(memory_weekly),
+    )?;
+    insert_item(
+        db,
+        3,
+        "The Rust + UniFFI mobile toolchain",
+        "https://example.org/rust-uniffi-mobile",
+        Some("M. Mobile"),
+        CoreContentType::FeedItem,
+        CoreStatus::Reading,
+        "Sharing a Rust core across iOS and Android without hand-written FFI.",
+        &"word ".repeat(300),
+        1_640_995_200,
+        Some(rust_mobile),
+    )?;
+    insert_item(
+        db,
+        4,
+        "pergamon roadmap notes",
+        "https://example.org/pergamon-notes.pdf",
+        None,
+        CoreContentType::Pdf,
+        CoreStatus::Reference,
+        "Working notes captured as a PDF for later reference.",
+        &"word ".repeat(90),
+        1_672_531_200,
+        None,
+    )?;
+    insert_item(
+        db,
+        5,
+        "Why I switched from Inoreader",
+        "https://example.org/switching",
+        Some("Power User"),
+        CoreContentType::Bookmark,
+        CoreStatus::Archived,
+        "A migration story toward a unified, local-first reading workflow.",
+        &"word ".repeat(210),
+        1_704_067_200,
+        Some(reader_diaries),
+    )?;
+
+    // Tag registry + membership. `get_or_create_tag` keeps the first-seen form.
+    let tag_ids: HashMap<&str, Uuid> = ["local-first", "reading", "memory", "rust", "ios"]
+        .into_iter()
+        .map(|name| Ok((name, db.get_or_create_tag(name)?.id)))
+        .collect::<Result<_, StorageError>>()?;
+    let tag = |item: u128, name: &str| -> Result<(), StorageError> {
+        db.tag_content_item(Uuid::from_u128(item), tag_ids[name])
+    };
+    tag(1, "local-first")?;
+    tag(1, "reading")?;
+    tag(2, "memory")?;
+    tag(2, "reading")?;
+    tag(3, "rust")?;
+    tag(3, "ios")?;
+    tag(5, "reading")?;
+
+    // Collections: Deep Dives nests under Reading List; Tech is a second root.
     let reading_list = Uuid::from_u128(101);
     let deep_dives = Uuid::from_u128(102);
     let tech = Uuid::from_u128(103);
+    let coll_created = at(1_577_836_800);
+    let insert_collection =
+        |id: Uuid, name: &str, parent: Option<Uuid>| -> Result<(), StorageError> {
+            db.insert_collection(&CoreCollection {
+                id,
+                name: name.to_owned(),
+                parent_id: parent,
+                sort_order: 0,
+                is_smart: false,
+                filter_query: None,
+                created_at: coll_created,
+                updated_at: coll_created,
+            })
+        };
+    insert_collection(reading_list, "Reading List", None)?;
+    insert_collection(deep_dives, "Deep Dives", Some(reading_list))?;
+    insert_collection(tech, "Tech", None)?;
+    db.add_to_collection(Uuid::from_u128(1), reading_list, 0)?;
+    db.add_to_collection(Uuid::from_u128(2), deep_dives, 0)?;
+    db.add_to_collection(Uuid::from_u128(3), tech, 0)?;
+    db.add_to_collection(Uuid::from_u128(5), reading_list, 0)?;
 
-    let collections = vec![
-        CollectionRow {
-            id: reading_list,
-            name: "Reading List".to_owned(),
-            parent_id: None,
-        },
-        CollectionRow {
-            id: deep_dives,
-            name: "Deep Dives".to_owned(),
-            parent_id: Some(reading_list),
-        },
-        CollectionRow {
-            id: tech,
-            name: "Tech".to_owned(),
-            parent_id: None,
-        },
-    ];
-
-    // The tag registry keeps a first-seen display form; membership on rows uses
-    // the same display strings.
-    let tags = ["local-first", "reading", "memory", "rust", "ios"]
-        .iter()
-        .enumerate()
-        .map(|(i, name)| TagRow {
-            id: Uuid::from_u128(201 + i as u128),
-            name: (*name).to_owned(),
-        })
-        .collect();
-
-    let lorem = "word ".repeat(620);
-    let mut rows = vec![
-        item(
-            1,
-            "Local-first software: you own your data",
-            "https://www.inkandswitch.com/local-first/",
-            Some("Ink & Switch"),
-            CoreContentType::Article,
-            CoreStatus::Inbox,
-            "Seven ideals for software that keeps your data on your own devices.",
-            &lorem,
-            1_577_836_800,
-            Some("Ink & Switch"),
-        ),
-        item(
-            2,
-            "Designing a spaced-repetition scheduler with FSRS",
-            "https://example.org/fsrs-deep-dive",
-            Some("A. Researcher"),
-            CoreContentType::Article,
-            CoreStatus::Later,
-            "How the Free Spaced Repetition Scheduler models memory stability.",
-            &"word ".repeat(1400),
-            1_609_459_200,
-            Some("Memory Weekly"),
-        ),
-        item(
-            3,
-            "The Rust + UniFFI mobile toolchain",
-            "https://example.org/rust-uniffi-mobile",
-            Some("M. Mobile"),
-            CoreContentType::FeedItem,
-            CoreStatus::Reading,
-            "Sharing a Rust core across iOS and Android without hand-written FFI.",
-            &"word ".repeat(300),
-            1_640_995_200,
-            Some("Rust Mobile Weekly"),
-        ),
-        item(
-            4,
-            "pergamon roadmap notes",
-            "https://example.org/pergamon-notes.pdf",
-            None,
-            CoreContentType::Pdf,
-            CoreStatus::Reference,
-            "Working notes captured as a PDF for later reference.",
-            &"word ".repeat(90),
-            1_672_531_200,
-            None,
-        ),
-        item(
-            5,
-            "Why I switched from Inoreader",
-            "https://example.org/switching",
-            Some("Power User"),
-            CoreContentType::Bookmark,
-            CoreStatus::Archived,
-            "A migration story toward a unified, local-first reading workflow.",
-            &"word ".repeat(210),
-            1_704_067_200,
-            Some("Reader Diaries"),
-        ),
-    ];
-
-    // Seed tag and collection membership across the corpus.
-    rows[0].tags = vec!["local-first".to_owned(), "reading".to_owned()];
-    rows[0].collection_ids = vec![reading_list];
-    rows[1].tags = vec!["memory".to_owned(), "reading".to_owned()];
-    rows[1].collection_ids = vec![deep_dives];
-    rows[2].tags = vec!["rust".to_owned(), "ios".to_owned()];
-    rows[2].collection_ids = vec![tech];
-    rows[4].tags = vec!["reading".to_owned()];
-    rows[4].collection_ids = vec![reading_list];
-
-    // Seed a couple of highlights (with fixed ids) so the reader shows captured
-    // annotations and the review queue / due-count are populated on first
-    // launch. Each highlight gets a New card due at seed time (well in the past),
-    // so both are due immediately.
-    let due = at(1_577_836_800); // 2020-01-01, comfortably in the past
-    let hl_local = Uuid::from_u128(301);
-    let hl_fsrs = Uuid::from_u128(302);
-    let highlights = vec![
-        HighlightRow {
-            id: hl_local,
-            item_id: Uuid::from_u128(1),
-            quote_text: "You own your data, in spite of the cloud.".to_owned(),
-            note: Some("The core promise of local-first software.".to_owned()),
-            created_at: due,
-        },
-        HighlightRow {
-            id: hl_fsrs,
-            item_id: Uuid::from_u128(2),
-            quote_text: "FSRS models memory as stability and difficulty.".to_owned(),
-            note: None,
-            created_at: due,
-        },
-    ];
-    let review_cards = vec![
-        ReviewCardRow {
-            id: Uuid::from_u128(401),
-            highlight_id: hl_local,
+    // Highlights + a New review card each, due in the past so both are due now.
+    let due = at(1_577_836_800);
+    let hl_local = db.create_highlight(
+        Uuid::from_u128(1),
+        "You own your data, in spite of the cloud.",
+        Some("The core promise of local-first software."),
+        None,
+    )?;
+    let hl_fsrs = db.create_highlight(
+        Uuid::from_u128(2),
+        "FSRS models memory as stability and difficulty.",
+        None,
+        None,
+    )?;
+    for (n, highlight_item_id) in [(401u128, hl_local.id), (402u128, hl_fsrs.id)] {
+        db.insert_review_card(&CoreReviewCard {
+            id: Uuid::from_u128(n),
+            content_item_id: highlight_item_id,
             state: CardState::New,
             stability: None,
             difficulty: None,
@@ -918,29 +1001,12 @@ fn seed() -> Store {
             review_count: 0,
             lapse_count: 0,
             scheduled_days: None,
-        },
-        ReviewCardRow {
-            id: Uuid::from_u128(402),
-            highlight_id: hl_fsrs,
-            state: CardState::New,
-            stability: None,
-            difficulty: None,
-            due_at: due,
-            last_reviewed_at: None,
-            review_count: 0,
-            lapse_count: 0,
-            scheduled_days: None,
-        },
-    ];
-
-    Store {
-        rows,
-        tags,
-        collections,
-        highlights,
-        review_cards,
-        review_logs: Vec::new(),
+            created_at: due,
+            updated_at: due,
+        })?;
     }
+
+    Ok(())
 }
 
 /// Returns the version of the underlying `pergamon-core` library.
@@ -967,76 +1033,70 @@ pub fn reading_minutes(text: String) -> u32 {
 ///
 /// `Library` is a `#[uniffi::export]` object handle: Swift holds it as a
 /// reference type (`Arc`), and its methods are the primary way the app reads and
-/// triages the core. It owns interior state behind `Send + Sync` — a seeded
-/// corpus guarded by a `Mutex`, so reads (`inbox`, `items`, ...) and triage
-/// mutations (`mark_read`, `archive`, `save_for_later`, ...) are safe to call
-/// from any thread. Mutations are visible within the process session; the
-/// on-device SQLite store replaces the seed with the offline-database work
-/// (#118 / ADR-020), persisting them across launches behind this same surface.
+/// triages the library. It owns the on-device SQLite database
+/// (`pergamon-storage`) behind a `Mutex` (a rusqlite `Connection` is `Send` but
+/// not `Sync`), so reads (`inbox`, `items`, ...) and triage mutations
+/// (`mark_read`, `archive`, `save_for_later`, ...) are safe to call from any
+/// thread and persist across launches in the shared App Group container
+/// (#118 / ADR-020).
 ///
 /// Calls are **synchronous and blocking** by design (ADR-019): core logic and
-/// future local-DB access do not wait on anything, so the app invokes these off
-/// the main actor rather than paying for `async`.
+/// local-DB access do not wait on anything, so the app invokes these off the
+/// main actor rather than paying for `async`.
 #[derive(uniffi::Object)]
 pub struct Library {
-    store: Mutex<Store>,
+    db: Mutex<Database>,
 }
 
 impl Library {
-    /// Runs `f` against the locked [`Store`], recovering from a poisoned mutex.
+    /// Locks the database, recovering from a poisoned mutex.
     ///
-    /// A panic in another thread while the lock was held could poison it; since
-    /// the corpus is plain data with no broken invariants, we deliberately
+    /// A panic in another thread while the lock was held could poison it; the
+    /// SQLite connection has no broken in-memory invariants of our own, so we
     /// recover the guard rather than propagate the poison.
-    fn with_store<T>(&self, f: impl FnOnce(&mut Store) -> T) -> T {
-        let mut guard = self.store.lock().unwrap_or_else(PoisonError::into_inner);
-        f(&mut guard)
-    }
-
-    /// Convenience over [`Self::with_store`] for the many read/mutate paths that
-    /// only touch the content rows.
-    fn with_rows<T>(&self, f: impl FnOnce(&mut Vec<Row>) -> T) -> T {
-        self.with_store(|store| f(&mut store.rows))
-    }
-
-    /// Applies `mutate` to the row with `id`, returning the updated FFI view.
-    ///
-    /// # Errors
-    ///
-    /// [`PergamonError::InvalidInput`] for a malformed UUID, or
-    /// [`PergamonError::NotFound`] when no row matches.
-    fn mutate_item(
-        &self,
-        id: &str,
-        mutate: impl FnOnce(&mut Row),
-    ) -> Result<ContentItem, PergamonError> {
-        let wanted = Uuid::parse_str(id).map_err(|_| PergamonError::InvalidInput {
-            message: format!("not a valid UUID: {id}"),
-        })?;
-        self.with_rows(|rows| {
-            let row = rows.iter_mut().find(|row| row.item.id == wanted).ok_or(
-                PergamonError::NotFound {
-                    message: format!("no item with id {id}"),
-                },
-            )?;
-            mutate(row);
-            Ok(ContentItem::from_row(row))
-        })
+    fn lock(&self) -> MutexGuard<'_, Database> {
+        self.db.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
 #[uniffi::export]
 impl Library {
-    /// Opens a library backed by the built-in seeded corpus.
+    /// Opens an **in-memory**, seeded library.
     ///
-    /// Deterministic (fixed UUIDs and timestamps) so lookups are stable across
-    /// runs and tests.
+    /// Deterministic (fixed UUIDs and timestamps) and non-persistent — used by
+    /// tests, SwiftUI previews, and the macOS host smoke test. The app itself
+    /// opens the persistent store with [`Self::open`].
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the in-memory SQLite database cannot be opened or seeded,
+    /// which indicates a build/linking fault rather than a runtime condition.
     #[uniffi::constructor]
     #[must_use]
     pub fn new() -> Arc<Self> {
-        Arc::new(Self {
-            store: Mutex::new(seed()),
-        })
+        let db = Database::open_in_memory().expect("in-memory database must open");
+        seed(&db).expect("seeding the in-memory demo library must succeed");
+        Arc::new(Self { db: Mutex::new(db) })
+    }
+
+    /// Opens (creating and migrating if needed) the on-device SQLite library at
+    /// `path`, seeding the demo corpus on first launch (an empty database).
+    ///
+    /// This is the persistent store the iOS app opens against its App Group
+    /// container (#118 / ADR-020).
+    ///
+    /// # Errors
+    ///
+    /// [`PergamonError::Storage`] if the database cannot be opened, migrated, or
+    /// seeded.
+    #[uniffi::constructor]
+    #[allow(clippy::needless_pass_by_value)] // owned args are the idiomatic UniFFI signature
+    pub fn open(path: String) -> Result<Arc<Self>, PergamonError> {
+        let db = Database::open(Path::new(&path))?;
+        if db.is_empty()? {
+            seed(&db)?;
+        }
+        Ok(Arc::new(Self { db: Mutex::new(db) }))
     }
 
     /// Returns every item in triage-`Inbox` status (the primary landing screen).
@@ -1045,59 +1105,50 @@ impl Library {
         self.items_with_status(Status::Inbox)
     }
 
-    /// Returns all items in the library (the "list" path).
+    /// Returns all documents in the library (the "list" path). Highlights are
+    /// excluded — they surface through [`Self::highlights`].
     #[must_use]
     pub fn items(&self) -> Vec<ContentItem> {
-        self.with_rows(|rows| rows.iter().map(ContentItem::from_row).collect())
+        let db = self.lock();
+        list_documents(&db, None).unwrap_or_default()
     }
 
-    /// Returns items filtered to a single triage [`Status`].
+    /// Returns documents filtered to a single triage [`Status`].
     #[must_use]
     pub fn items_with_status(&self, status: Status) -> Vec<ContentItem> {
-        let core_status: CoreStatus = status.into();
-        self.with_rows(|rows| {
-            rows.iter()
-                .filter(|row| row.item.status == core_status)
-                .map(ContentItem::from_row)
-                .collect()
-        })
+        let db = self.lock();
+        list_documents(&db, Some(status.into())).unwrap_or_default()
     }
 
-    /// Returns the distinct feed/source names present in the corpus, sorted
+    /// Returns the distinct feed/source names present in the library, sorted
     /// alphabetically. Drives the inbox's feed filter.
     #[must_use]
     pub fn sources(&self) -> Vec<String> {
-        self.with_rows(|rows| {
-            let mut names: Vec<String> = rows.iter().filter_map(|row| row.source.clone()).collect();
-            names.sort_unstable();
-            names.dedup();
-            names
-        })
+        let db = self.lock();
+        let mut names: Vec<String> = list_documents(&db, None)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|item| item.source_name)
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        names
     }
 
     /// Fetches a single item by its UUID string (the "open" path).
     ///
     /// # Errors
     ///
-    /// Returns [`PergamonError::InvalidInput`] if `id` is not a valid UUID, and
-    /// [`PergamonError::NotFound`] if no item with that id exists. This exercises
-    /// the ADR-019 error mapping across the FFI boundary (Swift `throws`).
+    /// [`PergamonError::InvalidInput`] if `id` is not a valid UUID, or
+    /// [`PergamonError::NotFound`] if no item with that id exists.
     #[allow(clippy::needless_pass_by_value)] // owned args are the idiomatic UniFFI signature
     pub fn item(&self, id: String) -> Result<ContentItem, PergamonError> {
-        let wanted = Uuid::parse_str(&id).map_err(|_| PergamonError::InvalidInput {
-            message: format!("not a valid UUID: {id}"),
-        })?;
-        self.with_rows(|rows| {
-            rows.iter()
-                .find(|row| row.item.id == wanted)
-                .map(ContentItem::from_row)
-                .ok_or(PergamonError::NotFound {
-                    message: format!("no item with id {id}"),
-                })
-        })
+        let wanted = parse_uuid(&id)?;
+        let db = self.lock();
+        Ok(view_item(&db, wanted)?)
     }
 
-    /// Returns items whose title, author, excerpt, URL, or extracted content
+    /// Returns documents whose title, author, excerpt, URL, or extracted content
     /// contains `query` (case-insensitive). An empty query matches nothing.
     ///
     /// Equivalent to [`Self::search_filtered`] with no facets.
@@ -1112,64 +1163,40 @@ impl Library {
     /// Text matching is case-insensitive across title, author, excerpt, URL, and
     /// extracted content (mirroring the CLI/web search fields for cross-client
     /// parity). An empty query with no active facets matches nothing; an empty
-    /// query with active facets returns every item passing the facets.
+    /// query with active facets returns every document passing the facets.
     #[must_use]
     #[allow(clippy::needless_pass_by_value)] // owned args are the idiomatic UniFFI signature
     pub fn search_filtered(&self, query: String, facets: SearchFacets) -> Vec<ContentItem> {
         let needle = query.trim().to_lowercase();
-        let has_facets = facets.content_type.is_some()
-            || facets.status.is_some()
-            || facets.tag.as_ref().is_some_and(|t| !t.trim().is_empty())
-            || facets.source.as_ref().is_some_and(|s| !s.trim().is_empty())
-            || facets.since_millis.is_some()
-            || facets.before_millis.is_some();
-        if needle.is_empty() && !has_facets {
+        if needle.is_empty() && !has_active_facets(&facets) {
             return Vec::new();
         }
-        self.with_rows(|rows| {
-            rows.iter()
-                .filter(|row| text_matches(row, &needle) && facets_match(row, &facets))
-                .map(ContentItem::from_row)
-                .collect()
-        })
+        let db = self.lock();
+        list_documents(&db, None)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|item| item_text_matches(item, &needle) && item_facets_match(item, &facets))
+            .collect()
     }
 
-    /// Returns every tag in the registry with its current item count, sorted by
-    /// name.
+    /// Returns every tag in the registry with its current document count, sorted
+    /// by name.
     #[must_use]
     pub fn tags(&self) -> Vec<Tag> {
-        self.with_store(|store| {
-            let mut tags: Vec<Tag> = store
-                .tags
-                .iter()
-                .map(|tag| {
-                    let key = normalize_tag(&tag.name);
-                    let item_count = store
-                        .rows
-                        .iter()
-                        .filter(|row| row.tags.iter().any(|t| normalize_tag(t) == key))
-                        .count();
-                    Tag {
-                        id: tag.id.to_string(),
-                        name: tag.name.clone(),
-                        item_count: u32::try_from(item_count).unwrap_or(u32::MAX),
-                    }
-                })
-                .collect();
-            tags.sort_by_key(|a| a.name.to_lowercase());
-            tags
-        })
+        let db = self.lock();
+        tags_impl(&db).unwrap_or_default()
     }
 
-    /// Returns every collection with its direct item count and precomputed
+    /// Returns every collection with its direct document count and precomputed
     /// nesting depth, ordered so each parent precedes its children (a
     /// depth-first tree order suitable for indented rendering).
     #[must_use]
     pub fn collections(&self) -> Vec<Collection> {
-        self.with_store(|store| ordered_collections(store))
+        let db = self.lock();
+        collections_impl(&db).unwrap_or_default()
     }
 
-    /// Returns items carrying `tag` (case-insensitive). An empty tag matches
+    /// Returns documents carrying `tag` (case-insensitive). An empty tag matches
     /// nothing.
     #[must_use]
     #[allow(clippy::needless_pass_by_value)]
@@ -1178,15 +1205,15 @@ impl Library {
         if key.is_empty() {
             return Vec::new();
         }
-        self.with_rows(|rows| {
-            rows.iter()
-                .filter(|row| row.tags.iter().any(|t| normalize_tag(t) == key))
-                .map(ContentItem::from_row)
-                .collect()
-        })
+        let db = self.lock();
+        list_documents(&db, None)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|item| item.tags.iter().any(|t| normalize_tag(t) == key))
+            .collect()
     }
 
-    /// Returns items directly in the collection with `collection_id`.
+    /// Returns documents directly in the collection with `collection_id`.
     ///
     /// # Errors
     ///
@@ -1198,19 +1225,13 @@ impl Library {
         collection_id: String,
     ) -> Result<Vec<ContentItem>, PergamonError> {
         let wanted = parse_uuid(&collection_id)?;
-        self.with_store(|store| {
-            if !store.collections.iter().any(|c| c.id == wanted) {
-                return Err(PergamonError::NotFound {
-                    message: format!("no collection with id {collection_id}"),
-                });
-            }
-            Ok(store
-                .rows
-                .iter()
-                .filter(|row| row.collection_ids.contains(&wanted))
-                .map(ContentItem::from_row)
-                .collect())
-        })
+        let db = self.lock();
+        collection_or_not_found(&db, wanted, &collection_id)?;
+        let target = wanted.to_string();
+        Ok(list_documents(&db, None)?
+            .into_iter()
+            .filter(|item| item.collection_ids.iter().any(|c| c == &target))
+            .collect())
     }
 
     /// Assigns a tag to the item, creating the tag (create-or-reuse by
@@ -1230,32 +1251,11 @@ impl Library {
                 message: "tag name must not be blank".to_owned(),
             });
         }
-        let key = normalize_tag(&display);
-        self.with_store(|store| {
-            // Create-or-reuse the registry entry, keeping its first-seen form.
-            let canonical =
-                if let Some(existing) = store.tags.iter().find(|t| normalize_tag(&t.name) == key) {
-                    existing.name.clone()
-                } else {
-                    store.tags.push(TagRow {
-                        id: Uuid::new_v4(),
-                        name: display.clone(),
-                    });
-                    display.clone()
-                };
-            let row = store
-                .rows
-                .iter_mut()
-                .find(|row| row.item.id == wanted)
-                .ok_or(PergamonError::NotFound {
-                    message: format!("no item with id {id}"),
-                })?;
-            if !row.tags.iter().any(|t| normalize_tag(t) == key) {
-                row.tags.push(canonical);
-                row.item.updated_at = OffsetDateTime::now_utc();
-            }
-            Ok(ContentItem::from_row(row))
-        })
+        let db = self.lock();
+        item_or_not_found(&db, wanted, &id)?;
+        let tag = db.get_or_create_tag(&display)?;
+        db.tag_content_item(wanted, tag.id)?;
+        Ok(view_item(&db, wanted)?)
     }
 
     /// Removes a tag from the item (case-insensitive). Idempotent — removing an
@@ -1268,14 +1268,19 @@ impl Library {
     /// [`PergamonError::NotFound`] when no item matches.
     #[allow(clippy::needless_pass_by_value)]
     pub fn remove_tag(&self, id: String, name: String) -> Result<ContentItem, PergamonError> {
+        let wanted = parse_uuid(&id)?;
         let key = normalize_tag(&name);
-        self.mutate_item(&id, |row| {
-            let before = row.tags.len();
-            row.tags.retain(|t| normalize_tag(t) != key);
-            if row.tags.len() != before {
-                row.item.updated_at = OffsetDateTime::now_utc();
-            }
-        })
+        let db = self.lock();
+        item_or_not_found(&db, wanted, &id)?;
+        if !key.is_empty()
+            && let Some(tag) = db
+                .list_tags()?
+                .into_iter()
+                .find(|t| normalize_tag(&t.name) == key)
+        {
+            db.untag_content_item(wanted, tag.id)?;
+        }
+        Ok(view_item(&db, wanted)?)
     }
 
     /// Creates a new collection, optionally nested under `parent_id`. Returns the
@@ -1302,28 +1307,29 @@ impl Library {
             Some(ref raw) => Some(parse_uuid(raw)?),
             None => None,
         };
-        self.with_store(|store| {
-            if let Some(parent) = parent
-                && !store.collections.iter().any(|c| c.id == parent)
-            {
-                return Err(PergamonError::NotFound {
-                    message: format!("no parent collection with id {parent}"),
-                });
-            }
-            let id = Uuid::new_v4();
-            store.collections.push(CollectionRow {
-                id,
-                name: display.clone(),
-                parent_id: parent,
-            });
-            let depth = collection_depth(&store.collections, id);
-            Ok(Collection {
-                id: id.to_string(),
-                name: display,
-                parent_id: parent.map(|p| p.to_string()),
-                item_count: 0,
-                depth,
-            })
+        let db = self.lock();
+        if let Some(parent) = parent {
+            collection_or_not_found(&db, parent, &parent.to_string())?;
+        }
+        let now = OffsetDateTime::now_utc();
+        let id = Uuid::new_v4();
+        db.insert_collection(&CoreCollection {
+            id,
+            name: display.clone(),
+            parent_id: parent,
+            sort_order: 0,
+            is_smart: false,
+            filter_query: None,
+            created_at: now,
+            updated_at: now,
+        })?;
+        let depth = collection_depth(&db.list_collections()?, id);
+        Ok(Collection {
+            id: id.to_string(),
+            name: display,
+            parent_id: parent.map(|p| p.to_string()),
+            item_count: 0,
+            depth,
         })
     }
 
@@ -1341,25 +1347,11 @@ impl Library {
     ) -> Result<ContentItem, PergamonError> {
         let item_id = parse_uuid(&id)?;
         let coll_id = parse_uuid(&collection_id)?;
-        self.with_store(|store| {
-            if !store.collections.iter().any(|c| c.id == coll_id) {
-                return Err(PergamonError::NotFound {
-                    message: format!("no collection with id {collection_id}"),
-                });
-            }
-            let row = store
-                .rows
-                .iter_mut()
-                .find(|row| row.item.id == item_id)
-                .ok_or(PergamonError::NotFound {
-                    message: format!("no item with id {id}"),
-                })?;
-            if !row.collection_ids.contains(&coll_id) {
-                row.collection_ids.push(coll_id);
-                row.item.updated_at = OffsetDateTime::now_utc();
-            }
-            Ok(ContentItem::from_row(row))
-        })
+        let db = self.lock();
+        collection_or_not_found(&db, coll_id, &collection_id)?;
+        item_or_not_found(&db, item_id, &id)?;
+        db.add_to_collection(item_id, coll_id, 0)?;
+        Ok(view_item(&db, item_id)?)
     }
 
     /// Removes the item from the collection. Idempotent — removing an item not in
@@ -1368,21 +1360,20 @@ impl Library {
     /// # Errors
     ///
     /// [`PergamonError::InvalidInput`] for a malformed id, or
-    /// [`PergamonError::NotFound`] when no item matches.
+    /// [`PergamonError::NotFound`] when the item or collection does not exist.
     #[allow(clippy::needless_pass_by_value)]
     pub fn remove_from_collection(
         &self,
         id: String,
         collection_id: String,
     ) -> Result<ContentItem, PergamonError> {
+        let item_id = parse_uuid(&id)?;
         let coll_id = parse_uuid(&collection_id)?;
-        self.mutate_item(&id, |row| {
-            let before = row.collection_ids.len();
-            row.collection_ids.retain(|c| *c != coll_id);
-            if row.collection_ids.len() != before {
-                row.item.updated_at = OffsetDateTime::now_utc();
-            }
-        })
+        let db = self.lock();
+        item_or_not_found(&db, item_id, &id)?;
+        collection_or_not_found(&db, coll_id, &collection_id)?;
+        db.remove_from_collection(item_id, coll_id)?;
+        Ok(view_item(&db, item_id)?)
     }
 
     /// Marks the item read, stamping `read_at` with `now` (idempotent — an
@@ -1394,13 +1385,13 @@ impl Library {
     /// [`PergamonError::NotFound`] when no item matches.
     #[allow(clippy::needless_pass_by_value)]
     pub fn mark_read(&self, id: String) -> Result<ContentItem, PergamonError> {
-        self.mutate_item(&id, |row| {
-            if row.item.read_at.is_none() {
-                let now = OffsetDateTime::now_utc();
-                row.item.read_at = Some(now);
-                row.item.updated_at = now;
-            }
-        })
+        let wanted = parse_uuid(&id)?;
+        let db = self.lock();
+        let core = db.get_content_item(wanted)?;
+        if core.read_at.is_none() {
+            db.set_content_item_read_at(wanted, Some(OffsetDateTime::now_utc()))?;
+        }
+        Ok(view_item(&db, wanted)?)
     }
 
     /// Marks the item unread, clearing `read_at`. Returns the updated item.
@@ -1411,12 +1402,10 @@ impl Library {
     /// [`PergamonError::NotFound`] when no item matches.
     #[allow(clippy::needless_pass_by_value)]
     pub fn mark_unread(&self, id: String) -> Result<ContentItem, PergamonError> {
-        self.mutate_item(&id, |row| {
-            if row.item.read_at.is_some() {
-                row.item.read_at = None;
-                row.item.updated_at = OffsetDateTime::now_utc();
-            }
-        })
+        let wanted = parse_uuid(&id)?;
+        let db = self.lock();
+        db.set_content_item_read_at(wanted, None)?;
+        Ok(view_item(&db, wanted)?)
     }
 
     /// Archives the item (status → `Archived`) and marks it read. Returns the
@@ -1428,14 +1417,10 @@ impl Library {
     /// [`PergamonError::NotFound`] when no item matches.
     #[allow(clippy::needless_pass_by_value)]
     pub fn archive(&self, id: String) -> Result<ContentItem, PergamonError> {
-        self.mutate_item(&id, |row| {
-            let now = OffsetDateTime::now_utc();
-            row.item.status = CoreStatus::Archived;
-            if row.item.read_at.is_none() {
-                row.item.read_at = Some(now);
-            }
-            row.item.updated_at = now;
-        })
+        let wanted = parse_uuid(&id)?;
+        let db = self.lock();
+        db.update_content_item_status(wanted, CoreStatus::Archived)?;
+        Ok(view_item(&db, wanted)?)
     }
 
     /// Moves the item to the read-later queue (status → `Later`). Returns the
@@ -1447,10 +1432,10 @@ impl Library {
     /// [`PergamonError::NotFound`] when no item matches.
     #[allow(clippy::needless_pass_by_value)]
     pub fn save_for_later(&self, id: String) -> Result<ContentItem, PergamonError> {
-        self.mutate_item(&id, |row| {
-            row.item.status = CoreStatus::Later;
-            row.item.updated_at = OffsetDateTime::now_utc();
-        })
+        let wanted = parse_uuid(&id)?;
+        let db = self.lock();
+        db.update_content_item_status(wanted, CoreStatus::Later)?;
+        Ok(view_item(&db, wanted)?)
     }
 
     // ---- Highlights & spaced-repetition review -------------------------------
@@ -1464,20 +1449,26 @@ impl Library {
     #[allow(clippy::needless_pass_by_value)]
     pub fn highlights(&self, item_id: String) -> Result<Vec<Highlight>, PergamonError> {
         let wanted = parse_uuid(&item_id)?;
-        self.with_store(|store| {
-            if !store.rows.iter().any(|row| row.item.id == wanted) {
-                return Err(PergamonError::NotFound {
-                    message: format!("no item with id {item_id}"),
-                });
-            }
-            let mut list: Vec<&HighlightRow> = store
-                .highlights
-                .iter()
-                .filter(|h| h.item_id == wanted)
-                .collect();
-            list.sort_by_key(|h| h.created_at);
-            Ok(list.into_iter().map(|h| store.highlight_view(h)).collect())
-        })
+        let db = self.lock();
+        let source = db.get_content_item(wanted)?;
+        let mut pairs = db.list_highlights(Some(wanted), None, None, None, None)?;
+        pairs.sort_by_key(|(item, _)| item.created_at);
+        let mut out = Vec::with_capacity(pairs.len());
+        for (item, meta) in pairs {
+            let has_review_card = db.get_review_card_for_item(item.id)?.is_some();
+            out.push(Highlight {
+                id: item.id.to_string(),
+                item_id: meta
+                    .source_item_id
+                    .map_or_else(|| wanted.to_string(), |s| s.to_string()),
+                quote_text: meta.quote_text,
+                note: meta.note,
+                source_title: source.title.clone(),
+                created_at_millis: millis(item.created_at),
+                has_review_card,
+            });
+        }
+        Ok(out)
     }
 
     /// Captures a highlight from a content item and creates a spaced-repetition
@@ -1505,48 +1496,32 @@ impl Library {
             });
         }
         let note = clean_note(note);
-        self.with_store(|store| {
-            if !store.rows.iter().any(|row| row.item.id == wanted) {
-                return Err(PergamonError::NotFound {
-                    message: format!("no item with id {item_id}"),
-                });
-            }
-            let now = OffsetDateTime::now_utc();
-            let highlight_id = Uuid::new_v4();
-            let row = HighlightRow {
-                id: highlight_id,
-                item_id: wanted,
-                quote_text: quote,
-                note,
-                created_at: now,
-            };
-            // Build the FFI view up front from known data (the highlight always
-            // gets a card, below), then move the row into the store.
-            let view = Highlight {
-                id: highlight_id.to_string(),
-                item_id: wanted.to_string(),
-                quote_text: row.quote_text.clone(),
-                note: row.note.clone(),
-                source_title: store.source_title(wanted),
-                created_at_millis: millis(now),
-                has_review_card: true,
-            };
-            store.highlights.push(row);
-            // Auto-create a New card, due now, so the highlight lands in the
-            // queue and bumps the due-count immediately.
-            store.review_cards.push(ReviewCardRow {
-                id: Uuid::new_v4(),
-                highlight_id,
-                state: CardState::New,
-                stability: None,
-                difficulty: None,
-                due_at: now,
-                last_reviewed_at: None,
-                review_count: 0,
-                lapse_count: 0,
-                scheduled_days: None,
-            });
-            Ok(view)
+        let db = self.lock();
+        let source = db.get_content_item(wanted)?;
+        let highlight = db.create_highlight(wanted, &quote, note.as_deref(), None)?;
+        let now = OffsetDateTime::now_utc();
+        db.insert_review_card(&CoreReviewCard {
+            id: Uuid::new_v4(),
+            content_item_id: highlight.id,
+            state: CardState::New,
+            stability: None,
+            difficulty: None,
+            due_at: now,
+            last_reviewed_at: None,
+            review_count: 0,
+            lapse_count: 0,
+            scheduled_days: None,
+            created_at: now,
+            updated_at: now,
+        })?;
+        Ok(Highlight {
+            id: highlight.id.to_string(),
+            item_id: wanted.to_string(),
+            quote_text: quote,
+            note,
+            source_title: source.title,
+            created_at_millis: millis(highlight.created_at),
+            has_review_card: true,
         })
     }
 
@@ -1565,15 +1540,22 @@ impl Library {
     ) -> Result<Highlight, PergamonError> {
         let wanted = parse_uuid(&highlight_id)?;
         let note = clean_note(note);
-        self.with_store(|store| {
-            let Some(hl) = store.highlights.iter_mut().find(|h| h.id == wanted) else {
-                return Err(PergamonError::NotFound {
-                    message: format!("no highlight with id {highlight_id}"),
-                });
-            };
-            hl.note = note;
-            let updated = hl.clone();
-            Ok(store.highlight_view(&updated))
+        let db = self.lock();
+        db.update_highlight_note(wanted, note.as_deref())?;
+        let item = db.get_content_item(wanted)?;
+        let meta = db.get_highlight_meta(wanted)?;
+        let has_review_card = db.get_review_card_for_item(wanted)?.is_some();
+        Ok(Highlight {
+            id: wanted.to_string(),
+            item_id: meta
+                .source_item_id
+                .map(|s| s.to_string())
+                .unwrap_or_default(),
+            quote_text: meta.quote_text,
+            note: meta.note,
+            source_title: source_title(&db, meta.source_item_id),
+            created_at_millis: millis(item.created_at),
+            has_review_card,
         })
     }
 
@@ -1586,17 +1568,8 @@ impl Library {
     #[allow(clippy::needless_pass_by_value)]
     pub fn delete_highlight(&self, highlight_id: String) -> Result<(), PergamonError> {
         let wanted = parse_uuid(&highlight_id)?;
-        self.with_store(|store| {
-            let card_ids: Vec<Uuid> = store
-                .review_cards
-                .iter()
-                .filter(|c| c.highlight_id == wanted)
-                .map(|c| c.id)
-                .collect();
-            store.highlights.retain(|h| h.id != wanted);
-            store.review_cards.retain(|c| c.highlight_id != wanted);
-            store.review_logs.retain(|l| !card_ids.contains(&l.card_id));
-        });
+        let db = self.lock();
+        db.delete_content_item(wanted)?;
         Ok(())
     }
 
@@ -1604,16 +1577,8 @@ impl Library {
     /// first. This is the review queue the app grades through.
     #[must_use]
     pub fn due_cards(&self) -> Vec<ReviewCardView> {
-        let now = OffsetDateTime::now_utc();
-        self.with_store(|store| {
-            let mut due: Vec<&ReviewCardRow> = store
-                .review_cards
-                .iter()
-                .filter(|c| c.due_at <= now)
-                .collect();
-            due.sort_by_key(|c| c.due_at);
-            due.into_iter().filter_map(|c| store.card_view(c)).collect()
-        })
+        let db = self.lock();
+        due_cards_impl(&db).unwrap_or_default()
     }
 
     /// Grades a review card, advancing its FSRS schedule and appending a review
@@ -1633,54 +1598,57 @@ impl Library {
     ) -> Result<ReviewCardView, PergamonError> {
         let wanted = parse_uuid(&card_id)?;
         let rating: Rating = grade.into();
-        self.with_store(|store| {
-            let Some(card) = store.review_cards.iter().find(|c| c.id == wanted) else {
-                return Err(PergamonError::NotFound {
-                    message: format!("no review card with id {card_id}"),
-                });
-            };
+        let db = self.lock();
+        let card = db.get_review_card(wanted)?;
 
-            let now = OffsetDateTime::now_utc();
-            let elapsed_days = card
-                .last_reviewed_at
-                .map_or(0.0, |last| (now - last).as_seconds_f64() / 86_400.0);
-            let memory = match (card.stability, card.difficulty) {
-                (Some(stability), Some(difficulty)) => Some(MemoryState {
-                    stability,
-                    difficulty,
-                }),
-                _ => None,
-            };
+        let now = OffsetDateTime::now_utc();
+        let elapsed_days = card
+            .last_reviewed_at
+            .map_or(0.0, |last| (now - last).as_seconds_f64() / 86_400.0);
+        let memory = match (card.stability, card.difficulty) {
+            (Some(stability), Some(difficulty)) => Some(MemoryState {
+                stability,
+                difficulty,
+            }),
+            _ => None,
+        };
 
-            let scheduler = Scheduler::new(&Parameters::default());
-            let output = scheduler.schedule(card.state, memory, elapsed_days, rating);
-            let due_at = now + time::Duration::seconds_f64(output.scheduled_days * 86_400.0);
+        let scheduler = Scheduler::new(&Parameters::default());
+        let output = scheduler.schedule(card.state, memory, elapsed_days, rating);
+        let due_at = now + time::Duration::seconds_f64(output.scheduled_days * 86_400.0);
+        let review_count = card.review_count + 1;
+        let lapse_count = card.lapse_count + i32::from(rating == Rating::Again);
 
-            let Some(card) = store.review_cards.iter_mut().find(|c| c.id == wanted) else {
-                return Err(PergamonError::NotFound {
-                    message: format!("no review card with id {card_id}"),
-                });
-            };
-            card.state = output.next_state;
-            card.stability = Some(output.memory.stability);
-            card.difficulty = Some(output.memory.difficulty);
-            card.due_at = due_at;
-            card.last_reviewed_at = Some(now);
-            card.review_count += 1;
-            if rating == Rating::Again {
-                card.lapse_count += 1;
-            }
-            card.scheduled_days = Some(output.scheduled_days);
-            let updated = card.clone();
+        db.update_review_card(
+            wanted,
+            output.next_state.as_str(),
+            output.memory.stability,
+            output.memory.difficulty,
+            due_at,
+            now,
+            review_count,
+            lapse_count,
+            output.scheduled_days,
+        )?;
 
-            store.review_logs.push(ReviewLogRow {
-                card_id: wanted,
-                reviewed_at: now,
-            });
+        db.insert_review_log(&CoreReviewLog {
+            id: Uuid::new_v4(),
+            card_id: wanted,
+            rating,
+            state_before: card.state,
+            stability_before: card.stability,
+            difficulty_before: card.difficulty,
+            state_after: output.next_state,
+            stability_after: output.memory.stability,
+            difficulty_after: output.memory.difficulty,
+            elapsed_days,
+            scheduled_days: output.scheduled_days,
+            reviewed_at: now,
+        })?;
 
-            store.card_view(&updated).ok_or(PergamonError::NotFound {
-                message: format!("highlight for card {card_id} is gone"),
-            })
+        let updated = db.get_review_card(wanted)?;
+        card_view(&db, &updated)?.ok_or(PergamonError::NotFound {
+            message: format!("highlight for card {card_id} is gone"),
         })
     }
 
@@ -1688,30 +1656,196 @@ impl Library {
     /// queue health.
     #[must_use]
     pub fn review_summary(&self) -> ReviewSummary {
+        let db = self.lock();
         let now = OffsetDateTime::now_utc();
-        self.with_store(|store| {
-            let due_count = store
-                .review_cards
-                .iter()
-                .filter(|c| c.due_at <= now)
-                .count();
-            let new_count = store
-                .review_cards
-                .iter()
-                .filter(|c| c.state == CardState::New)
-                .count();
-            let reviews_today = store
-                .review_logs
-                .iter()
-                .filter(|l| l.reviewed_at.date() == now.date())
-                .count();
+        let cast = |n: i64| u32::try_from(n).unwrap_or(u32::MAX);
+        db.review_stats(now).map_or(
             ReviewSummary {
-                due_count: u32::try_from(due_count).unwrap_or(u32::MAX),
-                total_cards: u32::try_from(store.review_cards.len()).unwrap_or(u32::MAX),
-                new_count: u32::try_from(new_count).unwrap_or(u32::MAX),
-                reviews_today: u32::try_from(reviews_today).unwrap_or(u32::MAX),
+                due_count: 0,
+                total_cards: 0,
+                new_count: 0,
+                reviews_today: 0,
+            },
+            |stats| ReviewSummary {
+                due_count: cast(stats.due_count),
+                total_cards: cast(stats.total_cards),
+                new_count: cast(stats.new_count),
+                reviews_today: cast(stats.reviews_today),
+            },
+        )
+    }
+
+    // ---- Backup / restore (canonical, cross-client format) -------------------
+
+    /// Exports the whole library to a canonical backup archive at `path` (a ZIP
+    /// of JSON), the same format the CLI and web clients read and write. Returns
+    /// the record counts moved.
+    ///
+    /// # Errors
+    ///
+    /// [`PergamonError::Storage`] if the file cannot be created or the library
+    /// cannot be read.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn export_backup(&self, path: String) -> Result<BackupSummary, PergamonError> {
+        let db = self.lock();
+        let mut file = std::fs::File::create(&path).map_err(|e| PergamonError::Storage {
+            message: format!("cannot create backup file {path}: {e}"),
+        })?;
+        let stats = backup::export(&db, &mut file)?;
+        Ok(stats.into())
+    }
+
+    /// Restores a canonical backup archive from `path`, **replacing** the current
+    /// library. The database is reset first, then the archive is restored, so a
+    /// backup produced on any client (CLI, web, iOS) fully round-trips here.
+    ///
+    /// # Errors
+    ///
+    /// [`PergamonError::Storage`] if the file cannot be opened, is not a valid
+    /// pergamon backup, or its schema is newer than this build supports.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn restore_backup(&self, path: String) -> Result<BackupSummary, PergamonError> {
+        let db = self.lock();
+        let mut file = std::fs::File::open(&path).map_err(|e| PergamonError::Storage {
+            message: format!("cannot open backup file {path}: {e}"),
+        })?;
+        db.reset()?;
+        let stats = backup::restore(&db, &mut file)?;
+        Ok(stats.into())
+    }
+
+    /// Returns provenance and size information about the backing store.
+    #[must_use]
+    pub fn storage_info(&self) -> StorageInfo {
+        let db = self.lock();
+        storage_info_impl(&db).unwrap_or(StorageInfo {
+            schema_version: 0,
+            document_count: 0,
+            highlight_count: 0,
+        })
+    }
+}
+
+/// Assembles the tag registry with per-tag document counts.
+fn tags_impl(db: &Database) -> Result<Vec<Tag>, StorageError> {
+    let lookups = Lookups::build(db)?;
+    let mut counts: HashMap<String, u32> = HashMap::new();
+    for item in db
+        .list_all_content_items()?
+        .iter()
+        .filter(|i| is_document(i))
+    {
+        if let Some(names) = lookups.tag_names.get(&item.id) {
+            for name in names {
+                *counts.entry(normalize_tag(name)).or_default() += 1;
+            }
+        }
+    }
+    let mut tags: Vec<Tag> = db
+        .list_tags()?
+        .into_iter()
+        .map(|tag| {
+            let item_count = counts.get(&normalize_tag(&tag.name)).copied().unwrap_or(0);
+            Tag {
+                id: tag.id.to_string(),
+                name: tag.name,
+                item_count,
             }
         })
+        .collect();
+    tags.sort_by_key(|a| a.name.to_lowercase());
+    Ok(tags)
+}
+
+/// Assembles collections in depth-first tree order with direct document counts.
+fn collections_impl(db: &Database) -> Result<Vec<Collection>, StorageError> {
+    let colls = db.list_collections()?;
+    let documents: HashSet<Uuid> = db
+        .list_all_content_items()?
+        .into_iter()
+        .filter(is_document)
+        .map(|i| i.id)
+        .collect();
+    let mut counts: HashMap<Uuid, u32> = HashMap::new();
+    for (item_id, coll_id, _sort) in db.list_all_collection_items()? {
+        if documents.contains(&item_id) {
+            *counts.entry(coll_id).or_default() += 1;
+        }
+    }
+    let mut out = Vec::with_capacity(colls.len());
+    push_collection_children(&colls, &counts, None, 0, &mut out);
+    Ok(out)
+}
+
+/// Depth-first walk pushing each parent immediately before its children, with
+/// siblings ordered case-insensitively by name.
+fn push_collection_children(
+    colls: &[CoreCollection],
+    counts: &HashMap<Uuid, u32>,
+    parent: Option<Uuid>,
+    depth: u32,
+    out: &mut Vec<Collection>,
+) {
+    let mut children: Vec<&CoreCollection> =
+        colls.iter().filter(|c| c.parent_id == parent).collect();
+    children.sort_by_key(|a| a.name.to_lowercase());
+    for child in children {
+        out.push(Collection {
+            id: child.id.to_string(),
+            name: child.name.clone(),
+            parent_id: child.parent_id.map(|p| p.to_string()),
+            item_count: counts.get(&child.id).copied().unwrap_or(0),
+            depth,
+        });
+        push_collection_children(colls, counts, Some(child.id), depth + 1, out);
+    }
+}
+
+/// Assembles the due-review queue, skipping any dangling cards.
+fn due_cards_impl(db: &Database) -> Result<Vec<ReviewCardView>, StorageError> {
+    let now = OffsetDateTime::now_utc();
+    let mut out = Vec::new();
+    for card in db.list_due_review_cards(now)? {
+        if let Some(view) = card_view(db, &card)? {
+            out.push(view);
+        }
+    }
+    Ok(out)
+}
+
+/// Computes [`StorageInfo`] from the current database.
+fn storage_info_impl(db: &Database) -> Result<StorageInfo, StorageError> {
+    let all = db.list_all_content_items()?;
+    let highlight_count = all.iter().filter(|i| !is_document(i)).count();
+    let document_count = all.len() - highlight_count;
+    Ok(StorageInfo {
+        schema_version: u32::try_from(db.schema_version()?).unwrap_or(0),
+        document_count: u32::try_from(document_count).unwrap_or(u32::MAX),
+        highlight_count: u32::try_from(highlight_count).unwrap_or(u32::MAX),
+    })
+}
+
+/// Ensures a content item exists, mapping absence to [`PergamonError::NotFound`]
+/// with a facade-shaped message.
+fn item_or_not_found(db: &Database, id: Uuid, raw: &str) -> Result<(), PergamonError> {
+    match db.get_content_item(id) {
+        Ok(_) => Ok(()),
+        Err(StorageError::NotFound { .. }) => Err(PergamonError::NotFound {
+            message: format!("no item with id {raw}"),
+        }),
+        Err(other) => Err(other.into()),
+    }
+}
+
+/// Ensures a collection exists, mapping absence to [`PergamonError::NotFound`]
+/// with a facade-shaped message.
+fn collection_or_not_found(db: &Database, id: Uuid, raw: &str) -> Result<(), PergamonError> {
+    match db.get_collection(id) {
+        Ok(_) => Ok(()),
+        Err(StorageError::NotFound { .. }) => Err(PergamonError::NotFound {
+            message: format!("no collection with id {raw}"),
+        }),
+        Err(other) => Err(other.into()),
     }
 }
 

@@ -37,6 +37,7 @@ struct InboxView: View {
     @State private var statusFilter: StatusFilter = .status(.inbox)
     @State private var sourceFilter: String?
     @State private var readFilter: ReadFilter = .all
+    @State private var showingSettings = false
 
     private var library: Library { environment.library }
 
@@ -57,12 +58,31 @@ struct InboxView: View {
             .navigationDestination(for: ContentItem.self) { item in
                 DetailView(library: library, itemID: item.id)
             }
-            .toolbar { filterMenu }
+            .toolbar {
+                settingsButton
+                filterMenu
+            }
+            .sheet(isPresented: $showingSettings) {
+                SettingsView()
+            }
         }
         .onAppear(perform: reload)
         .onChange(of: statusFilter) { reload() }
         .onChange(of: sourceFilter) { reload() }
         .onChange(of: readFilter) { reload() }
+        .onReceive(NotificationCenter.default.publisher(for: .pergamonLibraryDidChange)) { _ in
+            reload()
+        }
+    }
+
+    private var settingsButton: some ToolbarContent {
+        ToolbarItem(placement: .topBarLeading) {
+            Button {
+                showingSettings = true
+            } label: {
+                Label("Settings", systemImage: "gearshape")
+            }
+        }
     }
 
     private var list: some View {

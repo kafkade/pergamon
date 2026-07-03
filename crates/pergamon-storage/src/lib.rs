@@ -8,9 +8,11 @@
 //! - CRUD operations for the unified content model
 //! - Full-text search via FTS5 virtual tables
 
+pub mod backup;
 pub mod db;
 pub mod error;
 
+pub use backup::{BackupManifest, BackupStats};
 pub use db::ContentItemFilter;
 pub use db::ContentItemSort;
 pub use db::Database;

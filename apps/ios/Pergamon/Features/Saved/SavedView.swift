@@ -47,6 +47,9 @@ struct SavedView: View {
     @EnvironmentObject private var environment: AppEnvironment
     @State private var scope: SavedScope = .all
     @State private var statusFilter: StatusFilter = .status(.inbox)
+    /// Bumped when the library is replaced (backup restore) to force the
+    /// live-reading `content` to re-render from the core.
+    @State private var reloadTick = 0
 
     private var library: Library { environment.library }
 
@@ -63,6 +66,10 @@ struct SavedView: View {
                         statusMenu
                     }
                 }
+                .id(reloadTick)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .pergamonLibraryDidChange)) { _ in
+            reloadTick += 1
         }
     }
 
