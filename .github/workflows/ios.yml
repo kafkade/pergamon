@@ -1,0 +1,119 @@
+name: iOS
+
+# Builds the Rust core as an XCFramework (iOS device + simulator + macOS host),
+# runs the PergamonKit Swift unit tests natively on the macOS host slice, and
+# compiles the SwiftUI app for the iOS Simulator. Mirrors the Phase 5 Docker CI
+# (#85): a standalone, path-filtered workflow that only runs when iOS-relevant
+# files change, so the (slow, macOS-runner) build does not gate unrelated PRs.
+#
+# NOTE: like docker.yml, this workflow is intentionally NOT part of the required
+# status checks in the Terraform-managed branch protection (kafkade/github-infra,
+# repos/pergamon/). A path-filtered workflow used as a merge gate would hang
+# "pending" on PRs that don't touch iOS files and block every merge. If this is
+# ever promoted to a required check, add a path-independent summary gate job
+# (like the `ci` job in ci.yml) and mirror its name in the Terraform config.
+on:
+  push:
+    branches: [main]
+    paths: &ios_paths
+      - "apps/ios/**"
+      - "crates/pergamon-uniffi/**"
+      # The XCFramework statically links the core; these crates compile into it.
+      - "crates/pergamon-core/**"
+      - "crates/pergamon-storage/**"
+      - "crates/pergamon-extract/**"
+      - "scripts/build-ios.sh"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/ios.yml"
+  pull_request:
+    paths: *ios_paths
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege by default.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Keep in sync with IPHONEOS_DEPLOYMENT_TARGET in apps/ios/project.yml and
+  # scripts/build-ios.sh.
+  IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+
+jobs:
+  ios:
+    name: Build & test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      # The active toolchain is pinned by rust-toolchain.toml (1.96.0); install it
+      # explicitly with the Apple targets the XCFramework needs (device +
+      # simulator + macOS host) so the build never has to add them on the fly.
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+        with:
+          toolchain: "1.96.0"
+          targets: aarch64-apple-ios, aarch64-apple-ios-sim, aarch64-apple-darwin
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # Distinct cache: this job builds three Apple targets in release, unlike
+          # the Linux debug builds in ci.yml.
+          key: ios-xcframework
+
+      # Cache Swift build artifacts (SwiftPM resolution + Xcode DerivedData) to
+      # speed up `swift test` and the app build across runs.
+      - uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: |
+            apps/ios/PergamonKit/.build
+            ~/Library/Caches/org.swift.swiftpm
+            ~/Library/Developer/Xcode/DerivedData
+          key: ${{ runner.os }}-swift-${{ hashFiles('apps/ios/PergamonKit/Package.swift', 'apps/ios/project.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-swift-
+
+      - name: Build XCFramework + Swift bindings
+        run: ./scripts/build-ios.sh
+
+      # Runs natively on the macOS host slice of the XCFramework — fast, no
+      # Simulator required.
+      - name: Swift unit tests (PergamonKit)
+        run: swift test --package-path apps/ios/PergamonKit
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: apps/ios
+        run: xcodegen generate
+
+      # Build the SwiftUI app (and the embedded share extension) for the iOS
+      # Simulator. Notes:
+      #   - Code signing is disabled: simulator builds don't need a team, and the
+      #     App Group entitlement is applied ad-hoc by the toolchain.
+      #   - ARCHS=arm64: the XCFramework ships only an arm64 iOS-simulator slice
+      #     (scripts/build-ios.sh builds aarch64-apple-ios-sim). A generic
+      #     simulator destination would otherwise also build x86_64 and fail to
+      #     link. macos-latest runners are Apple Silicon, so arm64 is the right
+      #     (and only needed) simulator architecture.
+      - name: Build app (iOS Simulator)
+        working-directory: apps/ios
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project Pergamon.xcodeproj \
+            -scheme Pergamon \
+            -destination 'generic/platform=iOS Simulator' \
+            -configuration Debug \
+            ARCHS=arm64 \
+            ONLY_ACTIVE_ARCH=YES \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build
