@@ -27,3 +27,4 @@ They follow the [MADR](https://adr.github.io/madr/) format.
 | [ADR-021](021-share-extension-ingestion-contract.md) | Share Extension Ingestion Contract | Accepted |
 | [ADR-022](022-sync-protocol-and-envelope-model.md) | Sync Protocol and Envelope Model | Accepted |
 | [ADR-023](023-conflict-policy-by-entity-type.md) | Conflict Policy by Entity Type | Accepted |
+| [ADR-024](024-device-onboarding-and-key-lifecycle.md) | Device Onboarding and Key Lifecycle | Accepted |
