@@ -43,3 +43,10 @@ tower = { workspace = true }
 # encrypt -> upload -> download -> decrypt round-trip against the blind server
 # (ADR-008 permits an Apache dev-dependency in this AGPL crate).
 pergamon-crypto = { workspace = true }
+# Apache-2.0 client sync engine + storage, used only in tests to drive two local
+# databases through the real router and prove they converge (issue #126). ADR-008
+# permits Apache dev-dependencies in this AGPL crate; the server never links them
+# at runtime.
+pergamon-sync = { workspace = true }
+pergamon-storage = { workspace = true }
+pergamon-core = { workspace = true }

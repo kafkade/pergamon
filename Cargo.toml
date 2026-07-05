@@ -8,6 +8,7 @@ members = [
     "crates/pergamon-import",
     "crates/pergamon-export",
     "crates/pergamon-crypto",
+    "crates/pergamon-sync",
     "crates/pergamon-cli",
     "crates/pergamon-server",
     "crates/pergamon-sync-server",
@@ -32,6 +33,7 @@ pergamon-extract = { path = "crates/pergamon-extract", version = "0.7.0" }
 pergamon-import = { path = "crates/pergamon-import", version = "0.7.0" }
 pergamon-export = { path = "crates/pergamon-export", version = "0.7.0" }
 pergamon-crypto = { path = "crates/pergamon-crypto", version = "0.7.0" }
+pergamon-sync = { path = "crates/pergamon-sync", version = "0.7.0" }
 
 pergamon-server = { path = "crates/pergamon-server", version = "0.7.0" }
 

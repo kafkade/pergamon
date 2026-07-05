@@ -162,6 +162,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "diagnostics_logs",
         include_str!("../migrations/V12__diagnostics_logs.sql"),
     ),
+    (
+        13,
+        "sync_engine",
+        include_str!("../migrations/V13__sync_engine.sql"),
+    ),
 ];
 
 /// Run all pending migrations inside a transaction.
@@ -297,6 +302,12 @@ impl Database {
     pub fn rollback_transaction(&self) -> Result<(), StorageError> {
         self.conn.execute_batch("ROLLBACK;")?;
         Ok(())
+    }
+
+    /// Borrow the underlying connection for sibling storage modules (e.g. the
+    /// sync engine's outbox/clock/merge persistence in [`crate::sync`]).
+    pub(crate) const fn connection(&self) -> &Connection {
+        &self.conn
     }
 
     // ------------------------------------------------------------------

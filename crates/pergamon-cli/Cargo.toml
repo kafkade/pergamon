@@ -24,6 +24,7 @@ pergamon-feed = { workspace = true }
 pergamon-import = { workspace = true }
 pergamon-export = { workspace = true }
 pergamon-storage = { workspace = true }
+pergamon-sync = { workspace = true, features = ["http"] }
 clap = { workspace = true }
 anyhow = { workspace = true }
 reqwest = { workspace = true }

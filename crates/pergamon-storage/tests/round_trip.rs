@@ -1287,8 +1287,8 @@ fn schema_version_returns_latest() {
     let version = db
         .schema_version()
         .unwrap_or_else(|e| unreachable!("version: {e}"));
-    // We have 12 migrations (V1–V12).
-    assert_eq!(version, 12);
+    // We have 13 migrations (V1–V13).
+    assert_eq!(version, 13);
 }
 
 #[test]

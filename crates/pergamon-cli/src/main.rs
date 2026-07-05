@@ -18,6 +18,7 @@ use pergamon_core::model::{
     BookmarkMeta, Collection, ContentItem, Feed, FeedFolder, FeedItemMeta, LinkHealth, Tag,
 };
 use pergamon_core::status::DocumentStatus;
+use pergamon_core::sync::event::{EntityType, Op};
 use pergamon_storage::Database;
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -61,6 +62,11 @@ enum Command {
     DeviceKey {
         #[command(subcommand)]
         action: DeviceKeyAction,
+    },
+    /// Multi-device end-to-end-encrypted remote sync (ADR-022/023/024, #126).
+    SyncRemote {
+        #[command(subcommand)]
+        action: SyncRemoteAction,
     },
     /// Save a URL as an article (fetch, extract, store).
     Save {
@@ -242,6 +248,61 @@ enum DeviceKeyAction {
         /// Read from an encrypted key file instead of the OS keychain.
         #[arg(long)]
         key_file: Option<PathBuf>,
+    },
+}
+
+/// Remote-sync subcommands (ADR-022/023/024, #126).
+#[derive(Debug, Subcommand)]
+enum SyncRemoteAction {
+    /// Enable remote sync: bind the local database to an account and server.
+    Enable {
+        /// Base URL of the sync server (e.g. `https://sync.example.com`).
+        #[arg(long)]
+        server: String,
+        /// Account handle whose keys back this sync (must be initialized).
+        #[arg(long, default_value = "default")]
+        account: String,
+        /// Use an encrypted key file instead of the OS keychain.
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
+    /// Push locally tracked changes to the server.
+    Push {
+        /// Account handle whose keys back this sync.
+        #[arg(long, default_value = "default")]
+        account: String,
+        /// Use an encrypted key file instead of the OS keychain.
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
+    /// Pull and apply remote changes from the server.
+    Pull {
+        /// Account handle whose keys back this sync.
+        #[arg(long, default_value = "default")]
+        account: String,
+        /// Use an encrypted key file instead of the OS keychain.
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
+    /// Push then pull in a single round.
+    Sync {
+        /// Account handle whose keys back this sync.
+        #[arg(long, default_value = "default")]
+        account: String,
+        /// Use an encrypted key file instead of the OS keychain.
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
+    /// Show the local sync status (identity, cursor, pending outbox).
+    Status,
+    /// List (and optionally dismiss) conflict-copy inbox entries.
+    Conflicts {
+        /// Dismiss the conflict entry with this id instead of listing.
+        #[arg(long)]
+        dismiss: Option<String>,
+        /// Include already-dismissed entries when listing.
+        #[arg(long)]
+        all: bool,
     },
 }
 
@@ -866,6 +927,7 @@ fn main() -> Result<()> {
         Command::Review { action } => handle_review(&db, action),
         Command::Stats { action } => handle_stats(&db, &action),
         Command::Rules { action } => handle_rules(&db, action),
+        Command::SyncRemote { action } => handle_sync_remote(&db, action),
         // Already handled above — unreachable at runtime.
         Command::Config | Command::Completions { .. } | Command::DeviceKey { .. } => Ok(()),
     }
@@ -2979,6 +3041,7 @@ fn save_url(db: &Database, raw_url: Option<&str>, tags: &[String], bookmark: boo
 
     db.insert_content_item(&item)
         .context("failed to save item")?;
+    track_document_upsert(db, &item);
 
     record_extraction_event(
         db,
@@ -5743,6 +5806,229 @@ fn handle_device_key(action: &DeviceKeyAction) -> Result<()> {
             Ok(())
         }
     }
+}
+
+// ------------------------------------------------------------------
+// Remote sync (ADR-022/023/024, #126)
+// ------------------------------------------------------------------
+
+/// Whether remote sync is enabled for this database (identity bound).
+fn sync_enabled(db: &Database) -> bool {
+    db.sync_state().is_ok_and(|s| s.device_id.is_some())
+}
+
+/// Current wall-clock time in Unix milliseconds, for HLC stamping.
+fn now_millis() -> u64 {
+    u64::try_from(OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000).unwrap_or(0)
+}
+
+/// Record a tracked sync change for a created/updated document, when remote
+/// sync is enabled. Best-effort: a tracking failure must never fail the user's
+/// operation, so it only warns. No-op when sync is disabled.
+fn track_document_upsert(db: &Database, item: &ContentItem) {
+    if !sync_enabled(db) {
+        return;
+    }
+    let mut fields = pergamon_storage::sync::FieldMap::new();
+    fields.insert("title".to_owned(), serde_json::json!(item.title));
+    fields.insert(
+        "content_type".to_owned(),
+        serde_json::json!(item.content_type.as_str()),
+    );
+    fields.insert("status".to_owned(), serde_json::json!(item.status.as_str()));
+    if let Some(url) = &item.url {
+        fields.insert("url".to_owned(), serde_json::json!(url));
+    }
+    if let Some(author) = &item.author {
+        fields.insert("author".to_owned(), serde_json::json!(author));
+    }
+    if let Some(text) = &item.content_text {
+        fields.insert("content_text".to_owned(), serde_json::json!(text));
+    }
+    if let Some(excerpt) = &item.excerpt {
+        fields.insert("excerpt".to_owned(), serde_json::json!(excerpt));
+    }
+    if let Err(e) = db.emit_change(
+        EntityType::Document,
+        &item.id.to_string(),
+        Op::Upsert,
+        fields,
+        Vec::new(),
+        now_millis(),
+    ) {
+        eprintln!("warning: failed to track change for sync: {e}");
+    }
+}
+
+/// A remote-sync session: an HTTP-backed engine plus a local blob store.
+type SyncSession = (
+    pergamon_sync::SyncEngine<pergamon_sync::http::HttpTransport>,
+    pergamon_sync::MemoryBlobStore,
+);
+
+/// Build the crypto context and HTTP transport for an enabled sync session.
+///
+/// Loads the account keys from the keystore and the server URL and identity
+/// from the local sync state, failing with actionable guidance when either is
+/// missing. The blob store is ephemeral for now: current CLI mutations do not
+/// emit blob-referencing events, so no blob plaintext needs to persist between
+/// invocations (a durable store lands with full change-tracking).
+fn open_sync_session(
+    db: &Database,
+    account: &str,
+    key_file: Option<&PathBuf>,
+) -> Result<SyncSession> {
+    let state = db.sync_state().context("reading sync state")?;
+    let server = state.server_url.clone().ok_or_else(|| {
+        anyhow::anyhow!(
+            "remote sync is not enabled; run `pergamon sync-remote enable --server <url>` first"
+        )
+    })?;
+    let account_hex = state
+        .account_id
+        .clone()
+        .context("sync identity is incomplete; re-run `pergamon sync-remote enable`")?;
+    let device_id = state
+        .device_id
+        .clone()
+        .context("sync identity is incomplete; re-run `pergamon sync-remote enable`")?;
+
+    let store = open_key_store(key_file)?;
+    let ark = store.load_ark(account)?.with_context(|| {
+        format!("no account root key for '{account}'; run `pergamon device-key init` first")
+    })?;
+
+    let crypto = pergamon_sync::CryptoContext::new(ark, account_hex, device_id, state.key_epoch)
+        .context("building crypto context")?;
+    let transport =
+        pergamon_sync::http::HttpTransport::new(server).context("building HTTP transport")?;
+    let engine = pergamon_sync::SyncEngine::new(transport, crypto);
+    Ok((engine, pergamon_sync::MemoryBlobStore::new()))
+}
+
+/// Handle `sync-remote` subcommands.
+fn handle_sync_remote(db: &Database, action: SyncRemoteAction) -> Result<()> {
+    match action {
+        SyncRemoteAction::Enable {
+            server,
+            account,
+            key_file,
+        } => sync_remote_enable(db, &server, &account, key_file.as_ref()),
+        SyncRemoteAction::Push { account, key_file } => {
+            let (engine, blobs) = open_sync_session(db, &account, key_file.as_ref())?;
+            let pushed = engine.push(db, &blobs).context("pushing changes")?;
+            println!("Pushed {pushed} change(s).");
+            Ok(())
+        }
+        SyncRemoteAction::Pull { account, key_file } => {
+            let (engine, blobs) = open_sync_session(db, &account, key_file.as_ref())?;
+            let applied = engine.pull(db, &blobs).context("pulling changes")?;
+            println!("Applied {applied} change(s).");
+            Ok(())
+        }
+        SyncRemoteAction::Sync { account, key_file } => {
+            let (engine, blobs) = open_sync_session(db, &account, key_file.as_ref())?;
+            let stats = engine.sync(db, &blobs).context("syncing")?;
+            println!(
+                "Pushed {} change(s), applied {} change(s).",
+                stats.pushed, stats.applied
+            );
+            Ok(())
+        }
+        SyncRemoteAction::Status => sync_remote_status(db),
+        SyncRemoteAction::Conflicts { dismiss, all } => {
+            sync_remote_conflicts(db, dismiss.as_deref(), all)
+        }
+    }
+}
+
+/// Bind the local database to an account and sync server.
+fn sync_remote_enable(
+    db: &Database,
+    server: &str,
+    account: &str,
+    key_file: Option<&PathBuf>,
+) -> Result<()> {
+    let mut store = open_key_store(key_file)?;
+    let keys = store.load_device_keys(account)?.with_context(|| {
+        format!("no device keys for '{account}'; run `pergamon device-key init` first")
+    })?;
+    if store.load_ark(account)?.is_none() {
+        bail!("no account root key for '{account}'; run `pergamon device-key init` first");
+    }
+
+    // The account handle is shared by all of the account's devices; the first
+    // device generates it, and enrollment (#35) distributes it to the others.
+    let account_id = if let Some(id) = store.load_account_id(account)? {
+        id
+    } else {
+        let id =
+            pergamon_crypto::hierarchy::AccountId::generate().context("generating account id")?;
+        store.save_account_id(account, &id)?;
+        id
+    };
+    let account_hex = account_id.to_hex();
+    let device_id = keys.device_id().to_owned();
+    let epoch = db.sync_state()?.key_epoch;
+    db.set_sync_identity(&account_hex, &device_id, epoch, Some(server))
+        .context("writing sync identity")?;
+
+    println!("Remote sync enabled for account '{account}'.");
+    println!("  server:  {server}");
+    println!("  account: {account_hex}");
+    println!("  device:  {device_id}");
+    println!("Run `pergamon sync-remote sync` to exchange changes.");
+    Ok(())
+}
+
+/// Print the local sync status.
+fn sync_remote_status(db: &Database) -> Result<()> {
+    let state = db.sync_state()?;
+    let Some(server) = state.server_url else {
+        println!("Remote sync: disabled");
+        println!("Run `pergamon sync-remote enable --server <url>` to enable it.");
+        return Ok(());
+    };
+    let pending = db.pending_outbox_count()?;
+    let conflicts = db.list_conflicts(false)?.len();
+    println!("Remote sync: enabled");
+    println!("  server:    {server}");
+    println!(
+        "  account:   {}",
+        state.account_id.as_deref().unwrap_or("(unset)")
+    );
+    println!(
+        "  device:    {}",
+        state.device_id.as_deref().unwrap_or("(unset)")
+    );
+    println!("  epoch:     {}", state.key_epoch);
+    println!("  cursor:    {}", state.cursor_seq);
+    println!("  pending:   {pending} change(s) awaiting push");
+    println!("  conflicts: {conflicts} unresolved");
+    Ok(())
+}
+
+/// List or dismiss conflict-copy inbox entries.
+fn sync_remote_conflicts(db: &Database, dismiss: Option<&str>, all: bool) -> Result<()> {
+    if let Some(id) = dismiss {
+        db.dismiss_conflict(id).context("dismissing conflict")?;
+        println!("Dismissed conflict {id}.");
+        return Ok(());
+    }
+    let conflicts = db.list_conflicts(all)?;
+    if conflicts.is_empty() {
+        println!("No conflict-copy entries.");
+        return Ok(());
+    }
+    for c in &conflicts {
+        let flag = if c.dismissed { " (dismissed)" } else { "" };
+        println!("{}{flag}", c.id);
+        println!("  entity: {} {}", c.entity_type, c.entity_id);
+        println!("  field:  {}", c.field);
+        println!("  loser:  {}", c.loser_value);
+        println!("  at:     {}", c.created_at);
+    }
+    Ok(())
 }
 
 // ------------------------------------------------------------------

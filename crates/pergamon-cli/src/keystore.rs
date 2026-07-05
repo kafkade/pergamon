@@ -22,7 +22,7 @@ use anyhow::{Context, Result, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use pergamon_crypto::device::DeviceKeypairs;
-use pergamon_crypto::hierarchy::AccountRootKey;
+use pergamon_crypto::hierarchy::{ACCOUNT_ID_LEN, AccountId, AccountRootKey};
 use pergamon_crypto::primitives::{self, KEY_LEN};
 use serde::{Deserialize, Serialize};
 
@@ -33,6 +33,8 @@ const KEYRING_SERVICE: &str = "dev.pergamon.sync";
 const DEVICE_SUFFIX: &str = "device";
 /// Suffix identifying the Account Root Key entry (`{account}` scoped).
 const ARK_SUFFIX: &str = "ark";
+/// Suffix identifying the opaque ADR-022 account handle (`{account}` scoped).
+const ACCOUNT_ID_SUFFIX: &str = "account-id";
 
 /// A device-key store backed by either the OS keychain or an encrypted file.
 pub struct DeviceKeyStore {
@@ -125,6 +127,31 @@ impl DeviceKeyStore {
             .try_into()
             .map_err(|_| anyhow::anyhow!("stored ARK has unexpected length {}", blob.len()))?;
         Ok(Some(AccountRootKey::from_bytes(bytes)))
+    }
+
+    /// Persist the opaque ADR-022 account handle for `account`.
+    ///
+    /// This is the wire `account_id` all of the account's devices share; the
+    /// first device generates it and enrollment (#35) distributes it to others.
+    ///
+    /// # Errors
+    /// Returns an error if the backing store rejects the write.
+    pub fn save_account_id(&mut self, account: &str, id: &AccountId) -> Result<()> {
+        self.set(account, ACCOUNT_ID_SUFFIX, id.as_bytes())
+    }
+
+    /// Load the opaque account handle for `account`, or `None` if unset.
+    ///
+    /// # Errors
+    /// Returns an error if the store read fails or the stored blob is malformed.
+    pub fn load_account_id(&self, account: &str) -> Result<Option<AccountId>> {
+        let Some(blob) = self.get(account, ACCOUNT_ID_SUFFIX)? else {
+            return Ok(None);
+        };
+        let bytes: [u8; ACCOUNT_ID_LEN] = blob.as_slice().try_into().map_err(|_| {
+            anyhow::anyhow!("stored account id has unexpected length {}", blob.len())
+        })?;
+        Ok(Some(AccountId::from_bytes(bytes)))
     }
 
     /// Write a secret under the `{account}:{suffix}` entry.
