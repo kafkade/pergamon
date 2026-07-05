@@ -143,3 +143,128 @@ pub struct BlobProbeResponse {
     /// Hashes the server is missing (upload these before referencing them).
     pub missing: Vec<String>,
 }
+
+// --- Opaque onboarding-artifact relay wire types (ADR-024, #125) -------------
+//
+// These carry the base64-encoded ciphertext / signed bytes of onboarding
+// artifacts (device records, key-wrap bundles, attestations, recovery blob).
+// The server relays them verbatim and never base64-decodes their meaning: the
+// `*_b64` fields are opaque to it exactly as `ciphertext_b64` is above.
+
+/// Request body to publish a device's opaque signed record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceRecordInput {
+    /// Opaque signed device-record bytes, standard-base64 encoded.
+    pub record_b64: String,
+}
+
+/// A device record as returned to clients.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceRecordEntry {
+    /// Opaque origin-device handle.
+    pub device_id: String,
+    /// Opaque signed device-record bytes, standard-base64 encoded.
+    pub record_b64: String,
+}
+
+/// Response body listing an account's device roster.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceRecordsResponse {
+    /// Every published device record for the account.
+    pub devices: Vec<DeviceRecordEntry>,
+}
+
+/// Request body to relay a key-wrap bundle to a recipient device.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WrappedBundleInput {
+    /// Opaque sealed bundle bytes, standard-base64 encoded.
+    pub bundle_b64: String,
+}
+
+/// Response body acknowledging a relayed key-wrap bundle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WrappedBundleAck {
+    /// The per-recipient sequence assigned to (or already held by) the bundle.
+    pub seq: u64,
+    /// `true` when identical bytes already existed and were not stored again.
+    pub deduplicated: bool,
+}
+
+/// A relayed key-wrap bundle as returned to its recipient.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WrappedBundleEntry {
+    /// Per-recipient monotonic sequence (the cursor domain).
+    pub seq: u64,
+    /// Opaque sealed bundle bytes, standard-base64 encoded.
+    pub bundle_b64: String,
+}
+
+/// Response body listing pending key-wrap bundles for a device.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WrappedBundlesResponse {
+    /// Bundles with `seq > cursor`, ascending.
+    pub bundles: Vec<WrappedBundleEntry>,
+    /// The cursor to persist after applying this page (greatest `seq`, or the
+    /// request cursor when empty).
+    pub next_cursor: u64,
+}
+
+/// Request body to append a signed attestation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttestationInput {
+    /// Opaque signed attestation bytes, standard-base64 encoded.
+    pub attestation_b64: String,
+}
+
+/// Response body acknowledging an appended attestation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttestationAck {
+    /// The per-account sequence assigned to (or already held by) the attestation.
+    pub seq: u64,
+    /// `true` when identical bytes already existed and were not stored again.
+    pub deduplicated: bool,
+}
+
+/// A relayed attestation as returned to clients.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttestationEntry {
+    /// Per-account monotonic sequence (the cursor domain).
+    pub seq: u64,
+    /// Opaque signed attestation bytes, standard-base64 encoded.
+    pub attestation_b64: String,
+}
+
+/// Response body listing an account's attestation history.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttestationsResponse {
+    /// Attestations with `seq > cursor`, ascending.
+    pub attestations: Vec<AttestationEntry>,
+    /// The cursor to persist after applying this page (greatest `seq`, or the
+    /// request cursor when empty).
+    pub next_cursor: u64,
+}
+
+/// Request body to store an account's opaque recovery blob.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecoveryBlobInput {
+    /// Opaque Argon2id-wrapped recovery bytes, standard-base64 encoded.
+    pub blob_b64: String,
+}
+
+/// Response body returning an account's opaque recovery blob.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecoveryBlobResponse {
+    /// Opaque Argon2id-wrapped recovery bytes, standard-base64 encoded.
+    pub blob_b64: String,
+}
+
+/// Query parameters for a cursored relay list (bundles, attestations).
+#[derive(Debug, Clone, Deserialize)]
+pub struct RelayListQuery {
+    /// Exclusive lower bound: return artifacts with `seq > after`.
+    #[serde(default)]
+    pub after: u64,
+    /// Maximum number of artifacts to return in this page.
+    #[serde(default)]
+    pub limit: Option<u32>,
+}

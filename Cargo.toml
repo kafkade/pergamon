@@ -7,6 +7,7 @@ members = [
     "crates/pergamon-extract",
     "crates/pergamon-import",
     "crates/pergamon-export",
+    "crates/pergamon-crypto",
     "crates/pergamon-cli",
     "crates/pergamon-server",
     "crates/pergamon-sync-server",
@@ -30,6 +31,7 @@ pergamon-feed = { path = "crates/pergamon-feed", version = "0.7.0" }
 pergamon-extract = { path = "crates/pergamon-extract", version = "0.7.0" }
 pergamon-import = { path = "crates/pergamon-import", version = "0.7.0" }
 pergamon-export = { path = "crates/pergamon-export", version = "0.7.0" }
+pergamon-crypto = { path = "crates/pergamon-crypto", version = "0.7.0" }
 
 pergamon-server = { path = "crates/pergamon-server", version = "0.7.0" }
 
@@ -60,6 +62,19 @@ csv = "1"
 url = "2"
 base64 = "0.22"
 sha2 = "0.10"
+
+# End-to-end encryption (ADR-024). Generation-A RustCrypto/dalek stack pinned to
+# digest 0.10 so it stays coherent with the workspace `sha2 = 0.10`.
+chacha20poly1305 = { version = "0.10", features = ["getrandom"] }
+x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
+ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }
+hkdf = "0.12"
+hmac = "0.12"
+argon2 = "0.5"
+blake3 = "1"
+zeroize = { version = "1", features = ["derive"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+keyring = { version = "3", features = ["apple-native", "sync-secret-service", "windows-native"] }
 lopdf = "0.43"
 ratatui = "0.30"
 crossterm = "0.29"

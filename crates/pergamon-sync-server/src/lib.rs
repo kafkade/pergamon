@@ -25,6 +25,17 @@
 //! - `GET  /v1/blobs/{account_id}/{ct_hash}` — download an opaque blob.
 //! - `POST /v1/events` — push a batch of encrypted event envelopes.
 //! - `GET  /v1/events` — pull events with `server_seq > cursor`, ascending.
+//!
+//! ## Onboarding-artifact relay (ADR-024)
+//! Opaque stores for the E2EE onboarding artifacts; the server relays these
+//! bytes verbatim and never decodes them:
+//! - `PUT/GET /v1/devices/{account_id}/{device_id}` — a device's signed record.
+//! - `GET  /v1/devices/{account_id}` — the account's device roster.
+//! - `POST/GET /v1/wraps/{account_id}/{device_id}` — sealed key-wrap bundles for
+//!   a recipient device (enrollment + rotation re-wraps), cursored.
+//! - `POST/GET /v1/attestations/{account_id}` — signed trust/revocation
+//!   attestations, cursored.
+//! - `PUT/GET /v1/recovery/{account_id}` — the optional recovery blob.
 
 pub mod envelope;
 pub mod error;

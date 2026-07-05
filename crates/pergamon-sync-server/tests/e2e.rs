@@ -20,8 +20,10 @@ use pergamon_sync_server::{AppState, SyncStore, build_router, ct_hash};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-/// A toy stream cipher standing in for the client-side AEAD (#125). The point
-/// is only that the server never holds the key, so it stores opaque bytes.
+/// A toy stream cipher standing in for a client-side AEAD. This test only needs
+/// to prove the server stores opaque bytes it cannot read, so a trivial cipher
+/// suffices here; the *real* `pergamon-crypto` end-to-end round-trip lives in
+/// `e2e_crypto.rs` (#125).
 fn xor_crypt(data: &[u8], key: &[u8]) -> Vec<u8> {
     data.iter()
         .enumerate()

@@ -4,6 +4,7 @@
 //! system. Combines RSS reader, read-later, bookmark manager, and
 //! knowledge retention engine into a single CLI + ratatui TUI.
 
+mod keystore;
 mod tui;
 
 use std::io::{BufRead, Write};
@@ -56,6 +57,11 @@ enum Command {
     },
     /// Refresh all feeds (alias for `feed refresh`).
     Sync,
+    /// Manage this device's sync encryption keys (ADR-024, E2EE).
+    DeviceKey {
+        #[command(subcommand)]
+        action: DeviceKeyAction,
+    },
     /// Save a URL as an article (fetch, extract, store).
     Save {
         /// URL to save (reads from stdin if omitted).
@@ -208,6 +214,34 @@ enum FeedAction {
         /// Target folder name (created if it doesn't exist).
         #[arg(long)]
         folder: String,
+    },
+}
+
+/// Device sync-key subcommands (ADR-024).
+///
+/// These manage the local device's end-to-end-encryption secrets. Keys are kept
+/// in the OS keychain by default, or in an Argon2id-encrypted key file on
+/// headless hosts (`--key-file` with `PERGAMON_KEY_PASSPHRASE`). The full
+/// enrollment/recovery flow arrives with the sync engine (#35).
+#[derive(Debug, Subcommand)]
+enum DeviceKeyAction {
+    /// Generate and store this device's keypairs if it has none yet.
+    Init {
+        /// Account handle these keys belong to.
+        #[arg(long, default_value = "default")]
+        account: String,
+        /// Use an encrypted key file instead of the OS keychain.
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
+    /// Show this device's stored handle (`device_id`), if any.
+    Show {
+        /// Account handle to look up.
+        #[arg(long, default_value = "default")]
+        account: String,
+        /// Read from an encrypted key file instead of the OS keychain.
+        #[arg(long)]
+        key_file: Option<PathBuf>,
     },
 }
 
@@ -759,6 +793,7 @@ fn main() -> Result<()> {
             generate_completions(*shell);
             return Ok(());
         }
+        Command::DeviceKey { action } => return handle_device_key(action),
         _ => {}
     }
 
@@ -832,7 +867,7 @@ fn main() -> Result<()> {
         Command::Stats { action } => handle_stats(&db, &action),
         Command::Rules { action } => handle_rules(&db, action),
         // Already handled above — unreachable at runtime.
-        Command::Config | Command::Completions { .. } => Ok(()),
+        Command::Config | Command::Completions { .. } | Command::DeviceKey { .. } => Ok(()),
     }
 }
 
@@ -5626,6 +5661,88 @@ fn show_config() -> Result<()> {
     let toml_str = toml::to_string_pretty(&config).context("failed to serialize default config")?;
     print!("{toml_str}");
     Ok(())
+}
+
+// ------------------------------------------------------------------
+// Device sync keys (ADR-024, E2EE)
+// ------------------------------------------------------------------
+
+/// Open the requested key store.
+///
+/// Uses an explicit encrypted `key_file` when given; otherwise, if
+/// `PERGAMON_KEY_PASSPHRASE` is set, falls back to the default encrypted key
+/// file (headless hosts); otherwise the OS keychain.
+fn open_key_store(key_file: Option<&PathBuf>) -> Result<keystore::DeviceKeyStore> {
+    let passphrase = std::env::var("PERGAMON_KEY_PASSPHRASE").ok();
+    match (key_file, passphrase) {
+        (Some(path), Some(pass)) => {
+            keystore::DeviceKeyStore::encrypted_file(path.clone(), pass.as_bytes())
+        }
+        (Some(_), None) => {
+            bail!("set PERGAMON_KEY_PASSPHRASE to unlock the encrypted key file")
+        }
+        (None, Some(pass)) => {
+            let dir = dirs::config_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("pergamon");
+            let path = keystore::default_key_file(&dir);
+            keystore::DeviceKeyStore::encrypted_file(path, pass.as_bytes())
+        }
+        (None, None) => Ok(keystore::DeviceKeyStore::keyring()),
+    }
+}
+
+/// Handle `device-key` subcommands.
+fn handle_device_key(action: &DeviceKeyAction) -> Result<()> {
+    match action {
+        DeviceKeyAction::Init { account, key_file } => {
+            let mut store = open_key_store(key_file.as_ref())?;
+            if let Some(existing) = store.load_device_keys(account)? {
+                println!(
+                    "Device keys already present for account '{account}' (device {}).",
+                    existing.device_id()
+                );
+                return Ok(());
+            }
+            let keys = pergamon_crypto::device::DeviceKeypairs::generate()
+                .context("generating device keypairs")?;
+            store.save_device_keys(account, &keys)?;
+            // The first device on a new account bootstraps its Account Root Key.
+            // Additional devices receive the ARK via enrollment (#35) instead.
+            if store.load_ark(account)?.is_none() {
+                let ark = pergamon_crypto::hierarchy::AccountRootKey::generate()
+                    .context("generating account root key")?;
+                store.save_ark(account, &ark)?;
+                println!(
+                    "Initialized device keys and a new account root key for '{account}' (device {}).",
+                    keys.device_id()
+                );
+            } else {
+                println!(
+                    "Initialized device keys for account '{account}' (device {}).",
+                    keys.device_id()
+                );
+            }
+            Ok(())
+        }
+        DeviceKeyAction::Show { account, key_file } => {
+            let store = open_key_store(key_file.as_ref())?;
+            match store.load_device_keys(account)? {
+                Some(keys) => {
+                    println!("account: {account}");
+                    println!("device_id: {}", keys.device_id());
+                    let ark = if store.load_ark(account)?.is_some() {
+                        "present"
+                    } else {
+                        "absent"
+                    };
+                    println!("account_root_key: {ark}");
+                }
+                None => println!("No device keys stored for account '{account}'."),
+            }
+            Ok(())
+        }
+    }
 }
 
 // ------------------------------------------------------------------

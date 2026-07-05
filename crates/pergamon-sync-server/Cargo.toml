@@ -39,3 +39,7 @@ sha2 = { workspace = true }
 
 [dev-dependencies]
 tower = { workspace = true }
+# Apache-2.0 client crypto, used only in tests to prove a real end-to-end
+# encrypt -> upload -> download -> decrypt round-trip against the blind server
+# (ADR-008 permits an Apache dev-dependency in this AGPL crate).
+pergamon-crypto = { workspace = true }
