@@ -2320,6 +2320,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "pergamon-sync-server"
+version = "0.7.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64",
+ "clap",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "time",
+ "tokio",
+ "tower",
+ "tower-http 0.7.0",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "pergamon-uniffi"
 version = "0.7.0"
 dependencies = [
