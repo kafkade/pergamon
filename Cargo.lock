@@ -2487,6 +2487,7 @@ dependencies = [
  "pergamon-feed",
  "pergamon-import",
  "pergamon-storage",
+ "pergamon-sync",
  "ratatui",
  "reqwest",
  "serde",
@@ -2502,6 +2503,7 @@ name = "pergamon-core"
 version = "0.7.0"
 dependencies = [
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "time",
  "uuid",
@@ -2616,6 +2618,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "pergamon-sync"
+version = "0.7.0"
+dependencies = [
+ "base64",
+ "pergamon-core",
+ "pergamon-crypto",
+ "pergamon-storage",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
 name = "pergamon-sync-server"
 version = "0.7.0"
 dependencies = [
@@ -2623,7 +2641,10 @@ dependencies = [
  "axum",
  "base64",
  "clap",
+ "pergamon-core",
  "pergamon-crypto",
+ "pergamon-storage",
+ "pergamon-sync",
  "rusqlite",
  "serde",
  "serde_json",

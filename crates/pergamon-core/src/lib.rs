@@ -23,6 +23,7 @@ pub mod reading_time;
 pub mod rule;
 pub mod smart_filter;
 pub mod status;
+pub mod sync;
 
 #[cfg(test)]
 mod tests {

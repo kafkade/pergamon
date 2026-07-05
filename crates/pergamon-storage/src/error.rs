@@ -29,4 +29,8 @@ pub enum StorageError {
     /// A constraint violation (e.g. trying to modify a smart collection manually).
     #[error("constraint violation: {0}")]
     Constraint(String),
+
+    /// A value could not be serialized to or deserialized from its stored form.
+    #[error("serialization error: {0}")]
+    Serialization(String),
 }
