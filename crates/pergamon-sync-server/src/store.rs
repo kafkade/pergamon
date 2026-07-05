@@ -116,6 +116,45 @@ pub struct PushOutcome {
     pub high_water_seq: u64,
 }
 
+/// A relayed device-roster entry: an opaque signed device record plus its
+/// handle. The server never interprets `bytes`.
+#[derive(Debug, Clone)]
+pub struct DeviceRecordRow {
+    /// Opaque origin-device handle.
+    pub device_id: String,
+    /// Opaque signed device-record bytes.
+    pub bytes: Vec<u8>,
+}
+
+/// A relayed key-wrap bundle addressed to a recipient device, with its
+/// per-recipient sequence. The server never interprets `bytes`.
+#[derive(Debug, Clone)]
+pub struct WrappedBundleRow {
+    /// Per-recipient monotonic sequence assigned on append (the cursor domain).
+    pub seq: u64,
+    /// Opaque sealed bundle bytes.
+    pub bytes: Vec<u8>,
+}
+
+/// A relayed signed attestation with its per-account sequence. The server never
+/// interprets `bytes`.
+#[derive(Debug, Clone)]
+pub struct AttestationRow {
+    /// Per-account monotonic sequence assigned on append (the cursor domain).
+    pub seq: u64,
+    /// Opaque signed attestation bytes.
+    pub bytes: Vec<u8>,
+}
+
+/// The result of appending an opaque, sequence-assigned relay artifact.
+#[derive(Debug, Clone)]
+pub struct AppendResult {
+    /// The assigned (or pre-existing, on dedup) sequence.
+    pub seq: u64,
+    /// `true` when identical bytes already existed and were not appended again.
+    pub deduplicated: bool,
+}
+
 /// Compute the content address (`ct_hash`) of some bytes: lowercase-hex SHA-256.
 ///
 /// Blobs are addressed by the hash of their *ciphertext*, so this is the same
@@ -193,6 +232,56 @@ impl SyncStore {
                 byte_len    INTEGER NOT NULL,
                 created_at  INTEGER NOT NULL,
                 PRIMARY KEY (account_id, ct_hash)
+            );
+
+            -- Opaque onboarding-artifact relay stores (ADR-024, #125). The
+            -- server stores and serves these bytes verbatim and never decodes
+            -- them; they are separate from the ADR-022 event frame above.
+
+            -- Self-signed device roster entries, one row per device, replaceable
+            -- when a device re-publishes its (stable) record.
+            CREATE TABLE IF NOT EXISTS device_records (
+                account_id  TEXT    NOT NULL,
+                device_id   TEXT    NOT NULL,
+                bytes       BLOB    NOT NULL,
+                updated_at  INTEGER NOT NULL,
+                PRIMARY KEY (account_id, device_id)
+            );
+
+            -- Sealed key-wrap bundles (enrollment + rotation re-wraps) addressed
+            -- to a recipient device. Append-only, per-recipient monotonic seq,
+            -- content-hash deduplicated so retries are idempotent.
+            CREATE TABLE IF NOT EXISTS wrapped_bundles (
+                account_id          TEXT    NOT NULL,
+                recipient_device_id TEXT    NOT NULL,
+                seq                 INTEGER NOT NULL,
+                content_hash        TEXT    NOT NULL,
+                bytes               BLOB    NOT NULL,
+                created_at          INTEGER NOT NULL,
+                PRIMARY KEY (account_id, recipient_device_id, seq)
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_wrapped_content
+                ON wrapped_bundles (account_id, recipient_device_id, content_hash);
+
+            -- Signed trust/revocation attestations, visible to every device.
+            -- Append-only, per-account monotonic seq, content-hash deduplicated.
+            CREATE TABLE IF NOT EXISTS attestations (
+                account_id   TEXT    NOT NULL,
+                seq          INTEGER NOT NULL,
+                content_hash TEXT    NOT NULL,
+                bytes        BLOB    NOT NULL,
+                created_at   INTEGER NOT NULL,
+                PRIMARY KEY (account_id, seq)
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_attestation_content
+                ON attestations (account_id, content_hash);
+
+            -- Optional single Argon2id-wrapped recovery blob per account.
+            CREATE TABLE IF NOT EXISTS recovery_blobs (
+                account_id  TEXT    NOT NULL,
+                bytes       BLOB    NOT NULL,
+                updated_at  INTEGER NOT NULL,
+                PRIMARY KEY (account_id)
             );",
         )?;
         Ok(())
@@ -465,5 +554,279 @@ impl SyncStore {
             |row| row.get(0),
         )?;
         Ok(u64::try_from(max).unwrap_or(0))
+    }
+
+    // --- Opaque onboarding-artifact relay (ADR-024, #125) ---------------------
+    //
+    // All methods below store and serve opaque bytes verbatim. The server never
+    // decodes, validates, or interprets them beyond content-hash deduplication;
+    // authenticity is enforced entirely client-side by signatures the server
+    // cannot read.
+
+    /// Publish (or replace) a device's opaque signed record.
+    ///
+    /// Idempotent by `(account_id, device_id)`: a device re-publishing its
+    /// record overwrites the previous bytes.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Db`] on a database failure.
+    pub fn device_record_put(
+        &self,
+        account_id: &str,
+        device_id: &str,
+        bytes: &[u8],
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO device_records (account_id, device_id, bytes, updated_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(account_id, device_id)
+             DO UPDATE SET bytes = excluded.bytes, updated_at = excluded.updated_at",
+            params![account_id, device_id, bytes, now_millis()],
+        )?;
+        Ok(())
+    }
+
+    /// Fetch one device's opaque record, or `None` if absent.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Db`] on a database failure.
+    pub fn device_record_get(
+        &self,
+        account_id: &str,
+        device_id: &str,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        let bytes = self
+            .conn
+            .query_row(
+                "SELECT bytes FROM device_records WHERE account_id = ?1 AND device_id = ?2",
+                params![account_id, device_id],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()?;
+        Ok(bytes)
+    }
+
+    /// List every device record for an account, ordered by `device_id`.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Db`] on a database failure.
+    pub fn device_records_list(
+        &self,
+        account_id: &str,
+    ) -> Result<Vec<DeviceRecordRow>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT device_id, bytes FROM device_records
+             WHERE account_id = ?1 ORDER BY device_id ASC",
+        )?;
+        let rows = stmt.query_map(params![account_id], |row| {
+            Ok(DeviceRecordRow {
+                device_id: row.get::<_, String>(0)?,
+                bytes: row.get::<_, Vec<u8>>(1)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Append an opaque key-wrap bundle addressed to a recipient device.
+    ///
+    /// Idempotent by content: re-submitting identical bytes for the same
+    /// recipient returns the existing sequence instead of appending a duplicate.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Db`] on a database failure.
+    pub fn wrapped_bundle_put(
+        &mut self,
+        account_id: &str,
+        recipient_device_id: &str,
+        bytes: &[u8],
+    ) -> Result<AppendResult, StoreError> {
+        let hash = ct_hash(bytes);
+        let tx = self.conn.transaction()?;
+        let existing: Option<i64> = tx
+            .query_row(
+                "SELECT seq FROM wrapped_bundles
+                 WHERE account_id = ?1 AND recipient_device_id = ?2 AND content_hash = ?3",
+                params![account_id, recipient_device_id, hash],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(seq) = existing {
+            tx.commit()?;
+            return Ok(AppendResult {
+                seq: u64::try_from(seq).unwrap_or(0),
+                deduplicated: true,
+            });
+        }
+        let max_seq: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(seq), 0) FROM wrapped_bundles
+             WHERE account_id = ?1 AND recipient_device_id = ?2",
+            params![account_id, recipient_device_id],
+            |row| row.get(0),
+        )?;
+        let seq = max_seq + 1;
+        tx.execute(
+            "INSERT INTO wrapped_bundles
+                (account_id, recipient_device_id, seq, content_hash, bytes, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                account_id,
+                recipient_device_id,
+                seq,
+                hash,
+                bytes,
+                now_millis()
+            ],
+        )?;
+        tx.commit()?;
+        Ok(AppendResult {
+            seq: u64::try_from(seq).unwrap_or(0),
+            deduplicated: false,
+        })
+    }
+
+    /// List key-wrap bundles for a recipient device with `seq > after`,
+    /// ascending.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Db`] on a database failure.
+    pub fn wrapped_bundles_list(
+        &self,
+        account_id: &str,
+        recipient_device_id: &str,
+        after: u64,
+        limit: u32,
+    ) -> Result<Vec<WrappedBundleRow>, StoreError> {
+        let after_i = i64::try_from(after).unwrap_or(i64::MAX);
+        let limit_i = i64::from(limit);
+        let mut stmt = self.conn.prepare(
+            "SELECT seq, bytes FROM wrapped_bundles
+             WHERE account_id = ?1 AND recipient_device_id = ?2 AND seq > ?3
+             ORDER BY seq ASC LIMIT ?4",
+        )?;
+        let rows = stmt.query_map(
+            params![account_id, recipient_device_id, after_i, limit_i],
+            |row| {
+                Ok(WrappedBundleRow {
+                    seq: u64::try_from(row.get::<_, i64>(0)?).unwrap_or(0),
+                    bytes: row.get::<_, Vec<u8>>(1)?,
+                })
+            },
+        )?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Append an opaque signed attestation to an account's roster history.
+    ///
+    /// Idempotent by content: re-submitting identical bytes returns the existing
+    /// sequence instead of appending a duplicate.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Db`] on a database failure.
+    pub fn attestation_append(
+        &mut self,
+        account_id: &str,
+        bytes: &[u8],
+    ) -> Result<AppendResult, StoreError> {
+        let hash = ct_hash(bytes);
+        let tx = self.conn.transaction()?;
+        let existing: Option<i64> = tx
+            .query_row(
+                "SELECT seq FROM attestations WHERE account_id = ?1 AND content_hash = ?2",
+                params![account_id, hash],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(seq) = existing {
+            tx.commit()?;
+            return Ok(AppendResult {
+                seq: u64::try_from(seq).unwrap_or(0),
+                deduplicated: true,
+            });
+        }
+        let max_seq: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(seq), 0) FROM attestations WHERE account_id = ?1",
+            params![account_id],
+            |row| row.get(0),
+        )?;
+        let seq = max_seq + 1;
+        tx.execute(
+            "INSERT INTO attestations (account_id, seq, content_hash, bytes, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![account_id, seq, hash, bytes, now_millis()],
+        )?;
+        tx.commit()?;
+        Ok(AppendResult {
+            seq: u64::try_from(seq).unwrap_or(0),
+            deduplicated: false,
+        })
+    }
+
+    /// List attestations for an account with `seq > after`, ascending.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Db`] on a database failure.
+    pub fn attestations_list(
+        &self,
+        account_id: &str,
+        after: u64,
+        limit: u32,
+    ) -> Result<Vec<AttestationRow>, StoreError> {
+        let after_i = i64::try_from(after).unwrap_or(i64::MAX);
+        let limit_i = i64::from(limit);
+        let mut stmt = self.conn.prepare(
+            "SELECT seq, bytes FROM attestations
+             WHERE account_id = ?1 AND seq > ?2
+             ORDER BY seq ASC LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![account_id, after_i, limit_i], |row| {
+            Ok(AttestationRow {
+                seq: u64::try_from(row.get::<_, i64>(0)?).unwrap_or(0),
+                bytes: row.get::<_, Vec<u8>>(1)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Store (or replace) an account's single opaque recovery blob.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Db`] on a database failure.
+    pub fn recovery_blob_put(&self, account_id: &str, bytes: &[u8]) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO recovery_blobs (account_id, bytes, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(account_id)
+             DO UPDATE SET bytes = excluded.bytes, updated_at = excluded.updated_at",
+            params![account_id, bytes, now_millis()],
+        )?;
+        Ok(())
+    }
+
+    /// Fetch an account's opaque recovery blob, or `None` if none is enabled.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Db`] on a database failure.
+    pub fn recovery_blob_get(&self, account_id: &str) -> Result<Option<Vec<u8>>, StoreError> {
+        let bytes = self
+            .conn
+            .query_row(
+                "SELECT bytes FROM recovery_blobs WHERE account_id = ?1",
+                params![account_id],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()?;
+        Ok(bytes)
     }
 }
