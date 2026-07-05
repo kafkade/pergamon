@@ -9,6 +9,7 @@ members = [
     "crates/pergamon-export",
     "crates/pergamon-cli",
     "crates/pergamon-server",
+    "crates/pergamon-sync-server",
     "crates/pergamon-uniffi",
 ]
 
@@ -58,6 +59,7 @@ scraper = "0.27"
 csv = "1"
 url = "2"
 base64 = "0.22"
+sha2 = "0.10"
 lopdf = "0.43"
 ratatui = "0.30"
 crossterm = "0.29"

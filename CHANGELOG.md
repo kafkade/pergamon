@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `pergamon-sync-server` crate: an optional, end-to-end-encrypted multi-device sync server (AGPL-3.0) that stores ciphertext only. It keeps an append-only, server-sequenced event log and a content-addressed blob store, and understands neither payload — event bodies and blobs are opaque encrypted bytes, so the server never sees plaintext, entity ids, or types
+- Sync server HTTP API: `GET /health`; `POST /v1/events` to push a batch of encrypted event envelopes (idempotent on client-supplied `change_id`, with upload-before-commit enforcement); `GET /v1/events` for cursor-based incremental pull ordered by a monotonic `server_seq`; `POST /v1/blobs/probe` to discover which ciphertext blobs are missing; and `PUT`/`GET /v1/blobs/{account}/{ct_hash}` to upload and download opaque, content-addressed (SHA-256-verified) blobs
+- `pergamon-sync-server` binary with configurable host, port, and database path via CLI flags or environment variables (`PERGAMON_SYNC_HOST`, `PERGAMON_SYNC_PORT`, `PERGAMON_SYNC_DB`), and graceful shutdown on SIGINT/SIGTERM or Ctrl+C
+
 ## [0.7.0] - 2026-07-02
 
 ### Added

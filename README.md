@@ -117,7 +117,9 @@ pergamon/
 │   ├── pergamon-extract/    # Article extraction, PDF parsing, HTML sanitization
 │   ├── pergamon-import/     # Importers (Inoreader, Raindrop, Readwise, Pocket, Kindle)
 │   ├── pergamon-export/     # Exporters (OPML, JSON, CSV, Markdown, Obsidian)
-│   └── pergamon-cli/        # CLI + TUI binary (clap + ratatui)
+│   ├── pergamon-cli/        # CLI + TUI binary (clap + ratatui)
+│   ├── pergamon-server/     # Axum web server + admin diagnostics (AGPL-3.0)
+│   └── pergamon-sync-server/ # E2E-encrypted multi-device sync server (AGPL-3.0)
 ├── apps/
 │   └── obsidian-plugin/     # Obsidian community plugin (TypeScript)
 └── docs/
