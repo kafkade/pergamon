@@ -63,15 +63,15 @@ scraper = "0.27"
 csv = "1"
 url = "2"
 base64 = "0.22"
-sha2 = "0.10"
+sha2 = "0.11"
 
 # End-to-end encryption (ADR-024). Generation-A RustCrypto/dalek stack pinned to
 # digest 0.10 so it stays coherent with the workspace `sha2 = 0.10`.
-chacha20poly1305 = { version = "0.10", features = ["getrandom"] }
+chacha20poly1305 = { version = "0.11", features = ["getrandom"] }
 x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
 ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }
-hkdf = "0.12"
-hmac = "0.12"
+hkdf = "0.13"
+hmac = "0.13"
 argon2 = "0.5"
 blake3 = "1"
 zeroize = { version = "1", features = ["derive"] }
