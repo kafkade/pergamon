@@ -16,10 +16,14 @@
 //!   strategies (LWW, set-union + observed-remove tombstone, derived-merge,
 //!   conflict-copy) applies to which field of which entity, plus the pure merge
 //!   functions that resolve a pulled change against local state.
+//! - [`review`] — the ADR-023 **derived-merge** for review scheduling: fold a
+//!   card's append-only review-log union through the FSRS scheduler to recompute
+//!   its schedule losslessly, instead of value-merging counts.
 
 pub mod event;
 pub mod hlc;
 pub mod merge;
+pub mod review;
 
 pub use event::{BlobManifestEntry, ChangeBody, EntityType, Op};
 pub use hlc::Hlc;
@@ -27,3 +31,4 @@ pub use merge::{
     ConflictStrategy, FieldMerge, MergeDecision, SetMember, SetMergeOutcome, merge_field,
     merge_set_member, strategy_for,
 };
+pub use review::{DerivedCard, ReviewLogEntry, derive_card_state};

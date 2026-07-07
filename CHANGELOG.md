@@ -22,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `pergamon sync-remote` CLI command (#126): `enable` links this device to a sync server and account, `push` uploads pending local changes, `pull` fetches and applies remote changes, `sync` does both, `status` shows the pending change count and sync cursor, and `conflicts` lists unresolved edit conflicts. Saving a URL now records a tracked change automatically, so it is included in the next sync
 - Automatic conflict handling for synced edits (#126): concurrent changes from different devices converge deterministically — last-writer-wins for most fields, set-union for tags and collections, and a preserved conflict copy when two devices edit the same long-form text at once, so no edit is silently lost. Deletions win over concurrent edits
 - `pergamon-sync` crate: an Apache-2.0 client sync engine implementing the ADR-022 wire protocol, ADR-023 conflict resolution, and ADR-024 encryption glue, with a pluggable transport (HTTP against the sync server, or in-memory for tests)
+- Spaced-repetition review state now merges correctly across devices (#127): when you review the same card on two devices before syncing, both reviews are kept and the card's schedule is recomputed from the full review history, so due counts stay accurate and no review is dropped or double-counted
+- Concurrent edits to highlights and notes are resolved by type (#127): editing a note or highlight on two devices at once preserves both versions (the losing edit is kept as a conflict copy), and deleting an annotation on one device while another device edits it no longer silently discards that edit — the unseen edit is surfaced as a conflict instead of being lost
 
 ## [0.7.0] - 2026-07-02
 
