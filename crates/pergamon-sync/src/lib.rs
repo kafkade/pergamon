@@ -37,17 +37,26 @@ pub mod blob;
 pub mod crypto;
 pub mod engine;
 pub mod error;
+pub mod onboarding;
+pub mod relay;
 pub mod transport;
 pub mod wire;
 
 #[cfg(feature = "http")]
 pub mod http;
+#[cfg(feature = "http")]
+pub mod http_relay;
 
 pub use blob::{BlobStore, MemoryBlobStore};
 pub use crypto::CryptoContext;
 pub use engine::{SyncEngine, SyncStats};
 pub use error::SyncError;
+pub use onboarding::{Accepted, Revocation};
+pub use relay::{MemoryRelay, RelayAttestation, RelayDevice, RelayTransport, RelayWrap};
 pub use transport::{MemoryTransport, Transport};
+
+#[cfg(feature = "http")]
+pub use http_relay::HttpRelay;
 
 #[doc(inline)]
 pub use pergamon_core::sync::event::ChangeBody;

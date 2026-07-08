@@ -14,9 +14,13 @@
 use crate::device::{DeviceKeypairs, DeviceRecord, device_id_from_ed25519};
 use crate::error::{CryptoError, Result};
 use crate::primitives::{self, KEY_LEN, SIG_LEN};
+use crate::wire::Cursor;
 
 /// Domain tag prefixed to the bytes an attestation signs over.
 const ATTESTATION_TAG: &[u8] = b"pergamon/v1/attestation";
+
+/// Magic prefix identifying a serialized [`SignedAttestation`] on the wire.
+const ATTESTATION_WIRE_TAG: &[u8] = b"pergamon/v1/attestation-wire";
 
 /// What an attestation asserts about its subject device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +37,15 @@ impl AttestationKind {
         match self {
             Self::Trust => 1,
             Self::Revoke => 2,
+        }
+    }
+
+    /// Reconstruct a kind from its one-byte wire tag.
+    const fn from_tag(tag: u8) -> Option<Self> {
+        match tag {
+            1 => Some(Self::Trust),
+            2 => Some(Self::Revoke),
+            _ => None,
         }
     }
 }
@@ -108,6 +121,76 @@ impl SignedAttestation {
             ));
         }
         primitives::ed25519_verify(&a.signer_ed25519_pub, &a.signing_bytes(), &self.signature)
+    }
+
+    /// Serialize to opaque, self-describing wire bytes for relaying: a magic
+    /// prefix, the kind tag, both length-prefixed device handles, both public
+    /// keys, the epoch, `issued_at`, and the signature. Deterministic.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let a = &self.attestation;
+        let signer = a.signer_device_id.as_bytes();
+        let subject = a.subject_device_id.as_bytes();
+        let mut b = Vec::with_capacity(
+            ATTESTATION_WIRE_TAG.len()
+                + 1
+                + 4
+                + signer.len()
+                + KEY_LEN
+                + 4
+                + subject.len()
+                + KEY_LEN
+                + 4
+                + 8
+                + SIG_LEN,
+        );
+        b.extend_from_slice(ATTESTATION_WIRE_TAG);
+        b.push(a.kind.tag());
+        push_lp(&mut b, signer);
+        b.extend_from_slice(&a.signer_ed25519_pub);
+        push_lp(&mut b, subject);
+        b.extend_from_slice(&a.subject_ed25519_pub);
+        b.extend_from_slice(&a.key_epoch.to_be_bytes());
+        b.extend_from_slice(&a.issued_at.to_be_bytes());
+        b.extend_from_slice(&self.signature);
+        b
+    }
+
+    /// Parse a [`SignedAttestation`] from its opaque wire encoding.
+    ///
+    /// Reconstructs the structure only; call [`Self::verify`] afterwards to
+    /// authenticate it.
+    ///
+    /// # Errors
+    /// [`CryptoError::Malformed`] if the input is truncated, has the wrong magic
+    /// prefix, or an unknown kind tag.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        let mut cur = Cursor::new(bytes);
+        cur.expect_tag(ATTESTATION_WIRE_TAG)?;
+        let kind = AttestationKind::from_tag(cur.read_u8()?)
+            .ok_or(CryptoError::Malformed("unknown attestation kind"))?;
+        let signer_len = cur.read_u32()? as usize;
+        let signer_device_id = cur.read_string(signer_len)?;
+        let signer_ed25519_pub = cur.read_array::<KEY_LEN>()?;
+        let subject_len = cur.read_u32()? as usize;
+        let subject_device_id = cur.read_string(subject_len)?;
+        let subject_ed25519_pub = cur.read_array::<KEY_LEN>()?;
+        let key_epoch = cur.read_u32()?;
+        let issued_at = cur.read_i64()?;
+        let signature = cur.read_array::<SIG_LEN>()?;
+        cur.expect_end()?;
+        Ok(Self {
+            attestation: Attestation {
+                kind,
+                signer_device_id,
+                signer_ed25519_pub,
+                subject_device_id,
+                subject_ed25519_pub,
+                key_epoch,
+                issued_at,
+            },
+            signature,
+        })
     }
 }
 
@@ -222,5 +305,37 @@ mod tests {
         let mut att = attest_trust(&signer, &record(&subject), 0, 1);
         att.attestation.signer_device_id = "deadbeef".to_owned();
         assert!(matches!(att.verify(), Err(CryptoError::Malformed(_))));
+    }
+
+    #[test]
+    fn attestation_wire_roundtrips_and_verifies() {
+        let signer = DeviceKeypairs::generate().unwrap();
+        let subject = DeviceKeypairs::generate().unwrap();
+        for att in [
+            attest_trust(&signer, &record(&subject), 2, 1_700_000_000_001),
+            attest_revoke(&signer, &record(&subject), 7, 1_700_000_000_002),
+        ] {
+            let bytes = att.to_bytes();
+            let parsed = SignedAttestation::from_bytes(&bytes).unwrap();
+            assert_eq!(parsed, att);
+            parsed.verify().unwrap();
+            assert_eq!(parsed.to_bytes(), bytes);
+        }
+    }
+
+    #[test]
+    fn attestation_wire_rejects_bad_input() {
+        assert!(matches!(
+            SignedAttestation::from_bytes(b"garbage"),
+            Err(CryptoError::Malformed(_))
+        ));
+        let signer = DeviceKeypairs::generate().unwrap();
+        let subject = DeviceKeypairs::generate().unwrap();
+        let mut bytes = attest_trust(&signer, &record(&subject), 0, 1).to_bytes();
+        bytes.push(0xff); // trailing garbage
+        assert!(matches!(
+            SignedAttestation::from_bytes(&bytes),
+            Err(CryptoError::Malformed(_))
+        ));
     }
 }

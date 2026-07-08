@@ -52,6 +52,7 @@ pub mod hierarchy;
 pub mod primitives;
 pub mod recovery;
 pub mod rotation;
+pub(crate) mod wire;
 
 pub use attestation::{
     Attestation, AttestationKind, SignedAttestation, attest_revoke, attest_trust,
