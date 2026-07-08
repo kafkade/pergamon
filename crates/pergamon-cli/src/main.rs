@@ -68,6 +68,11 @@ enum Command {
         #[command(subcommand)]
         action: SyncRemoteAction,
     },
+    /// Device onboarding, revocation, and recovery (ADR-024, #128).
+    SyncDevice {
+        #[command(subcommand)]
+        action: SyncDeviceAction,
+    },
     /// Save a URL as an article (fetch, extract, store).
     Save {
         /// URL to save (reads from stdin if omitted).
@@ -303,6 +308,156 @@ enum SyncRemoteAction {
         /// Include already-dismissed entries when listing.
         #[arg(long)]
         all: bool,
+    },
+}
+
+/// Device-onboarding subcommands (ADR-024, #128).
+///
+/// These drive the end-to-end-encrypted device lifecycle across an account: a
+/// first device bootstraps the account, later devices are enrolled by an
+/// existing trusted device via a Short-Authentication-String check, devices can
+/// be revoked (rotating the key epoch), and an optional recovery secret can
+/// restore access when no trusted device remains. The server only ever relays
+/// opaque ciphertext.
+#[derive(Debug, Subcommand)]
+enum SyncDeviceAction {
+    /// First device on a new account: create keys + account root key, publish
+    /// this device's record and a self-trust attestation, and bind sync
+    /// identity to the server.
+    Bootstrap {
+        /// Base URL of the sync server (e.g. `https://sync.example.com`).
+        #[arg(long)]
+        server: String,
+        /// Account handle these keys belong to.
+        #[arg(long, default_value = "default")]
+        account: String,
+        /// Use an encrypted key file instead of the OS keychain.
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
+    /// Existing device: print an invite blob to hand to a new device so it can
+    /// enroll onto this account.
+    Invite {
+        /// Account handle to invite onto.
+        #[arg(long, default_value = "default")]
+        account: String,
+        /// Use an encrypted key file instead of the OS keychain.
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
+    /// New device: publish this device's record under an invited account and
+    /// print its Short Authentication String for out-of-band comparison.
+    Enroll {
+        /// Invite blob produced by `sync-device invite` on a trusted device.
+        #[arg(long)]
+        invite: Option<String>,
+        /// Sync server URL (when not using `--invite`).
+        #[arg(long)]
+        server: Option<String>,
+        /// Account handle (hex) to enroll onto (when not using `--invite`).
+        #[arg(long)]
+        account_id: Option<String>,
+        /// The approving device's handle (when not using `--invite`).
+        #[arg(long)]
+        approver: Option<String>,
+        /// Local account handle to store these keys under.
+        #[arg(long, default_value = "default")]
+        account: String,
+        /// Use an encrypted key file instead of the OS keychain.
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
+    /// Existing device: approve a pending new device, sealing the account key to
+    /// it and vouching for it. Compare the SAS out-of-band first.
+    Approve {
+        /// The new device's handle (from its `enroll` output).
+        #[arg(long)]
+        device: String,
+        /// Abort unless the SAS matches this value (space-insensitive).
+        #[arg(long)]
+        expect_sas: Option<String>,
+        /// Account handle whose key authorizes the new device.
+        #[arg(long, default_value = "default")]
+        account: String,
+        /// Use an encrypted key file instead of the OS keychain.
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
+    /// New device: fetch the sealed bundle a trusted device published, store the
+    /// account key, and bind sync identity. Then pull to restore the library.
+    Accept {
+        /// Sync server URL (when not already bound from `enroll`).
+        #[arg(long)]
+        server: Option<String>,
+        /// Account handle (hex) to accept onto (when not already known).
+        #[arg(long)]
+        account_id: Option<String>,
+        /// Local account handle to store the recovered key under.
+        #[arg(long, default_value = "default")]
+        account: String,
+        /// Use an encrypted key file instead of the OS keychain.
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+        /// Skip the automatic library pull after accepting.
+        #[arg(long)]
+        no_pull: bool,
+    },
+    /// Revoke a device: rotate the key epoch, re-wrap the new epoch key to every
+    /// remaining device, and publish a revocation attestation.
+    Revoke {
+        /// The handle of the device to revoke.
+        #[arg(long)]
+        device: String,
+        /// Account handle whose key authorizes the revocation.
+        #[arg(long, default_value = "default")]
+        account: String,
+        /// Use an encrypted key file instead of the OS keychain.
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
+    /// Enable recovery: upload an Argon2id-wrapped copy of the account key. The
+    /// secret is read from `PERGAMON_RECOVERY_PASSPHRASE`, or `--generate-code`
+    /// prints a strong recovery code to save.
+    RecoveryEnable {
+        /// Generate and print a strong recovery code instead of using a
+        /// passphrase from the environment.
+        #[arg(long)]
+        generate_code: bool,
+        /// Account handle whose key is wrapped.
+        #[arg(long, default_value = "default")]
+        account: String,
+        /// Use an encrypted key file instead of the OS keychain.
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
+    /// Recover on a fresh device with no trusted peer: unwrap the account key
+    /// from the recovery secret (`PERGAMON_RECOVERY_PASSPHRASE`), publish a
+    /// device record + self-trust, bind identity, and pull.
+    Recover {
+        /// Base URL of the sync server.
+        #[arg(long)]
+        server: String,
+        /// Account handle (hex) to recover.
+        #[arg(long)]
+        account_id: String,
+        /// Local account handle to store the recovered key under.
+        #[arg(long, default_value = "default")]
+        account: String,
+        /// Use an encrypted key file instead of the OS keychain.
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+        /// Skip the automatic library pull after recovering.
+        #[arg(long)]
+        no_pull: bool,
+    },
+    /// List the account's device roster and its trust / revocation state.
+    Devices {
+        /// Account handle to inspect.
+        #[arg(long, default_value = "default")]
+        account: String,
+        /// Use an encrypted key file instead of the OS keychain.
+        #[arg(long)]
+        key_file: Option<PathBuf>,
     },
 }
 
@@ -928,6 +1083,7 @@ fn main() -> Result<()> {
         Command::Stats { action } => handle_stats(&db, &action),
         Command::Rules { action } => handle_rules(&db, action),
         Command::SyncRemote { action } => handle_sync_remote(&db, action),
+        Command::SyncDevice { action } => handle_sync_device(&db, action),
         // Already handled above — unreachable at runtime.
         Command::Config | Command::Completions { .. } | Command::DeviceKey { .. } => Ok(()),
     }
@@ -6027,6 +6183,585 @@ fn sync_remote_conflicts(db: &Database, dismiss: Option<&str>, all: bool) -> Res
         println!("  field:  {}", c.field);
         println!("  loser:  {}", c.loser_value);
         println!("  at:     {}", c.created_at);
+    }
+    Ok(())
+}
+
+// ------------------------------------------------------------------
+// Device onboarding, revocation, recovery (ADR-024, #128)
+// ------------------------------------------------------------------
+
+/// A shareable invite a trusted device hands to a new device so it can address
+/// the account's relay endpoints. It carries no decryption secret: `account_id`
+/// only indexes ciphertext the server relays.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct DeviceInvite {
+    /// Base URL of the sync server.
+    server: String,
+    /// The account handle (32-char lowercase hex) all devices share.
+    account_id: String,
+    /// The approving device's handle, so the new device can compute the SAS.
+    approver: String,
+}
+
+/// The wall clock in Unix milliseconds as `i64`, for onboarding record stamping.
+fn now_millis_i64() -> i64 {
+    i64::try_from(OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000).unwrap_or(0)
+}
+
+/// Build an HTTP relay client for the onboarding flows.
+fn open_relay(server: &str) -> Result<pergamon_sync::HttpRelay> {
+    pergamon_sync::HttpRelay::new(server.to_owned()).context("building relay client")
+}
+
+/// Parse an account handle from its hex wire form.
+fn parse_account_id(hex: &str) -> Result<pergamon_crypto::hierarchy::AccountId> {
+    pergamon_crypto::hierarchy::AccountId::from_hex(hex)
+        .map_err(|e| anyhow::anyhow!("invalid account id: {e}"))
+}
+
+/// Handle `sync-device` subcommands.
+fn handle_sync_device(db: &Database, action: SyncDeviceAction) -> Result<()> {
+    match action {
+        SyncDeviceAction::Bootstrap {
+            server,
+            account,
+            key_file,
+        } => sync_device_bootstrap(db, &server, &account, key_file.as_ref()),
+        SyncDeviceAction::Invite { account, key_file } => {
+            sync_device_invite(db, &account, key_file.as_ref())
+        }
+        SyncDeviceAction::Enroll {
+            invite,
+            server,
+            account_id,
+            approver,
+            account,
+            key_file,
+        } => sync_device_enroll(
+            invite.as_deref(),
+            server.as_deref(),
+            account_id.as_deref(),
+            approver.as_deref(),
+            &account,
+            key_file.as_ref(),
+        ),
+        SyncDeviceAction::Approve {
+            device,
+            expect_sas,
+            account,
+            key_file,
+        } => sync_device_approve(
+            db,
+            &device,
+            expect_sas.as_deref(),
+            &account,
+            key_file.as_ref(),
+        ),
+        SyncDeviceAction::Accept {
+            server,
+            account_id,
+            account,
+            key_file,
+            no_pull,
+        } => sync_device_accept(
+            db,
+            server.as_deref(),
+            account_id.as_deref(),
+            &account,
+            key_file.as_ref(),
+            no_pull,
+        ),
+        SyncDeviceAction::Revoke {
+            device,
+            account,
+            key_file,
+        } => sync_device_revoke(db, &device, &account, key_file.as_ref()),
+        SyncDeviceAction::RecoveryEnable {
+            generate_code,
+            account,
+            key_file,
+        } => sync_device_recovery_enable(db, generate_code, &account, key_file.as_ref()),
+        SyncDeviceAction::Recover {
+            server,
+            account_id,
+            account,
+            key_file,
+            no_pull,
+        } => sync_device_recover(
+            db,
+            &server,
+            &account_id,
+            &account,
+            key_file.as_ref(),
+            no_pull,
+        ),
+        SyncDeviceAction::Devices { account, key_file } => {
+            sync_device_devices(db, &account, key_file.as_ref())
+        }
+    }
+}
+
+/// Load this account's device keys, generating and persisting a fresh pair if
+/// none exist yet.
+fn ensure_device_keys(
+    store: &mut keystore::DeviceKeyStore,
+    account: &str,
+) -> Result<pergamon_crypto::device::DeviceKeypairs> {
+    if let Some(keys) = store.load_device_keys(account)? {
+        return Ok(keys);
+    }
+    let keys = pergamon_crypto::device::DeviceKeypairs::generate()
+        .context("generating device keypairs")?;
+    store.save_device_keys(account, &keys)?;
+    Ok(keys)
+}
+
+/// First device on a new account: create keys + ARK + account id, publish the
+/// device record and self-trust attestation, and bind sync identity.
+fn sync_device_bootstrap(
+    db: &Database,
+    server: &str,
+    account: &str,
+    key_file: Option<&PathBuf>,
+) -> Result<()> {
+    let mut store = open_key_store(key_file)?;
+
+    let keys = ensure_device_keys(&mut store, account)?;
+    if store.load_ark(account)?.is_none() {
+        let ark = pergamon_crypto::hierarchy::AccountRootKey::generate()
+            .context("generating account root key")?;
+        store.save_ark(account, &ark)?;
+    }
+    let account_id = if let Some(id) = store.load_account_id(account)? {
+        id
+    } else {
+        let id =
+            pergamon_crypto::hierarchy::AccountId::generate().context("generating account id")?;
+        store.save_account_id(account, &id)?;
+        id
+    };
+
+    let epoch = db.sync_state()?.key_epoch;
+    let relay = open_relay(server)?;
+    pergamon_sync::onboarding::bootstrap(&relay, &account_id, &keys, epoch, now_millis_i64())
+        .context("publishing device record")?;
+
+    let account_hex = account_id.to_hex();
+    let device_id = keys.device_id().to_owned();
+    db.set_sync_identity(&account_hex, &device_id, epoch, Some(server))
+        .context("writing sync identity")?;
+
+    println!("Bootstrapped account '{account}' on {server}.");
+    println!("  account: {account_hex}");
+    println!("  device:  {device_id}");
+    println!("  epoch:   {epoch}");
+    println!("Add another device with `pergamon sync-device invite` on this device,");
+    println!("then `pergamon sync-device enroll` on the new one.");
+    Ok(())
+}
+
+/// Existing device: print an invite blob for a new device to enroll with.
+fn sync_device_invite(db: &Database, account: &str, key_file: Option<&PathBuf>) -> Result<()> {
+    let store = open_key_store(key_file)?;
+    let keys = store.load_device_keys(account)?.with_context(|| {
+        format!("no device keys for '{account}'; run `pergamon sync-device bootstrap` first")
+    })?;
+    let account_id = store.load_account_id(account)?.with_context(|| {
+        format!("no account id for '{account}'; run `pergamon sync-device bootstrap` first")
+    })?;
+    let server = db.sync_state()?.server_url.context(
+        "this device is not bound to a server; run `pergamon sync-device bootstrap` first",
+    )?;
+
+    let invite = DeviceInvite {
+        server,
+        account_id: account_id.to_hex(),
+        approver: keys.device_id().to_owned(),
+    };
+    let json = serde_json::to_vec(&invite).context("encoding invite")?;
+    let blob = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, json);
+
+    println!("Invite blob (hand to the new device out-of-band):");
+    println!();
+    println!("{blob}");
+    println!();
+    println!("The new device runs:");
+    println!("  pergamon sync-device enroll --invite {blob}");
+    println!("Then compare the SAS on both devices and approve with:");
+    println!("  pergamon sync-device approve --device <new-device-id>");
+    Ok(())
+}
+
+/// New device: publish this device's record under the invited account and print
+/// its SAS versus the approver for out-of-band comparison.
+fn sync_device_enroll(
+    invite: Option<&str>,
+    server: Option<&str>,
+    account_id: Option<&str>,
+    approver: Option<&str>,
+    account: &str,
+    key_file: Option<&PathBuf>,
+) -> Result<()> {
+    let (server, account_hex, approver) = if let Some(blob) = invite {
+        let raw = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, blob.trim())
+            .context("decoding invite blob")?;
+        let inv: DeviceInvite = serde_json::from_slice(&raw).context("parsing invite blob")?;
+        (inv.server, inv.account_id, inv.approver)
+    } else {
+        let server = server
+            .context("provide --invite, or --server, --account-id, and --approver")?
+            .to_owned();
+        let account_hex = account_id
+            .context("provide --invite, or --server, --account-id, and --approver")?
+            .to_owned();
+        let approver = approver
+            .context("provide --invite, or --server, --account-id, and --approver")?
+            .to_owned();
+        (server, account_hex, approver)
+    };
+    let account_id = parse_account_id(&account_hex)?;
+
+    let mut store = open_key_store(key_file)?;
+    if store.load_device_keys(account)?.is_some() {
+        bail!(
+            "device keys already exist for '{account}'; use a different --account or remove them first"
+        );
+    }
+    let keys = pergamon_crypto::device::DeviceKeypairs::generate()
+        .context("generating device keypairs")?;
+    store.save_device_keys(account, &keys)?;
+    // Remember the account handle so `accept` can address the relay later.
+    store.save_account_id(account, &account_id)?;
+
+    let relay = open_relay(&server)?;
+    pergamon_sync::onboarding::enroll_publish(&relay, &account_id, &keys, now_millis_i64())
+        .context("publishing device record")?;
+    let sas = pergamon_sync::onboarding::sas_against(&relay, &account_id, &keys, &approver)
+        .context("computing SAS")?;
+
+    println!("Enrolled device {} (pending approval).", keys.device_id());
+    println!("  account: {account_hex}");
+    println!("  server:  {server}");
+    println!();
+    println!("Verify this Short Authentication String matches the approver's:");
+    println!("    {}", sas.digits());
+    println!();
+    println!("On the approving device, run:");
+    println!(
+        "  pergamon sync-device approve --device {} --expect-sas \"{}\"",
+        keys.device_id(),
+        sas.digits()
+    );
+    println!("Then on this device, run:");
+    println!("  pergamon sync-device accept --server {server}");
+    Ok(())
+}
+
+/// Existing device: approve a pending new device after SAS verification.
+fn sync_device_approve(
+    db: &Database,
+    device: &str,
+    expect_sas: Option<&str>,
+    account: &str,
+    key_file: Option<&PathBuf>,
+) -> Result<()> {
+    let store = open_key_store(key_file)?;
+    let keys = store.load_device_keys(account)?.with_context(|| {
+        format!("no device keys for '{account}'; run `pergamon sync-device bootstrap` first")
+    })?;
+    let ark = store.load_ark(account)?.with_context(|| {
+        format!("no account root key for '{account}'; this device cannot approve enrollments")
+    })?;
+    let account_id = store
+        .load_account_id(account)?
+        .with_context(|| format!("no account id for '{account}'"))?;
+    let state = db.sync_state()?;
+    let server = state
+        .server_url
+        .context("this device is not bound to a server; run `pergamon sync-device bootstrap`")?;
+    let epoch = state.key_epoch;
+    let relay = open_relay(&server)?;
+
+    // Show the SAS and, if requested, enforce a match before authorizing.
+    let sas = pergamon_sync::onboarding::sas_against(&relay, &account_id, &keys, device)
+        .context("computing SAS")?;
+    println!("Short Authentication String for {device}:");
+    println!("    {}", sas.digits());
+    if let Some(expected) = expect_sas {
+        if normalize_sas(expected) != normalize_sas(&sas.digits()) {
+            bail!(
+                "SAS mismatch: expected {}, computed {} — aborting, do not trust this device",
+                expected,
+                sas.digits()
+            );
+        }
+        println!("SAS matches the expected value.");
+    }
+
+    pergamon_sync::onboarding::approve(
+        &relay,
+        &account_id,
+        &keys,
+        &ark,
+        epoch,
+        device,
+        now_millis_i64(),
+    )
+    .context("approving device")?;
+
+    println!("Approved device {device}.");
+    println!("It can now run `pergamon sync-device accept` to receive the account key.");
+    Ok(())
+}
+
+/// Normalize a SAS string for comparison: drop whitespace.
+fn normalize_sas(s: &str) -> String {
+    s.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+/// New device: fetch the sealed bundle, store the account key, bind identity,
+/// and (unless suppressed) pull to restore the library.
+fn sync_device_accept(
+    db: &Database,
+    server: Option<&str>,
+    account_id: Option<&str>,
+    account: &str,
+    key_file: Option<&PathBuf>,
+    no_pull: bool,
+) -> Result<()> {
+    let mut store = open_key_store(key_file)?;
+    let keys = store.load_device_keys(account)?.with_context(|| {
+        format!("no device keys for '{account}'; run `pergamon sync-device enroll` first")
+    })?;
+    let account_id = match account_id {
+        Some(hex) => parse_account_id(hex)?,
+        None => store.load_account_id(account)?.with_context(|| {
+            format!("no account id for '{account}'; pass --account-id or re-run enroll")
+        })?,
+    };
+    let server = match server {
+        Some(s) => s.to_owned(),
+        None => db.sync_state()?.server_url.context(
+            "no server bound; pass --server or run `pergamon sync-device enroll` with an invite",
+        )?,
+    };
+    let relay = open_relay(&server)?;
+
+    let accepted = pergamon_sync::onboarding::accept(&relay, &account_id, &keys)
+        .context("accepting enrollment")?;
+    let epoch = accepted.bundle.key_epoch;
+    store.save_ark(account, &accepted.bundle.ark)?;
+    store.save_account_id(account, &accepted.bundle.account_id)?;
+
+    let account_hex = accepted.bundle.account_id.to_hex();
+    let device_id = keys.device_id().to_owned();
+    db.set_sync_identity(&account_hex, &device_id, epoch, Some(&server))
+        .context("writing sync identity")?;
+
+    println!("Accepted enrollment onto account {account_hex}.");
+    match &accepted.approver_device_id {
+        Some(id) => println!("  vouched for by device {id}"),
+        None => println!("  (no trust attestation found yet; roster may still be syncing)"),
+    }
+    println!("  device:  {device_id}");
+    println!("  epoch:   {epoch}");
+
+    if no_pull {
+        println!("Run `pergamon sync-remote pull` to restore your library.");
+    } else {
+        println!("Restoring library…");
+        let (engine, blobs) = open_sync_session(db, account, key_file)?;
+        let applied = engine.pull(db, &blobs).context("pulling changes")?;
+        println!("Applied {applied} change(s).");
+    }
+    Ok(())
+}
+
+/// Revoke a device: rotate the epoch, re-wrap to the remaining devices, and
+/// publish a revocation attestation.
+fn sync_device_revoke(
+    db: &Database,
+    device: &str,
+    account: &str,
+    key_file: Option<&PathBuf>,
+) -> Result<()> {
+    let store = open_key_store(key_file)?;
+    let keys = store
+        .load_device_keys(account)?
+        .with_context(|| format!("no device keys for '{account}'"))?;
+    let ark = store.load_ark(account)?.with_context(|| {
+        format!("no account root key for '{account}'; this device cannot revoke")
+    })?;
+    let account_id = store
+        .load_account_id(account)?
+        .with_context(|| format!("no account id for '{account}'"))?;
+    let state = db.sync_state()?;
+    let server = state
+        .server_url
+        .context("this device is not bound to a server; run `pergamon sync-device bootstrap`")?;
+    let epoch = state.key_epoch;
+    let relay = open_relay(&server)?;
+
+    let rev = pergamon_sync::onboarding::revoke(
+        &relay,
+        &account_id,
+        &keys,
+        &ark,
+        epoch,
+        device,
+        now_millis_i64(),
+    )
+    .context("revoking device")?;
+    db.set_key_epoch(rev.new_epoch)
+        .context("advancing local key epoch")?;
+
+    println!("Revoked device {device}.");
+    println!("  new epoch:   {}", rev.new_epoch);
+    println!(
+        "  re-wrapped to: {}",
+        if rev.rewrapped_devices.is_empty() {
+            "(no remaining devices)".to_owned()
+        } else {
+            rev.rewrapped_devices.join(", ")
+        }
+    );
+    println!();
+    println!("Note (ADR-024): every enrolled device holds the account root key, so a");
+    println!("revoked device can still derive future epoch keys on its own. This rotation");
+    println!("is roster hygiene plus an epoch advance, not a forward-secrecy re-key of");
+    println!("already-uploaded content. Rotate any shared secrets stored in synced");
+    println!("content that the revoked device should no longer see.");
+    Ok(())
+}
+
+/// Enable recovery: upload a passphrase/recovery-code-wrapped copy of the ARK.
+fn sync_device_recovery_enable(
+    db: &Database,
+    generate_code: bool,
+    account: &str,
+    key_file: Option<&PathBuf>,
+) -> Result<()> {
+    let store = open_key_store(key_file)?;
+    let ark = store
+        .load_ark(account)?
+        .with_context(|| format!("no account root key for '{account}'"))?;
+    let account_id = store
+        .load_account_id(account)?
+        .with_context(|| format!("no account id for '{account}'"))?;
+    let server = db.sync_state()?.server_url.context(
+        "this device is not bound to a server; run `pergamon sync-device bootstrap` first",
+    )?;
+
+    let secret = if generate_code {
+        let code = pergamon_crypto::recovery::generate_recovery_code()
+            .context("generating recovery code")?;
+        println!("Recovery code (write this down and store it safely):");
+        println!();
+        println!("    {code}");
+        println!();
+        code
+    } else {
+        std::env::var("PERGAMON_RECOVERY_PASSPHRASE").map_err(|_| {
+            anyhow::anyhow!(
+                "set PERGAMON_RECOVERY_PASSPHRASE, or pass --generate-code to mint a strong code"
+            )
+        })?
+    };
+
+    let relay = open_relay(&server)?;
+    pergamon_sync::onboarding::recovery_publish(&relay, &account_id, &ark, secret.as_bytes())
+        .context("uploading recovery blob")?;
+
+    println!("Recovery enabled for account {}.", account_id.to_hex());
+    println!();
+    println!("Warning: anyone who learns this secret can recover the account key and");
+    println!("decrypt everything. It is only as strong as the secret you chose — treat");
+    println!("it like a master password.");
+    Ok(())
+}
+
+/// Recover on a fresh device with no trusted peer: unwrap the ARK from the
+/// recovery secret, join the roster, bind identity, and pull.
+fn sync_device_recover(
+    db: &Database,
+    server: &str,
+    account_id: &str,
+    account: &str,
+    key_file: Option<&PathBuf>,
+    no_pull: bool,
+) -> Result<()> {
+    let secret = std::env::var("PERGAMON_RECOVERY_PASSPHRASE").map_err(|_| {
+        anyhow::anyhow!("set PERGAMON_RECOVERY_PASSPHRASE to the account's recovery secret")
+    })?;
+    let account_id = parse_account_id(account_id)?;
+    let relay = open_relay(server)?;
+
+    let ark = pergamon_sync::onboarding::recover_ark(&relay, &account_id, secret.as_bytes())
+        .context("recovering account key")?;
+
+    let mut store = open_key_store(key_file)?;
+    let keys = ensure_device_keys(&mut store, account)?;
+    store.save_ark(account, &ark)?;
+    store.save_account_id(account, &account_id)?;
+
+    // Bind to the account's current epoch so new local writes use the live key.
+    let epoch = pergamon_sync::onboarding::current_epoch(&relay, &account_id)
+        .context("reading account epoch")?;
+    pergamon_sync::onboarding::bootstrap(&relay, &account_id, &keys, epoch, now_millis_i64())
+        .context("publishing recovered device record")?;
+
+    let account_hex = account_id.to_hex();
+    let device_id = keys.device_id().to_owned();
+    db.set_sync_identity(&account_hex, &device_id, epoch, Some(server))
+        .context("writing sync identity")?;
+
+    println!("Recovered account {account_hex} on this device.");
+    println!("  device:  {device_id}");
+    println!("  epoch:   {epoch}");
+
+    if no_pull {
+        println!("Run `pergamon sync-remote pull` to restore your library.");
+    } else {
+        println!("Restoring library…");
+        let (engine, blobs) = open_sync_session(db, account, key_file)?;
+        let applied = engine.pull(db, &blobs).context("pulling changes")?;
+        println!("Applied {applied} change(s).");
+    }
+    Ok(())
+}
+
+/// List the account's device roster with trust / revocation state.
+fn sync_device_devices(db: &Database, account: &str, key_file: Option<&PathBuf>) -> Result<()> {
+    let store = open_key_store(key_file)?;
+    let account_id = store
+        .load_account_id(account)?
+        .with_context(|| format!("no account id for '{account}'"))?;
+    let server = db
+        .sync_state()?
+        .server_url
+        .context("this device is not bound to a server")?;
+    let relay = open_relay(&server)?;
+
+    let roster =
+        pergamon_sync::onboarding::roster(&relay, &account_id).context("listing device roster")?;
+    let self_id = store
+        .load_device_keys(account)?
+        .map(|k| k.device_id().to_owned());
+
+    if roster.is_empty() {
+        println!("No devices on the roster yet.");
+        return Ok(());
+    }
+    println!("Devices on account {}:", account_id.to_hex());
+    for r in &roster {
+        let id = &r.record.device_id;
+        let marker = if self_id.as_deref() == Some(id.as_str()) {
+            " (this device)"
+        } else {
+            ""
+        };
+        println!("  {id}{marker}");
     }
     Ok(())
 }

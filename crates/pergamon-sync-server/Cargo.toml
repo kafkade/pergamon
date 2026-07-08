@@ -46,7 +46,8 @@ pergamon-crypto = { workspace = true }
 # Apache-2.0 client sync engine + storage, used only in tests to drive two local
 # databases through the real router and prove they converge (issue #126). ADR-008
 # permits Apache dev-dependencies in this AGPL crate; the server never links them
-# at runtime.
-pergamon-sync = { workspace = true }
+# at runtime. The `http` feature adds the blocking reqwest relay client, exercised
+# over real TCP by the onboarding e2e test (issue #128).
+pergamon-sync = { workspace = true, features = ["http"] }
 pergamon-storage = { workspace = true }
 pergamon-core = { workspace = true }
