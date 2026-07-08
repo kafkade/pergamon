@@ -18,11 +18,15 @@
 
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Map, Value};
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
+use pergamon_core::fsrs::{Rating, Scheduler};
 use pergamon_core::sync::event::{BlobManifestEntry, ChangeBody, EntityType, Op};
 use pergamon_core::sync::hlc::Hlc;
 use pergamon_core::sync::merge::{ConflictStrategy, SetMember, strategy_for};
+use pergamon_core::sync::review::{DerivedCard, ReviewLogEntry, derive_card_state};
 
 use crate::db::Database;
 use crate::error::StorageError;
@@ -564,6 +568,134 @@ impl Database {
     }
 
     // ==================================================================
+    // Derived-merge for review scheduling (ADR-023)
+    // ==================================================================
+
+    /// Recompute a review card's FSRS scheduling state from the union of its
+    /// append-only review logs and persist it (ADR-023 **derived-merge**).
+    ///
+    /// This is the pull-side reconciliation for review state: rather than
+    /// value-merging a card's `stability`/`due_at`/`review_count` (which would
+    /// double-count or drop concurrent reviews), the schedule is *recomputed* by
+    /// folding the time-ordered log union through the deterministic FSRS
+    /// scheduler. Every device holding the same logs converges to identical card
+    /// state — so concurrent reviews keep due counts correct.
+    ///
+    /// No-op when the card row does not exist yet (a log can arrive before its
+    /// card's metadata) or when the card has no logs (the ADR's "briefly stale
+    /// until logs arrive" — any provisional value already written is left as-is).
+    ///
+    /// # Errors
+    /// Returns a [`StorageError`] if a query fails.
+    pub fn recompute_review_card(&self, card_id: &str) -> Result<(), StorageError> {
+        let exists: bool = self
+            .connection()
+            .query_row(
+                "SELECT 1 FROM review_cards WHERE id = ?1",
+                params![card_id],
+                |_| Ok(true),
+            )
+            .optional()?
+            .unwrap_or(false);
+        if !exists {
+            return Ok(());
+        }
+        let logs = self.review_log_entries_for_card(card_id)?;
+        if logs.is_empty() {
+            return Ok(());
+        }
+        let derived = derive_card_state(&Scheduler::default_v5(), &logs);
+        self.write_derived_card_state(card_id, &derived)
+    }
+
+    /// The `card_id` a review log belongs to, if the log exists locally.
+    ///
+    /// Used by the apply layer to find which card to recompute after appending
+    /// a pulled review log.
+    ///
+    /// # Errors
+    /// Returns a [`StorageError`] if the query fails.
+    pub fn review_log_card_id(&self, log_id: &str) -> Result<Option<String>, StorageError> {
+        let card = self
+            .connection()
+            .query_row(
+                "SELECT card_id FROM review_logs WHERE id = ?1",
+                params![log_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(card)
+    }
+
+    /// Read a card's review logs reduced to the `(id, reviewed_at, rating)` the
+    /// derived-merge fold consumes. Rating is coerced to an integer regardless
+    /// of column affinity; reviewed timestamps are parsed to epoch millis.
+    fn review_log_entries_for_card(
+        &self,
+        card_id: &str,
+    ) -> Result<Vec<ReviewLogEntry>, StorageError> {
+        let conn = self.connection();
+        let mut stmt = conn.prepare(
+            "SELECT id, CAST(rating AS INTEGER), reviewed_at
+             FROM review_logs WHERE card_id = ?1",
+        )?;
+        let rows = stmt.query_map(params![card_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut entries = Vec::new();
+        for row in rows {
+            let (id, rating_val, reviewed_at) = row?;
+            let Some(rating) = u32::try_from(rating_val).ok().and_then(Rating::from_value) else {
+                continue;
+            };
+            entries.push(ReviewLogEntry {
+                id,
+                reviewed_at_ms: parse_epoch_millis(&reviewed_at),
+                rating,
+            });
+        }
+        Ok(entries)
+    }
+
+    /// Persist a derived schedule onto a review card, overriding the value-merged
+    /// scalars. Preserves `content_item_id` and never touches the append-only
+    /// logs. `due_at` keeps its existing value when the derivation yields none.
+    fn write_derived_card_state(
+        &self,
+        card_id: &str,
+        derived: &DerivedCard,
+    ) -> Result<(), StorageError> {
+        self.connection().execute(
+            "UPDATE review_cards SET
+                state = ?2,
+                stability = ?3,
+                difficulty = ?4,
+                due_at = COALESCE(?5, due_at),
+                last_reviewed_at = ?6,
+                review_count = ?7,
+                lapse_count = ?8,
+                scheduled_days = ?9
+             WHERE id = ?1",
+            params![
+                card_id,
+                derived.state.as_str(),
+                derived.stability,
+                derived.difficulty,
+                derived.due_at_ms.map(millis_to_rfc3339),
+                derived.last_reviewed_at_ms.map(millis_to_rfc3339),
+                i64::from(derived.review_count),
+                i64::from(derived.lapse_count),
+                derived.scheduled_days,
+            ],
+        )?;
+        Ok(())
+    }
+
+    // ==================================================================
     // Canonical field read / write (event body <-> typed tables)
     // ==================================================================
 
@@ -613,6 +745,12 @@ impl Database {
         if op == Op::Delete {
             return self.delete_entity_row(entity_type, entity_id);
         }
+        // Field-map keys are interpolated into SQL as column identifiers by the
+        // upsert helpers below, and they can originate from a remote (untrusted)
+        // sync peer's change body. Reject any key that is not a known column for
+        // this entity so a malicious peer cannot inject arbitrary SQL through a
+        // crafted field name (fail closed).
+        reject_unknown_columns(entity_type, fields)?;
         match entity_type {
             EntityType::Document => {
                 self.upsert_single("content_items", "id", entity_id, fields, DOCUMENT_DEFAULTS)
@@ -693,6 +831,13 @@ impl Database {
 
     /// Upsert a single-table entity from a field map, filling NOT NULL columns
     /// from `defaults` only when inserting a brand-new row.
+    ///
+    /// Uses update-then-insert rather than `INSERT … ON CONFLICT DO UPDATE`:
+    /// `SQLite` validates NOT NULL constraints against the *candidate* insert row
+    /// even when the statement resolves to `DO UPDATE`, so a single-field patch
+    /// of a row whose other NOT NULL columns lack defaults (e.g.
+    /// `notes.content_item_id`) would spuriously fail. Updating an existing row
+    /// first sidesteps that entirely.
     fn upsert_single(
         &self,
         table: &str,
@@ -701,7 +846,26 @@ impl Database {
         fields: &FieldMap,
         defaults: &[(&str, &str)],
     ) -> Result<(), StorageError> {
-        // Columns to insert = id + provided + any default column not provided.
+        let conn = self.connection();
+        // Update the provided fields on an existing row first.
+        if !fields.is_empty() {
+            let mut set_clause = Vec::with_capacity(fields.len());
+            let mut update_vals: Vec<rusqlite::types::Value> =
+                vec![rusqlite::types::Value::Text(id.to_owned())];
+            for (col, value) in fields {
+                set_clause.push(format!("{col} = ?{}", update_vals.len() + 1));
+                update_vals.push(json_to_sql(value));
+            }
+            let sql = format!(
+                "UPDATE {table} SET {} WHERE {id_col} = ?1",
+                set_clause.join(", ")
+            );
+            let affected = conn.execute(&sql, rusqlite::params_from_iter(update_vals))?;
+            if affected > 0 {
+                return Ok(());
+            }
+        }
+        // Row absent: insert id + provided fields + any default column missing.
         let mut insert_cols: Vec<String> = vec![id_col.to_owned()];
         let mut insert_vals: Vec<rusqlite::types::Value> =
             vec![rusqlite::types::Value::Text(id.to_owned())];
@@ -715,29 +879,13 @@ impl Database {
                 insert_vals.push(rusqlite::types::Value::Text((*default).to_owned()));
             }
         }
-        // ON CONFLICT updates only the *provided* fields (never the defaults),
-        // which makes both Upsert and FieldPatch converge correctly.
-        let update_clause: Vec<String> = fields
-            .keys()
-            .map(|c| format!("{c} = excluded.{c}"))
-            .collect();
         let placeholders: Vec<String> = (1..=insert_cols.len()).map(|i| format!("?{i}")).collect();
-        let sql = if update_clause.is_empty() {
-            format!(
-                "INSERT INTO {table} ({}) VALUES ({}) ON CONFLICT({id_col}) DO NOTHING",
-                insert_cols.join(", "),
-                placeholders.join(", "),
-            )
-        } else {
-            format!(
-                "INSERT INTO {table} ({}) VALUES ({}) ON CONFLICT({id_col}) DO UPDATE SET {}",
-                insert_cols.join(", "),
-                placeholders.join(", "),
-                update_clause.join(", "),
-            )
-        };
-        self.connection()
-            .execute(&sql, rusqlite::params_from_iter(insert_vals))?;
+        let sql = format!(
+            "INSERT INTO {table} ({}) VALUES ({}) ON CONFLICT({id_col}) DO NOTHING",
+            insert_cols.join(", "),
+            placeholders.join(", "),
+        );
+        conn.execute(&sql, rusqlite::params_from_iter(insert_vals))?;
         Ok(())
     }
 
@@ -931,10 +1079,17 @@ impl Database {
             let _ = device_id;
             let clock = db.tick_local_hlc(now_millis)?;
 
-            // base_version = the clock we currently hold for a conflict-copy
-            // field being edited, so a remote applier can tell causal from
-            // concurrent. `None` for pure LWW / creates.
-            let base_version = db.base_version_for(entity_type, entity_id, &fields)?;
+            // base_version = the version the writer observed, so a remote applier
+            // can tell a causal update from genuine concurrency. For a conflict-
+            // copy edit it is the clock we hold for that field; for a delete it is
+            // the authored-prose version the deleter saw, so a concurrent prose
+            // edit the delete never observed is preserved rather than erased
+            // (ADR-023 annotation policy). `None` for pure LWW / creates.
+            let base_version = if op == Op::Delete {
+                db.observed_prose_version(entity_type, entity_id)?
+            } else {
+                db.base_version_for(entity_type, entity_id, &fields)?
+            };
 
             db.apply_local_canonical(entity_type, entity_id, op, &fields)?;
 
@@ -1011,6 +1166,33 @@ impl Database {
         }
         Ok(None)
     }
+
+    /// The authored-prose version a delete observed: the greatest clock among
+    /// the entity's conflict-copy (prose) fields. A remote applier compares a
+    /// concurrent prose edit against this to decide whether the delete saw it —
+    /// if not, the edit is preserved in the conflict inbox instead of erased.
+    fn observed_prose_version(
+        &self,
+        entity_type: EntityType,
+        entity_id: &str,
+    ) -> Result<Option<Hlc>, StorageError> {
+        let Some(fields) = self.read_entity_fields(entity_type, entity_id)? else {
+            return Ok(None);
+        };
+        let mut max: Option<Hlc> = None;
+        for field in fields.keys() {
+            if strategy_for(entity_type, field) != ConflictStrategy::ConflictCopy {
+                continue;
+            }
+            if let Some(clock) = self.entity_clock(entity_type, entity_id, field)? {
+                max = match max {
+                    Some(current) if current >= clock => Some(current),
+                    _ => Some(clock),
+                };
+            }
+        }
+        Ok(max)
+    }
 }
 
 /// Column sets read for each single-table entity (wire/column names).
@@ -1079,6 +1261,46 @@ const SETTINGS_DEFAULTS: &[(&str, &str)] = &[("value", "")];
 const REVIEW_CARD_DEFAULTS: &[(&str, &str)] = &[("state", "new")];
 const REVIEW_LOG_DEFAULTS: &[(&str, &str)] = &[];
 
+/// The set of field/column names a sync change may legally write for an entity.
+///
+/// This is the same wire/column vocabulary the read path uses, and it is the
+/// allowlist that guards the SQL-identifier interpolation in the upsert helpers.
+/// Edges carry no single-table columns.
+const fn allowed_columns(entity_type: EntityType) -> &'static [&'static str] {
+    match entity_type {
+        EntityType::Document => DOCUMENT_COLS,
+        EntityType::Tag => TAG_COLS,
+        EntityType::Collection => COLLECTION_COLS,
+        EntityType::Note => NOTE_COLS,
+        EntityType::FeedSubscription => FEED_COLS,
+        EntityType::Settings => SETTINGS_COLS,
+        EntityType::ReviewCard => REVIEW_CARD_COLS,
+        EntityType::ReviewLog => REVIEW_LOG_COLS,
+        EntityType::Highlight => HIGHLIGHT_COLS,
+        EntityType::TagEdge | EntityType::CollectionEdge => &[],
+    }
+}
+
+/// Reject a field map that names any column outside the entity's allowlist.
+///
+/// The upsert helpers interpolate field-map keys directly into SQL as column
+/// identifiers (bound parameters only cover the *values*), and those keys can
+/// come from a remote, untrusted sync peer. Validating them against the fixed
+/// per-entity column set closes that identifier-injection vector: a crafted key
+/// such as `"content_text = (SELECT …), title"` is rejected before it can reach
+/// a `format!`-built statement.
+fn reject_unknown_columns(entity_type: EntityType, fields: &FieldMap) -> Result<(), StorageError> {
+    let allowed = allowed_columns(entity_type);
+    for key in fields.keys() {
+        if !allowed.contains(&key.as_str()) {
+            return Err(StorageError::Constraint(format!(
+                "unknown sync column `{key}` for {entity_type:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Split a composite edge id (`left:right`) into its two entity ids.
 fn split_edge_id(edge_id: &str) -> Result<(String, String), StorageError> {
     edge_id.split_once(':').map_or_else(
@@ -1089,6 +1311,24 @@ fn split_edge_id(edge_id: &str) -> Result<(String, String), StorageError> {
         },
         |(l, r)| Ok((l.to_owned(), r.to_owned())),
     )
+}
+
+/// Parse an RFC 3339 review timestamp to epoch milliseconds. Falls back to `0`
+/// for an unparseable value, so a malformed row still folds deterministically
+/// rather than panicking on the sync path.
+fn parse_epoch_millis(s: &str) -> i64 {
+    OffsetDateTime::parse(s, &Rfc3339).map_or(0, |t| {
+        i64::try_from(t.unix_timestamp_nanos() / 1_000_000).unwrap_or(0)
+    })
+}
+
+/// Format epoch milliseconds back to an RFC 3339 timestamp for a card's
+/// `due_at` / `last_reviewed_at` columns.
+fn millis_to_rfc3339(ms: i64) -> String {
+    OffsetDateTime::from_unix_timestamp_nanos(i128::from(ms) * 1_000_000)
+        .ok()
+        .and_then(|t| t.format(&Rfc3339).ok())
+        .unwrap_or_default()
 }
 
 /// Convert a `SQLite` value reference into a JSON value for a field map.
