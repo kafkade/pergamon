@@ -35,6 +35,11 @@ pub enum SyncError {
     #[error("missing blob: {0}")]
     MissingBlob(String),
 
+    /// A relayed artifact (device record, wrap bundle, recovery blob) was not
+    /// found on the server.
+    #[error("not found: {0}")]
+    NotFound(String),
+
     /// A protocol or data-shape invariant was violated.
     #[error("protocol error: {0}")]
     Protocol(String),

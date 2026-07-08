@@ -196,6 +196,39 @@ impl AccountId {
         }
         s
     }
+
+    /// Parse a handle from its 32-character lowercase-hex wire form.
+    ///
+    /// # Errors
+    /// Returns [`crate::CryptoError::Malformed`] if `hex` is not exactly
+    /// `ACCOUNT_ID_LEN * 2` hex digits.
+    pub fn from_hex(hex: &str) -> Result<Self> {
+        let hex = hex.trim();
+        if hex.len() != ACCOUNT_ID_LEN * 2 {
+            return Err(crate::CryptoError::Malformed(
+                "account id must be 32 hex characters",
+            ));
+        }
+        let mut bytes = [0u8; ACCOUNT_ID_LEN];
+        for (i, byte) in bytes.iter_mut().enumerate() {
+            let hi = hex_val(hex.as_bytes()[i * 2])?;
+            let lo = hex_val(hex.as_bytes()[i * 2 + 1])?;
+            *byte = (hi << 4) | lo;
+        }
+        Ok(Self(bytes))
+    }
+}
+
+/// Decode one hex digit.
+const fn hex_val(c: u8) -> Result<u8> {
+    match c {
+        b'0'..=b'9' => Ok(c - b'0'),
+        b'a'..=b'f' => Ok(c - b'a' + 10),
+        b'A'..=b'F' => Ok(c - b'A' + 10),
+        _ => Err(crate::CryptoError::Malformed(
+            "invalid hex digit in account id",
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -214,6 +247,25 @@ mod tests {
         let content_first = ark.content_key(0).unwrap();
         let content_second = ark.content_key(0).unwrap();
         assert_eq!(content_first.expose_bytes(), content_second.expose_bytes());
+    }
+
+    #[test]
+    fn account_id_hex_round_trips() {
+        let id = AccountId::from_bytes([0xab; ACCOUNT_ID_LEN]);
+        let hex = id.to_hex();
+        assert_eq!(hex.len(), ACCOUNT_ID_LEN * 2);
+        assert_eq!(AccountId::from_hex(&hex).unwrap(), id);
+        // Whitespace is tolerated; case is accepted.
+        assert_eq!(
+            AccountId::from_hex(&format!("  {}  ", hex.to_uppercase())).unwrap(),
+            id
+        );
+    }
+
+    #[test]
+    fn account_id_from_hex_rejects_bad_input() {
+        assert!(AccountId::from_hex("abc").is_err());
+        assert!(AccountId::from_hex(&"z".repeat(ACCOUNT_ID_LEN * 2)).is_err());
     }
 
     #[test]
