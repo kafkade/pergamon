@@ -899,3 +899,72 @@ fn read_state_flips_lww_no_conflict() {
     assert_eq!(db_a.list_conflicts(false).unwrap().len(), 0);
     assert_eq!(db_b.list_conflicts(false).unwrap().len(), 0);
 }
+
+/// A remote sync peer's change body carries a free-form field map whose keys are
+/// interpolated as SQL column identifiers by the storage upsert path. A crafted
+/// key that is not a real column for the entity must be rejected before any SQL
+/// runs, closing the identifier-injection vector (ADR-023 hardening).
+#[test]
+fn malicious_sync_column_name_is_rejected() {
+    let db = synced_db("device-a");
+
+    // Seed a benign secret in another table to prove it cannot be exfiltrated
+    // or clobbered via an injected sub-assignment.
+    db.emit_change(
+        EntityType::Settings,
+        "secret",
+        Op::Upsert,
+        fields(&[("value", json!("s3cr3t"))]),
+        vec![],
+        500,
+    )
+    .unwrap();
+
+    // If this key were interpolated raw, the statement would become
+    // `UPDATE content_items SET content_text = (SELECT value FROM settings ...),
+    //  title = ?2 ...` — a cross-table read plus an unauthorized column write.
+    let malicious = fields(&[(
+        "content_text = (SELECT value FROM settings LIMIT 1), title",
+        json!("x"),
+    )]);
+    let result = db.write_entity_fields(EntityType::Document, "doc-x", &malicious, Op::Upsert);
+    assert!(
+        result.is_err(),
+        "unknown/injected sync column name must be rejected"
+    );
+
+    // The document was never created, and the secret is untouched.
+    assert!(read(&db, EntityType::Document, "doc-x").is_none());
+    assert_eq!(
+        read(&db, EntityType::Settings, "secret")
+            .unwrap()
+            .get("value")
+            .unwrap(),
+        &json!("s3cr3t"),
+    );
+}
+
+/// A review log with an extreme `reviewed_at_ms` (which a malicious peer can set
+/// via the `reviewed_at` field) must not panic the derived-merge fold through
+/// `i64` overflow — the schedule arithmetic saturates instead.
+#[test]
+fn extreme_review_timestamp_does_not_panic_fold() {
+    use pergamon_core::fsrs::{Rating, Scheduler};
+    use pergamon_core::sync::review::{ReviewLogEntry, derive_card_state};
+
+    let logs = vec![
+        ReviewLogEntry {
+            id: "l1".to_owned(),
+            reviewed_at_ms: i64::MIN,
+            rating: Rating::Good,
+        },
+        ReviewLogEntry {
+            id: "l2".to_owned(),
+            reviewed_at_ms: i64::MAX,
+            rating: Rating::Again,
+        },
+    ];
+    // Must fold without panicking (saturating arithmetic).
+    let derived = derive_card_state(&Scheduler::default_v5(), &logs);
+    assert_eq!(derived.review_count, 2);
+}

@@ -113,7 +113,7 @@ pub fn derive_card_state(scheduler: &Scheduler, logs: &[ReviewLogEntry]) -> Deri
         }
         let elapsed_days = last_ms.map_or(0.0, |prev| {
             #[allow(clippy::cast_precision_loss)]
-            let delta_ms = (entry.reviewed_at_ms - prev) as f64;
+            let delta_ms = entry.reviewed_at_ms.saturating_sub(prev) as f64;
             (delta_ms / MILLIS_PER_DAY).max(0.0)
         });
 
@@ -123,7 +123,7 @@ pub fn derive_card_state(scheduler: &Scheduler, logs: &[ReviewLogEntry]) -> Deri
         derived.scheduled_days = Some(output.scheduled_days);
         #[allow(clippy::cast_possible_truncation)]
         let due_delta_ms = (output.scheduled_days * MILLIS_PER_DAY) as i64;
-        derived.due_at_ms = Some(entry.reviewed_at_ms + due_delta_ms);
+        derived.due_at_ms = Some(entry.reviewed_at_ms.saturating_add(due_delta_ms));
         derived.review_count += 1;
         if entry.rating == Rating::Again {
             derived.lapse_count += 1;

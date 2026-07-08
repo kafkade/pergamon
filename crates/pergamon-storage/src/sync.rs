@@ -745,6 +745,12 @@ impl Database {
         if op == Op::Delete {
             return self.delete_entity_row(entity_type, entity_id);
         }
+        // Field-map keys are interpolated into SQL as column identifiers by the
+        // upsert helpers below, and they can originate from a remote (untrusted)
+        // sync peer's change body. Reject any key that is not a known column for
+        // this entity so a malicious peer cannot inject arbitrary SQL through a
+        // crafted field name (fail closed).
+        reject_unknown_columns(entity_type, fields)?;
         match entity_type {
             EntityType::Document => {
                 self.upsert_single("content_items", "id", entity_id, fields, DOCUMENT_DEFAULTS)
@@ -1254,6 +1260,46 @@ const FEED_DEFAULTS: &[(&str, &str)] = &[("title", ""), ("url", "")];
 const SETTINGS_DEFAULTS: &[(&str, &str)] = &[("value", "")];
 const REVIEW_CARD_DEFAULTS: &[(&str, &str)] = &[("state", "new")];
 const REVIEW_LOG_DEFAULTS: &[(&str, &str)] = &[];
+
+/// The set of field/column names a sync change may legally write for an entity.
+///
+/// This is the same wire/column vocabulary the read path uses, and it is the
+/// allowlist that guards the SQL-identifier interpolation in the upsert helpers.
+/// Edges carry no single-table columns.
+const fn allowed_columns(entity_type: EntityType) -> &'static [&'static str] {
+    match entity_type {
+        EntityType::Document => DOCUMENT_COLS,
+        EntityType::Tag => TAG_COLS,
+        EntityType::Collection => COLLECTION_COLS,
+        EntityType::Note => NOTE_COLS,
+        EntityType::FeedSubscription => FEED_COLS,
+        EntityType::Settings => SETTINGS_COLS,
+        EntityType::ReviewCard => REVIEW_CARD_COLS,
+        EntityType::ReviewLog => REVIEW_LOG_COLS,
+        EntityType::Highlight => HIGHLIGHT_COLS,
+        EntityType::TagEdge | EntityType::CollectionEdge => &[],
+    }
+}
+
+/// Reject a field map that names any column outside the entity's allowlist.
+///
+/// The upsert helpers interpolate field-map keys directly into SQL as column
+/// identifiers (bound parameters only cover the *values*), and those keys can
+/// come from a remote, untrusted sync peer. Validating them against the fixed
+/// per-entity column set closes that identifier-injection vector: a crafted key
+/// such as `"content_text = (SELECT …), title"` is rejected before it can reach
+/// a `format!`-built statement.
+fn reject_unknown_columns(entity_type: EntityType, fields: &FieldMap) -> Result<(), StorageError> {
+    let allowed = allowed_columns(entity_type);
+    for key in fields.keys() {
+        if !allowed.contains(&key.as_str()) {
+            return Err(StorageError::Constraint(format!(
+                "unknown sync column `{key}` for {entity_type:?}"
+            )));
+        }
+    }
+    Ok(())
+}
 
 /// Split a composite edge id (`left:right`) into its two entity ids.
 fn split_edge_id(edge_id: &str) -> Result<(String, String), StorageError> {

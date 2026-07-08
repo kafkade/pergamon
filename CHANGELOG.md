@@ -25,6 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Spaced-repetition review state now merges correctly across devices (#127): when you review the same card on two devices before syncing, both reviews are kept and the card's schedule is recomputed from the full review history, so due counts stay accurate and no review is dropped or double-counted
 - Concurrent edits to highlights and notes are resolved by type (#127): editing a note or highlight on two devices at once preserves both versions (the losing edit is kept as a conflict copy), and deleting an annotation on one device while another device edits it no longer silently discards that edit — the unseen edit is surfaced as a conflict instead of being lost
 
+### Security
+
+- Hardened the sync apply path against malicious peers (#127): field names in an incoming change are now validated against a fixed per-entity column allowlist before they touch the database, closing a SQL-injection vector where a crafted field name from a remote peer could read or overwrite arbitrary data; malformed review timestamps can no longer crash the schedule merge
+
 ## [0.7.0] - 2026-07-02
 
 ### Added
