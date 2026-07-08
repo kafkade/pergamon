@@ -144,6 +144,16 @@ impl Database {
         Ok(self.sync_state()?.cursor_seq)
     }
 
+    /// Advance the account key epoch in place (e.g. after a device revocation),
+    /// without disturbing the account/device identity or server URL.
+    pub fn set_key_epoch(&self, key_epoch: u32) -> Result<(), StorageError> {
+        self.connection().execute(
+            "UPDATE sync_state SET key_epoch = ?1 WHERE id = 1",
+            params![i64::from(key_epoch)],
+        )?;
+        Ok(())
+    }
+
     /// Persist the pull cursor after durably applying a page.
     pub fn set_sync_cursor(&self, seq: u64) -> Result<(), StorageError> {
         self.connection().execute(

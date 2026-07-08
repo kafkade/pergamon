@@ -17,12 +17,16 @@
 
 use crate::error::{CryptoError, Result};
 use crate::primitives::{self, KEY_LEN, SIG_LEN, SymmetricKey};
+use crate::wire::Cursor;
 
 /// Length in bytes of the raw `device_id` handle before hex encoding (128-bit).
 pub const DEVICE_ID_LEN: usize = 16;
 
 /// Domain tag prefixed to the bytes a device record signs over.
 const DEVICE_RECORD_TAG: &[u8] = b"pergamon/v1/device-record";
+
+/// Magic prefix identifying a serialized [`SignedDeviceRecord`] on the wire.
+const DEVICE_RECORD_WIRE_TAG: &[u8] = b"pergamon/v1/device-record-wire";
 
 /// A device's two keypairs, holding both secret halves (zeroized on drop).
 pub struct DeviceKeypairs {
@@ -181,6 +185,56 @@ impl SignedDeviceRecord {
             &self.signature,
         )
     }
+
+    /// Serialize to opaque, self-describing wire bytes for relaying: a magic
+    /// prefix, the length-prefixed `device_id`, both public keys, `created_at`,
+    /// and the signature. Deterministic — the same record always encodes
+    /// identically.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let id = self.record.device_id.as_bytes();
+        let mut b = Vec::with_capacity(
+            DEVICE_RECORD_WIRE_TAG.len() + 4 + id.len() + KEY_LEN * 2 + 8 + SIG_LEN,
+        );
+        b.extend_from_slice(DEVICE_RECORD_WIRE_TAG);
+        b.extend_from_slice(&u32_len(id.len()).to_be_bytes());
+        b.extend_from_slice(id);
+        b.extend_from_slice(&self.record.x25519_pub);
+        b.extend_from_slice(&self.record.ed25519_pub);
+        b.extend_from_slice(&self.record.created_at.to_be_bytes());
+        b.extend_from_slice(&self.signature);
+        b
+    }
+
+    /// Parse a [`SignedDeviceRecord`] from its opaque wire encoding.
+    ///
+    /// This only reconstructs the structure; call [`Self::verify`] afterwards to
+    /// authenticate it — parsing succeeding does **not** imply the signature is
+    /// valid.
+    ///
+    /// # Errors
+    /// [`CryptoError::Malformed`] if the input is truncated, has the wrong magic
+    /// prefix, or a length field that overruns the buffer.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        let mut cur = Cursor::new(bytes);
+        cur.expect_tag(DEVICE_RECORD_WIRE_TAG)?;
+        let id_len = cur.read_u32()? as usize;
+        let device_id = cur.read_string(id_len)?;
+        let x25519_pub = cur.read_array::<KEY_LEN>()?;
+        let ed25519_pub = cur.read_array::<KEY_LEN>()?;
+        let created_at = cur.read_i64()?;
+        let signature = cur.read_array::<SIG_LEN>()?;
+        cur.expect_end()?;
+        Ok(Self {
+            record: DeviceRecord {
+                device_id,
+                x25519_pub,
+                ed25519_pub,
+                created_at,
+            },
+            signature,
+        })
+    }
 }
 
 /// Derive the opaque `device_id` handle from an Ed25519 public key: the first
@@ -245,5 +299,44 @@ mod tests {
 
         let signed = a.sign_record(1_700_000_000_000);
         assert!(signed.verify().is_ok());
+    }
+
+    #[test]
+    fn signed_record_wire_roundtrips_and_verifies() {
+        let kp = DeviceKeypairs::generate().unwrap();
+        let signed = kp.sign_record(1_700_000_000_123);
+        let bytes = signed.to_bytes();
+        let parsed = SignedDeviceRecord::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed, signed);
+        parsed.verify().unwrap();
+        // Encoding is deterministic.
+        assert_eq!(parsed.to_bytes(), bytes);
+    }
+
+    #[test]
+    fn signed_record_wire_rejects_bad_input() {
+        assert!(matches!(
+            SignedDeviceRecord::from_bytes(b"not a record"),
+            Err(CryptoError::Malformed(_))
+        ));
+        let kp = DeviceKeypairs::generate().unwrap();
+        let mut bytes = kp.sign_record(1).to_bytes();
+        bytes.push(0); // trailing garbage
+        assert!(matches!(
+            SignedDeviceRecord::from_bytes(&bytes),
+            Err(CryptoError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn wire_tampering_is_caught_by_verify() {
+        // A wire record whose signature no longer matches its fields still parses
+        // but must fail verification.
+        let kp = DeviceKeypairs::generate().unwrap();
+        let mut signed = kp.sign_record(1);
+        let bytes = signed.to_bytes();
+        signed = SignedDeviceRecord::from_bytes(&bytes).unwrap();
+        signed.record.created_at = 999;
+        assert!(signed.verify().is_err());
     }
 }
