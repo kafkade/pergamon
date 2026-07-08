@@ -20,14 +20,14 @@
 //! memory on drop.
 
 use argon2::Argon2;
-use chacha20poly1305::aead::{Aead, AeadCore, KeyInit, Payload};
+use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use rand_core::{OsRng, RngCore};
 use sha2::Sha256;
-use x25519_dalek::{EphemeralSecret, PublicKey as XPublicKey, StaticSecret};
+use x25519_dalek::{PublicKey as XPublicKey, StaticSecret};
 use zeroize::Zeroizing;
 
 use crate::error::{CryptoError, Result};
@@ -120,7 +120,7 @@ pub fn hkdf_key(ikm: &[u8], info: &[u8]) -> Result<SymmetricKey> {
 /// HMAC backend rejects the key length.
 pub fn hmac_sha256(key: &[u8], msg: &[u8]) -> Result<[u8; 32]> {
     let mut mac =
-        <Hmac<Sha256> as Mac>::new_from_slice(key).map_err(|_| CryptoError::KeyDerivation)?;
+        <Hmac<Sha256> as KeyInit>::new_from_slice(key).map_err(|_| CryptoError::KeyDerivation)?;
     mac.update(msg);
     Ok(mac.finalize().into_bytes().into())
 }
@@ -179,10 +179,10 @@ pub fn aead_encrypt_with_nonce(
     plaintext: &[u8],
 ) -> Result<Vec<u8>> {
     let cipher = XChaCha20Poly1305::new(key.into());
-    let xnonce = XNonce::from_slice(nonce);
+    let xnonce = XNonce::try_from(&nonce[..]).map_err(|_| CryptoError::Malformed("bad nonce"))?;
     cipher
         .encrypt(
-            xnonce,
+            &xnonce,
             Payload {
                 msg: plaintext,
                 aad,
@@ -204,10 +204,10 @@ pub fn aead_decrypt_with_nonce(
     ciphertext: &[u8],
 ) -> Result<Vec<u8>> {
     let cipher = XChaCha20Poly1305::new(key.into());
-    let xnonce = XNonce::from_slice(nonce);
+    let xnonce = XNonce::try_from(&nonce[..]).map_err(|_| CryptoError::Malformed("bad nonce"))?;
     cipher
         .decrypt(
-            xnonce,
+            &xnonce,
             Payload {
                 msg: ciphertext,
                 aad,
@@ -228,11 +228,13 @@ pub fn aead_decrypt_with_nonce(
 /// # Errors
 /// Returns [`CryptoError::Malformed`] if encryption fails.
 pub fn aead_seal(key: &[u8; KEY_LEN], aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
-    let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+    let nonce_bytes = random_array::<NONCE_LEN>()?;
+    let xnonce =
+        XNonce::try_from(&nonce_bytes[..]).map_err(|_| CryptoError::Malformed("bad nonce"))?;
     let cipher = XChaCha20Poly1305::new(key.into());
     let ct = cipher
         .encrypt(
-            &nonce,
+            &xnonce,
             Payload {
                 msg: plaintext,
                 aad,
@@ -240,7 +242,7 @@ pub fn aead_seal(key: &[u8; KEY_LEN], aad: &[u8], plaintext: &[u8]) -> Result<Ve
         )
         .map_err(|_| CryptoError::Malformed("aead encryption failed"))?;
     let mut out = Vec::with_capacity(NONCE_LEN + ct.len());
-    out.extend_from_slice(nonce.as_slice());
+    out.extend_from_slice(&nonce_bytes);
     out.extend_from_slice(&ct);
     Ok(out)
 }
@@ -256,9 +258,9 @@ pub fn aead_open(key: &[u8; KEY_LEN], aad: &[u8], data: &[u8]) -> Result<Vec<u8>
     }
     let (nonce, ct) = data.split_at(NONCE_LEN);
     let cipher = XChaCha20Poly1305::new(key.into());
-    let xnonce = XNonce::from_slice(nonce);
+    let xnonce = XNonce::try_from(nonce).map_err(|_| CryptoError::Malformed("bad nonce"))?;
     cipher
-        .decrypt(xnonce, Payload { msg: ct, aad })
+        .decrypt(&xnonce, Payload { msg: ct, aad })
         .map_err(|_| CryptoError::Decryption)
 }
 
@@ -297,7 +299,8 @@ fn sealed_box_key(
 /// Returns [`CryptoError::Malformed`] or [`CryptoError::KeyDerivation`] on
 /// failure.
 pub fn seal_to(recipient_pub: &[u8; KEY_LEN], aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
-    let eph_secret = EphemeralSecret::random_from_rng(OsRng);
+    let eph_scalar = Zeroizing::new(random_array::<KEY_LEN>()?);
+    let eph_secret = StaticSecret::from(*eph_scalar);
     let eph_pub = XPublicKey::from(&eph_secret);
     let recip = XPublicKey::from(*recipient_pub);
     let shared = eph_secret.diffie_hellman(&recip);
@@ -343,7 +346,7 @@ pub fn open_sealed(recipient_secret: &[u8; KEY_LEN], aad: &[u8], data: &[u8]) ->
 /// # Errors
 /// Returns [`CryptoError::Random`] if key generation fails.
 pub fn x25519_generate() -> Result<(SymmetricKey, [u8; KEY_LEN])> {
-    let secret = StaticSecret::random_from_rng(OsRng);
+    let secret = StaticSecret::from(random_array::<KEY_LEN>()?);
     let public = XPublicKey::from(&secret);
     let secret_bytes = Zeroizing::new(secret.to_bytes());
     Ok((secret_bytes, public.to_bytes()))

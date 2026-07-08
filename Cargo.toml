@@ -65,8 +65,9 @@ url = "2"
 base64 = "0.22"
 sha2 = "0.11"
 
-# End-to-end encryption (ADR-024). Generation-A RustCrypto/dalek stack pinned to
-# digest 0.10 so it stays coherent with the workspace `sha2 = 0.10`.
+# End-to-end encryption (ADR-024). RustCrypto/dalek stack on the digest 0.11
+# generation, coherent with the workspace `sha2 = 0.11`. Randomness is sourced
+# via the crate's own OS-CSPRNG helpers, so `rand_core` stays at 0.6.
 chacha20poly1305 = { version = "0.11", features = ["getrandom"] }
 x25519-dalek = { version = "3", features = ["static_secrets", "zeroize"] }
 ed25519-dalek = { version = "3", features = ["rand_core", "zeroize"] }
