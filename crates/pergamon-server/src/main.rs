@@ -12,6 +12,8 @@ mod error;
 mod pagination;
 mod routes;
 mod state;
+mod sync_tracking;
+mod sync_worker;
 mod util;
 
 use std::net::SocketAddr;
@@ -70,6 +72,29 @@ struct Args {
     /// Password for HTTP Basic auth on the admin diagnostics routes.
     #[arg(long, env = "PERGAMON_ADMIN_PASSWORD")]
     admin_password: Option<String>,
+
+    /// Account handle whose keys back background remote sync.
+    ///
+    /// Only used when `--sync-key-file` and `--sync-key-passphrase` are also
+    /// set. Matches the account name stored in the key file.
+    #[arg(long, default_value = "default", env = "PERGAMON_SYNC_ACCOUNT")]
+    sync_account: String,
+
+    /// Path to the encrypted key file that unlocks the account root key.
+    ///
+    /// When set together with `--sync-key-passphrase`, the server spawns a
+    /// background worker that pushes local changes and pulls remote ones on an
+    /// interval. When unset, background remote sync is disabled.
+    #[arg(long, env = "PERGAMON_SYNC_KEY_FILE")]
+    sync_key_file: Option<PathBuf>,
+
+    /// Passphrase that unlocks `--sync-key-file`.
+    #[arg(long, env = "PERGAMON_SYNC_KEY_PASSPHRASE")]
+    sync_key_passphrase: Option<String>,
+
+    /// Seconds between successful background sync rounds.
+    #[arg(long, default_value_t = 300, env = "PERGAMON_SYNC_INTERVAL")]
+    sync_interval: u64,
 }
 
 /// Subcommands for the pergamon web server binary.
@@ -256,10 +281,41 @@ async fn main() -> Result<()> {
         }
     };
 
+    // Optionally spawn the background remote-sync worker. It needs both an
+    // encrypted key file and its passphrase; anything less leaves sync off.
+    let sync_control = match (&args.sync_key_file, &args.sync_key_passphrase) {
+        (Some(key_file), Some(passphrase)) if !passphrase.is_empty() => {
+            match sync_worker::spawn(sync_worker::SyncWorkerConfig {
+                db_path: db_path.clone(),
+                account: args.sync_account.clone(),
+                key_file: key_file.clone(),
+                passphrase: passphrase.clone(),
+                interval_secs: args.sync_interval,
+            }) {
+                Ok(control) => Some(control),
+                Err(e) => {
+                    tracing::warn!("background remote sync disabled: {e:#}");
+                    None
+                }
+            }
+        }
+        (Some(_), _) => {
+            tracing::warn!(
+                "--sync-key-file is set but --sync-key-passphrase/\
+                 PERGAMON_SYNC_KEY_PASSPHRASE is missing; background remote sync is OFF"
+            );
+            None
+        }
+        _ => None,
+    };
+
     let state = AppState {
         db: Arc::new(std::sync::Mutex::new(db)),
         http,
         admin_auth,
+        sync_control: sync_control
+            .as_ref()
+            .map(|c| Arc::new(std::sync::Mutex::new(c.clone()))),
     };
 
     let app = build_router(state, args.static_dir.as_ref());
@@ -278,6 +334,13 @@ async fn main() -> Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("server error")?;
+
+    // Stop the background sync worker so its thread exits cleanly.
+    if let Some(control) = sync_control
+        && control.shutdown()
+    {
+        tracing::info!("stopping background sync worker");
+    }
 
     tracing::info!("server stopped");
     Ok(())
@@ -307,6 +370,7 @@ mod tests {
             db: Arc::new(std::sync::Mutex::new(db)),
             http,
             admin_auth: None,
+            sync_control: None,
         }
     }
 

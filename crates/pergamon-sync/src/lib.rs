@@ -27,6 +27,10 @@
 //! - [`crypto`] — the encryption glue: build headers, encrypt/decrypt events and
 //!   blobs, and blind `entity_ref`s.
 //! - [`engine`] — the [`SyncEngine`]: push, pull, and a combined sync round.
+//! - [`schedule`] — the pure background-sync policy: [`BackoffPolicy`] and the
+//!   [`SyncScheduler`] state machine (issue #129).
+//! - [`daemon`] — the blocking [`run_forever`] driver that ties the scheduler to
+//!   real time, with a triggerable/stoppable [`SyncControl`] (issue #129).
 //! - [`apply`] — mapping a decrypted [`ChangeBody`] onto merged storage writes.
 //! - [`blob`] — the client blob-plaintext store trait used for blob sync.
 
@@ -35,10 +39,12 @@
 pub mod apply;
 pub mod blob;
 pub mod crypto;
+pub mod daemon;
 pub mod engine;
 pub mod error;
 pub mod onboarding;
 pub mod relay;
+pub mod schedule;
 pub mod transport;
 pub mod wire;
 
@@ -49,10 +55,14 @@ pub mod http_relay;
 
 pub use blob::{BlobStore, MemoryBlobStore};
 pub use crypto::CryptoContext;
+pub use daemon::{
+    Jitter, RoundOutcome, RoundReport, Sleeper, SyncControl, Wake, control, run_forever,
+};
 pub use engine::{SyncEngine, SyncStats};
 pub use error::SyncError;
 pub use onboarding::{Accepted, Revocation};
 pub use relay::{MemoryRelay, RelayAttestation, RelayDevice, RelayTransport, RelayWrap};
+pub use schedule::{BackoffPolicy, SyncScheduler};
 pub use transport::{MemoryTransport, Transport};
 
 #[cfg(feature = "http")]

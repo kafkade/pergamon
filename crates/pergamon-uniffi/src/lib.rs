@@ -39,6 +39,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use pergamon_core::content_type::ContentType as CoreContentType;
 use pergamon_core::error::CoreError;
@@ -1192,6 +1193,51 @@ pub fn reading_minutes(text: String) -> u32 {
 #[derive(uniffi::Object)]
 pub struct Library {
     db: Mutex<Database>,
+    /// Remote-sync session, populated by [`Library::configure_sync`].
+    ///
+    /// `None` until the app configures sync with its keychain-held account key.
+    /// Held behind a `Mutex` so the `#[uniffi::Object]` stays `Sync` and so the
+    /// scheduler's backoff state survives across background-refresh calls.
+    sync: Mutex<Option<SyncSession>>,
+}
+
+/// A configured remote-sync session: the HTTP-backed engine plus the local
+/// backoff scheduler that produces the next-wake hint for iOS `BGTaskScheduler`.
+struct SyncSession {
+    engine: pergamon_sync::SyncEngine<pergamon_sync::http::HttpTransport>,
+    blobs: pergamon_sync::MemoryBlobStore,
+    scheduler: pergamon_sync::SyncScheduler,
+    jitter: pergamon_sync::Jitter,
+}
+
+/// Base backoff delay after the first offline/transient failure.
+const SYNC_BACKOFF_BASE: Duration = Duration::from_secs(5);
+/// Ceiling the backoff delay is clamped to (5 minutes).
+#[allow(clippy::duration_suboptimal_units)]
+const SYNC_BACKOFF_MAX: Duration = Duration::from_secs(300);
+/// Backoff growth factor per consecutive failure.
+const SYNC_BACKOFF_MULTIPLIER: f64 = 2.0;
+/// Healthy-state cadence hint (15 minutes) — the floor iOS enforces for
+/// `BGAppRefreshTask`, so a shorter interval would be ignored anyway.
+#[allow(clippy::duration_suboptimal_units)]
+const SYNC_REFRESH_INTERVAL: Duration = Duration::from_secs(900);
+
+/// Outcome of a single background refresh, surfaced to the iOS
+/// `BGTaskScheduler` handler so it can schedule the next wake.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct BackgroundRefreshResult {
+    /// Number of local changes pushed to the relay this round.
+    pub pushed: u32,
+    /// Number of remote changes applied to the local library this round.
+    pub applied: u32,
+    /// `true` when the round hit an offline/transient failure and backed off.
+    ///
+    /// The round still completed cleanly (no error); the app should simply
+    /// reschedule using `retry_after_seconds` rather than treat it as failure.
+    pub offline: bool,
+    /// Suggested delay before the next background refresh, in seconds. On
+    /// success this is the healthy cadence; when `offline`, the backoff delay.
+    pub retry_after_seconds: u64,
 }
 
 impl Library {
@@ -1222,7 +1268,10 @@ impl Library {
     pub fn new() -> Arc<Self> {
         let db = Database::open_in_memory().expect("in-memory database must open");
         seed(&db).expect("seeding the in-memory demo library must succeed");
-        Arc::new(Self { db: Mutex::new(db) })
+        Arc::new(Self {
+            db: Mutex::new(db),
+            sync: Mutex::new(None),
+        })
     }
 
     /// Opens (creating and migrating if needed) the on-device SQLite library at
@@ -1242,7 +1291,10 @@ impl Library {
         if db.is_empty()? {
             seed(&db)?;
         }
-        Ok(Arc::new(Self { db: Mutex::new(db) }))
+        Ok(Arc::new(Self {
+            db: Mutex::new(db),
+            sync: Mutex::new(None),
+        }))
     }
 
     /// Returns every item in triage-`Inbox` status (the primary landing screen).
@@ -1982,6 +2034,125 @@ impl Library {
             document_count: 0,
             highlight_count: 0,
         })
+    }
+
+    /// Configures end-to-end-encrypted remote sync for this library (issue #129).
+    ///
+    /// The app supplies the relay `server` URL, its account identity
+    /// (`account_id_hex`, `device_id`), the 32-byte account root key
+    /// (`account_root_key`, held in the iOS keychain and never persisted by this
+    /// crate), and the active `key_epoch`. This builds the crypto context and
+    /// HTTP transport once and stores them so [`Self::background_refresh`] can
+    /// run cheap single-shot rounds. Calling it again replaces the session,
+    /// e.g. after an epoch rotation.
+    ///
+    /// # Errors
+    ///
+    /// [`PergamonError::InvalidInput`] if the key is not 32 bytes,
+    /// [`PergamonError::Network`] if the server URL is invalid, or
+    /// [`PergamonError::Internal`] if the crypto context cannot be derived.
+    #[allow(clippy::needless_pass_by_value)] // owned args are the idiomatic UniFFI signature
+    pub fn configure_sync(
+        &self,
+        server: String,
+        account_id_hex: String,
+        device_id: String,
+        account_root_key: Vec<u8>,
+        key_epoch: u32,
+    ) -> Result<(), PergamonError> {
+        let ark_bytes: [u8; 32] =
+            account_root_key
+                .as_slice()
+                .try_into()
+                .map_err(|_| PergamonError::InvalidInput {
+                    message: format!(
+                        "account root key must be 32 bytes, got {}",
+                        account_root_key.len()
+                    ),
+                })?;
+        let ark = pergamon_crypto::hierarchy::AccountRootKey::from_bytes(ark_bytes);
+        let crypto = pergamon_sync::CryptoContext::new(ark, account_id_hex, device_id, key_epoch)
+            .map_err(|e| PergamonError::Internal {
+            message: e.to_string(),
+        })?;
+        let transport = pergamon_sync::http::HttpTransport::new(server).map_err(|e| {
+            PergamonError::Network {
+                message: e.to_string(),
+            }
+        })?;
+        let engine = pergamon_sync::SyncEngine::new(transport, crypto);
+        let backoff = pergamon_sync::BackoffPolicy::new(
+            SYNC_BACKOFF_BASE,
+            SYNC_BACKOFF_MAX,
+            SYNC_BACKOFF_MULTIPLIER,
+        );
+        let session = SyncSession {
+            engine,
+            blobs: pergamon_sync::MemoryBlobStore::new(),
+            scheduler: pergamon_sync::SyncScheduler::new(SYNC_REFRESH_INTERVAL, backoff),
+            jitter: pergamon_sync::Jitter::from_entropy(),
+        };
+        let mut guard = self.sync.lock().unwrap_or_else(PoisonError::into_inner);
+        *guard = Some(session);
+        Ok(())
+    }
+
+    /// Reports whether remote sync has been configured via
+    /// [`Self::configure_sync`].
+    #[must_use]
+    pub fn is_sync_configured(&self) -> bool {
+        self.sync
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_some()
+    }
+
+    /// Runs one background sync round: push local changes, pull and apply remote
+    /// ones (issue #129). Designed to be called from the iOS `BGTaskScheduler`
+    /// handler; it is single-shot and blocking (ADR-019).
+    ///
+    /// Offline/transient failures are **not** errors: the round returns with
+    /// `offline = true` and a backoff-derived `retry_after_seconds` so the app
+    /// can reschedule. Only fatal (crypto/protocol) failures return an error.
+    ///
+    /// # Errors
+    ///
+    /// [`PergamonError::InvalidInput`] if sync is not configured, or
+    /// [`PergamonError::Internal`] on a fatal, non-retryable sync failure.
+    #[allow(clippy::significant_drop_tightening)] // both guards are needed for the whole round
+    pub fn background_refresh(&self) -> Result<BackgroundRefreshResult, PergamonError> {
+        let mut sync_guard = self.sync.lock().unwrap_or_else(PoisonError::into_inner);
+        let session = sync_guard
+            .as_mut()
+            .ok_or_else(|| PergamonError::InvalidInput {
+                message: "remote sync is not configured; call configure_sync first".to_owned(),
+            })?;
+        let db = self.db.lock().unwrap_or_else(PoisonError::into_inner);
+        match session.engine.sync(&db, &session.blobs) {
+            Ok(stats) => {
+                session.scheduler.record_success();
+                let next = session.scheduler.next_delay(session.jitter.next01());
+                Ok(BackgroundRefreshResult {
+                    pushed: u32::try_from(stats.pushed).unwrap_or(u32::MAX),
+                    applied: u32::try_from(stats.applied).unwrap_or(u32::MAX),
+                    offline: false,
+                    retry_after_seconds: next.as_secs(),
+                })
+            }
+            Err(e) if e.is_retryable() => {
+                session.scheduler.record_failure();
+                let next = session.scheduler.next_delay(session.jitter.next01());
+                Ok(BackgroundRefreshResult {
+                    pushed: 0,
+                    applied: 0,
+                    offline: true,
+                    retry_after_seconds: next.as_secs(),
+                })
+            }
+            Err(e) => Err(PergamonError::Internal {
+                message: e.to_string(),
+            }),
+        }
     }
 }
 

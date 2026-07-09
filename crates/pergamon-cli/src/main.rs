@@ -4,8 +4,9 @@
 //! system. Combines RSS reader, read-later, bookmark manager, and
 //! knowledge retention engine into a single CLI + ratatui TUI.
 
-mod keystore;
 mod tui;
+
+use pergamon_keystore as keystore;
 
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
@@ -297,6 +298,19 @@ enum SyncRemoteAction {
         /// Use an encrypted key file instead of the OS keychain.
         #[arg(long)]
         key_file: Option<PathBuf>,
+    },
+    /// Run continuous background sync: repeated rounds on an interval, with
+    /// exponential backoff on offline/transient failures until interrupted.
+    Daemon {
+        /// Account handle whose keys back this sync.
+        #[arg(long, default_value = "default")]
+        account: String,
+        /// Use an encrypted key file instead of the OS keychain.
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+        /// Seconds between successful sync rounds.
+        #[arg(long, default_value_t = 300)]
+        interval: u64,
     },
     /// Show the local sync status (identity, cursor, pending outbox).
     Status,
@@ -6091,6 +6105,11 @@ fn handle_sync_remote(db: &Database, action: SyncRemoteAction) -> Result<()> {
             );
             Ok(())
         }
+        SyncRemoteAction::Daemon {
+            account,
+            key_file,
+            interval,
+        } => sync_remote_daemon(db, &account, key_file.as_ref(), interval),
         SyncRemoteAction::Status => sync_remote_status(db),
         SyncRemoteAction::Conflicts { dismiss, all } => {
             sync_remote_conflicts(db, dismiss.as_deref(), all)
@@ -6135,6 +6154,64 @@ fn sync_remote_enable(
     println!("  device:  {device_id}");
     println!("Run `pergamon sync-remote sync` to exchange changes.");
     Ok(())
+}
+
+/// Run continuous background sync until interrupted.
+///
+/// Builds a sync session, then drives repeated push+pull rounds via the shared
+/// [`pergamon_sync::run_forever`] loop: on success it waits `interval_secs`; on
+/// an offline/transient failure it backs off exponentially (5s → 5min) and keeps
+/// retrying. A fatal error stops the loop. Press Ctrl-C to stop.
+#[allow(clippy::duration_suboptimal_units)] // explicit seconds read clearly here
+fn sync_remote_daemon(
+    db: &Database,
+    account: &str,
+    key_file: Option<&PathBuf>,
+    interval_secs: u64,
+) -> Result<()> {
+    let (engine, blobs) = open_sync_session(db, account, key_file)?;
+    let interval = std::time::Duration::from_secs(interval_secs.max(1));
+    let backoff = pergamon_sync::BackoffPolicy::new(
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(300),
+        2.0,
+    );
+    let scheduler = pergamon_sync::SyncScheduler::new(interval, backoff);
+    // Keep the control handle alive so the channel stays connected; dropping it
+    // would look like a shutdown request and stop the loop after one round.
+    let (_control, sleeper) = pergamon_sync::control();
+
+    println!("Background sync started (interval {interval_secs}s). Press Ctrl-C to stop.");
+    pergamon_sync::run_forever(
+        || engine.sync(db, &blobs),
+        scheduler,
+        &sleeper,
+        pergamon_sync::Jitter::from_entropy(),
+        log_sync_round,
+    )
+    .context("background sync loop")?;
+    Ok(())
+}
+
+/// Log the result of one background sync round.
+fn log_sync_round(report: &pergamon_sync::RoundReport) {
+    match &report.outcome {
+        pergamon_sync::RoundOutcome::Synced(stats) => {
+            println!(
+                "sync ok: pushed {}, applied {}; next in {}s",
+                stats.pushed,
+                stats.applied,
+                report.next_delay.as_secs()
+            );
+        }
+        pergamon_sync::RoundOutcome::Offline(msg) => {
+            eprintln!(
+                "sync offline ({} consecutive): {msg}; retrying in {}s",
+                report.consecutive_failures,
+                report.next_delay.as_secs()
+            );
+        }
+    }
 }
 
 /// Print the local sync status.

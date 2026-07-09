@@ -264,6 +264,7 @@ pub async fn create_item(
     };
 
     db.insert_content_item(&item)?;
+    crate::sync_tracking::track_document_upsert(&db, &item);
 
     let meta = build_bookmark_meta(item.id, &bytes, &body.url, &final_url);
     let _ = db.insert_bookmark_meta(&meta);
@@ -320,6 +321,10 @@ pub async fn update_item(
     let updated_item = db.get_content_item(id).unwrap_or(item);
     let tags = db.tags_for_item(id)?;
 
+    if body.status.is_some() || body.tags.is_some() {
+        crate::sync_tracking::track_document_upsert(&db, &updated_item);
+    }
+
     Ok(Json(ItemResponse {
         item: updated_item,
         tags,
@@ -337,6 +342,7 @@ pub async fn delete_item(
         .map_err(|_| ApiError::internal("database lock poisoned"))?;
     let deleted = db.delete_content_item(id)?;
     if deleted {
+        crate::sync_tracking::track_document_delete(&db, id);
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::not_found("item not found"))

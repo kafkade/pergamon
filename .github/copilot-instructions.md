@@ -169,6 +169,7 @@ Use conventional commits: `feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `chore
 - End-to-end-encrypted multi-device sync stack (Phase 7, epic #35): `pergamon-crypto` (ADR-024 key hierarchy, device keypairs, sealed enrollment bundles, SAS, trust/revocation attestations, epoch rotation, passphrase/recovery-code recovery — zero I/O) (#125); `pergamon-sync` client engine (ADR-022 wire protocol, ADR-023 conflict resolution, pluggable `Transport`/`RelayTransport` with in-memory doubles and a `reqwest` `HttpRelay` behind the `http` feature) (#126, #127); `pergamon-sync-server` blind relay (AGPL-3.0) storing ciphertext + opaque onboarding artifacts only
 - `pergamon sync-remote` CLI: `enable/push/pull/sync/status/conflicts` for opt-in, client-initiated sync; `pergamon device-key` CLI: `init/show` device keypair management via OS keychain or encrypted key file (#125, #126)
 - `pergamon sync-device` CLI: multi-device onboarding, account bootstrap, and key management (#128) — `bootstrap`, `invite`, `enroll`, `approve`/`accept` (SAS-verified handoff), `devices`, `revoke` (epoch rotation + re-wrap), and `recovery-enable`/`recover`. Client-side flows live in `pergamon-sync::onboarding`; canonical `to_bytes`/`from_bytes` wire encodings for signed device records and attestations round-trip the full signed artifacts through the blind relay
+- Background sync scheduling for web and iOS (ADR-025, epic #35, #129): pure `pergamon-sync::schedule` core (`BackoffPolicy` exp+jitter, `SyncScheduler` state machine) plus a blocking `run_forever` driver (injectable `Sleeper`, `SyncControl` trigger/shutdown, deterministic `Jitter`) and `SyncError::is_retryable()` offline classification; shared Apache-2.0 `pergamon-keystore` crate (encrypted-file + optional `keyring` feature) extracted from the CLI so the AGPL server can unlock keys. Drivers: CLI `sync-remote daemon`; `pergamon-server` background worker (own WAL connection, `--sync-key-file`/`PERGAMON_SYNC_KEY_PASSPHRASE`/`--sync-interval`, `POST /admin/sync-remote/trigger`, server-mutation change-tracking); iOS `Library::configure_sync` + `background_refresh() -> BackgroundRefreshResult` single-shot with backoff hint (`pergamon-uniffi`)
 
 ### What's NOT yet implemented
 
@@ -177,7 +178,7 @@ Use conventional commits: `feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `chore
 - Smart collections, content rules, analytics (#25-#27)
 - WASM/UniFFI spikes (#28-#29)
 - iOS/web clients (#33-#34)
-- Web/iOS sync client wiring (the sync stack and server exist and are driven CLI-first; #128 explicitly deferred web/iOS onboarding to follow-ups)
+- Web/iOS sync onboarding UI (the sync stack, server, background workers, and iOS FFI hooks exist and are driven CLI-first; #128 explicitly deferred web/iOS onboarding flows to follow-ups)
 
 ### Key files
 
@@ -190,13 +191,16 @@ Use conventional commits: `feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `chore
 - `crates/pergamon-import/` — Importers: OPML, Raindrop.io (CSV), Pocket (HTML), Kindle (My Clippings.txt), Readwise (CSV)
 - `crates/pergamon-cli/` — CLI binary (clap), TUI (ratatui), HTTP (reqwest)
 - `crates/pergamon-crypto/` — Apache-2.0 client E2EE library: ADR-024 key hierarchy, device keys, sealed enrollment bundles, SAS, attestations, epoch rotation, recovery (zero I/O)
-- `crates/pergamon-sync/` — Apache-2.0 client sync engine: wire protocol, conflict resolution, `Transport`/`RelayTransport` (in-memory + `HttpRelay`), and the `onboarding` orchestration module
+- `crates/pergamon-keystore/` — Apache-2.0 shared key store: encrypted-file (Argon2id) backend plus an optional `keyring` (OS keychain) feature; unlocks the account root key for the CLI and the AGPL server
+- `crates/pergamon-sync/` — Apache-2.0 client sync engine: wire protocol, conflict resolution, `Transport`/`RelayTransport` (in-memory + `HttpRelay`), the `onboarding` orchestration module, and the `schedule`/`daemon` background-sync scheduler (`BackoffPolicy`, `SyncScheduler`, `run_forever`, `SyncControl`)
 - `crates/pergamon-sync-server/` — AGPL-3.0 blind relay: stores ciphertext + opaque onboarding artifacts only
+- `crates/pergamon-server/` — AGPL-3.0 Axum web server; background sync worker in `sync_worker.rs` and server-mutation change-tracking in `sync_tracking.rs`
+- `crates/pergamon-uniffi/` — UniFFI facade for Apple clients; `configure_sync` + `background_refresh` drive iOS background sync
 
 **Documentation:**
 
 - docs/roadmap.md — full product roadmap (20 sections)
-- docs/adr/ — 10 Architecture Decision Records
+- docs/adr/ — Architecture Decision Records (ADR-001–010, 016–025)
 
 ## Reference Documents
 

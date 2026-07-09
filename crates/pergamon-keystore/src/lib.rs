@@ -1,19 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Device key storage for sync (ADR-024, #125).
+//! # pergamon-keystore
+//!
+//! Device-key storage for pergamon sync (ADR-024, #125).
 //!
 //! Sync private keys — each device's X25519 + Ed25519 secrets and the Account
 //! Root Key — never leave the machine and must be kept in a platform secure
-//! store. This module wraps two backends behind one [`DeviceKeyStore`]:
+//! store. This crate wraps two backends behind one [`DeviceKeyStore`]:
 //!
 //! - [`Backend::Keyring`] — the OS keychain (macOS Keychain, Linux Secret
 //!   Service, Windows Credential Manager) via the `keyring` crate; the default
-//!   on a normal desktop, and
-//! - [`Backend::EncryptedFile`] — an Argon2id-encrypted key file, the fallback
-//!   for headless CLI hosts without a live keychain (ADR-024's stated fallback).
+//!   on a normal desktop (the `keyring` feature, on by default), and
+//! - `Backend::EncryptedFile` — an Argon2id-encrypted key file, the fallback
+//!   for headless hosts without a live keychain (ADR-024's stated fallback) and
+//!   the mechanism the AGPL web server uses to unlock keys for background sync
+//!   (#129). Always available, so a service can depend on this crate with
+//!   `default-features = false` to avoid linking the OS keychain.
 //!
-//! Only thin storage wiring lives here; the full enroll/recover UX is out of
-//! scope for #125.
+//! Only storage wiring lives here; the enroll/recover UX lives in the CLI.
+
+#![forbid(unsafe_code)]
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -27,6 +33,7 @@ use pergamon_crypto::primitives::{self, KEY_LEN};
 use serde::{Deserialize, Serialize};
 
 /// The `keyring` service name all pergamon secrets are stored under.
+#[cfg(feature = "keyring")]
 const KEYRING_SERVICE: &str = "dev.pergamon.sync";
 
 /// Suffix identifying a device-secret entry (`{account}` scoped).
@@ -44,6 +51,7 @@ pub struct DeviceKeyStore {
 /// Which secure store backs a [`DeviceKeyStore`].
 enum Backend {
     /// The OS keychain via the `keyring` crate.
+    #[cfg(feature = "keyring")]
     Keyring,
     /// An Argon2id-encrypted key file for headless hosts.
     EncryptedFile(EncryptedFile),
@@ -51,7 +59,8 @@ enum Backend {
 
 impl DeviceKeyStore {
     /// Use the OS keychain (macOS Keychain / Linux Secret Service / Windows
-    /// Credential Manager).
+    /// Credential Manager). Requires the `keyring` feature.
+    #[cfg(feature = "keyring")]
     #[must_use]
     pub const fn keyring() -> Self {
         Self {
@@ -158,15 +167,18 @@ impl DeviceKeyStore {
     fn set(&mut self, account: &str, suffix: &str, bytes: &[u8]) -> Result<()> {
         let entry = entry_name(account, suffix);
         match &mut self.backend {
+            #[cfg(feature = "keyring")]
             Backend::Keyring => keyring_set(&entry, bytes),
             Backend::EncryptedFile(file) => file.set(&entry, bytes),
         }
     }
 
     /// Read a secret from the `{account}:{suffix}` entry, if present.
+    #[cfg_attr(not(feature = "keyring"), allow(clippy::unnecessary_wraps))]
     fn get(&self, account: &str, suffix: &str) -> Result<Option<Vec<u8>>> {
         let entry = entry_name(account, suffix);
         match &self.backend {
+            #[cfg(feature = "keyring")]
             Backend::Keyring => keyring_get(&entry),
             Backend::EncryptedFile(file) => Ok(file.get(&entry)),
         }
@@ -179,6 +191,7 @@ fn entry_name(account: &str, suffix: &str) -> String {
 }
 
 /// Store `bytes` (base64) in the OS keychain under `entry`.
+#[cfg(feature = "keyring")]
 fn keyring_set(entry: &str, bytes: &[u8]) -> Result<()> {
     let item = keyring::Entry::new(KEYRING_SERVICE, entry)
         .with_context(|| format!("opening keychain entry {entry}"))?;
@@ -188,6 +201,7 @@ fn keyring_set(entry: &str, bytes: &[u8]) -> Result<()> {
 }
 
 /// Read `bytes` from the OS keychain under `entry`, if present.
+#[cfg(feature = "keyring")]
 fn keyring_get(entry: &str) -> Result<Option<Vec<u8>>> {
     let item = keyring::Entry::new(KEYRING_SERVICE, entry)
         .with_context(|| format!("opening keychain entry {entry}"))?;
