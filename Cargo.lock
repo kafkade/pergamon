@@ -2443,7 +2443,6 @@ dependencies = [
  "clap_complete",
  "crossterm",
  "dirs",
- "keyring",
  "open",
  "pergamon-core",
  "pergamon-crypto",
@@ -2451,6 +2450,7 @@ dependencies = [
  "pergamon-extract",
  "pergamon-feed",
  "pergamon-import",
+ "pergamon-keystore",
  "pergamon-storage",
  "pergamon-sync",
  "ratatui",
@@ -2543,6 +2543,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "pergamon-keystore"
+version = "0.7.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "keyring",
+ "pergamon-crypto",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "pergamon-server"
 version = "0.7.0"
 dependencies = [
@@ -2554,7 +2567,9 @@ dependencies = [
  "pergamon-core",
  "pergamon-extract",
  "pergamon-feed",
+ "pergamon-keystore",
  "pergamon-storage",
+ "pergamon-sync",
  "reqwest",
  "serde",
  "serde_json",
@@ -2629,8 +2644,10 @@ name = "pergamon-uniffi"
 version = "0.7.0"
 dependencies = [
  "pergamon-core",
+ "pergamon-crypto",
  "pergamon-extract",
  "pergamon-storage",
+ "pergamon-sync",
  "thiserror 2.0.18",
  "time",
  "uniffi",

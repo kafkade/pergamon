@@ -36,6 +36,10 @@ pub fn admin_router(state: AppState) -> Router<AppState> {
         .route("/admin", get(admin::dashboard))
         .route("/admin/sync", post(admin::sync_all))
         .route("/admin/sync/{id}", post(admin::sync_one))
+        .route(
+            "/admin/sync-remote/trigger",
+            post(admin::trigger_remote_sync),
+        )
         .route_layer(axum::middleware::from_fn_with_state(
             state,
             crate::auth::require_admin_auth,

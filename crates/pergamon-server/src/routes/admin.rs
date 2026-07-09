@@ -292,9 +292,40 @@ pub async fn sync_one(State(state): State<AppState>, Path(id): Path<Uuid>) -> Re
     Redirect::to("/admin").into_response()
 }
 
-// ======================================================================
-// Helpers
-// ======================================================================
+/// `POST /admin/sync-remote/trigger` — ask the background sync worker to run an
+/// out-of-band round immediately.
+///
+/// Returns `202 Accepted` when the request reached the worker, `503` when the
+/// worker has already stopped, and `404` when background remote sync is not
+/// configured on this server.
+pub async fn trigger_remote_sync(State(state): State<AppState>) -> Response {
+    let Some(control) = state.sync_control.as_ref() else {
+        return (
+            axum::http::StatusCode::NOT_FOUND,
+            "background remote sync is not enabled\n",
+        )
+            .into_response();
+    };
+    let triggered = {
+        let Ok(guard) = control.lock() else {
+            return internal_error();
+        };
+        guard.trigger()
+    };
+    if triggered {
+        (
+            axum::http::StatusCode::ACCEPTED,
+            "background sync round triggered\n",
+        )
+            .into_response()
+    } else {
+        (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "background sync worker is not running\n",
+        )
+            .into_response()
+    }
+}
 
 /// Summarize feed health into aggregate counts.
 fn summarize_feeds(rows: &[pergamon_core::diagnostics::FeedHealthRow]) -> FeedSummaryView {

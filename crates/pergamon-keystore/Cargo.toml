@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: Apache-2.0
+[package]
+name = "pergamon-keystore"
+description = "Apache-2.0 device-key storage for pergamon sync (ADR-024): OS keychain and Argon2id-encrypted key file backends, shared by the CLI and web server."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# The OS keychain backend (macOS Keychain / Linux Secret Service / Windows
+# Credential Manager). On by default for desktop CLI hosts; headless services
+# (the AGPL web server) opt out and use only the encrypted-file backend.
+default = ["keyring"]
+keyring = ["dep:keyring"]
+
+[dependencies]
+pergamon-crypto = { workspace = true }
+anyhow = { workspace = true }
+base64 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+keyring = { workspace = true, optional = true }
+
+[dev-dependencies]
+uuid = { workspace = true }

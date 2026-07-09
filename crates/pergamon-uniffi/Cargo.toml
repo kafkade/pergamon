@@ -37,6 +37,8 @@ pedantic = { level = "warn", priority = -1 }
 pergamon-core = { workspace = true }
 pergamon-storage = { workspace = true }
 pergamon-extract = { workspace = true }
+pergamon-crypto = { workspace = true }
+pergamon-sync = { workspace = true, features = ["http"] }
 thiserror = { workspace = true }
 time = { workspace = true }
 uuid = { workspace = true }

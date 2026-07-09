@@ -368,6 +368,7 @@ pub async fn item_status(
         if db.update_content_item_status(id, new_status).is_err() {
             return not_found();
         }
+        crate::sync_tracking::track_document_by_id(&db, id);
     }
 
     if !is_htmx(&headers) {
@@ -475,9 +476,13 @@ pub async fn bulk(
         };
         for id in &ids {
             if action == "delete" {
-                let _ = db.delete_content_item(*id);
-            } else if let Some(status) = action_to_status(&action) {
-                let _ = db.update_content_item_status(*id, status);
+                if db.delete_content_item(*id).unwrap_or(false) {
+                    crate::sync_tracking::track_document_delete(&db, *id);
+                }
+            } else if let Some(status) = action_to_status(&action)
+                && db.update_content_item_status(*id, status).is_ok()
+            {
+                crate::sync_tracking::track_document_by_id(&db, *id);
             }
         }
     }

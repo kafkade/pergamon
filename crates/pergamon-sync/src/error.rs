@@ -45,5 +45,24 @@ pub enum SyncError {
     Protocol(String),
 }
 
+impl SyncError {
+    /// Whether this error is *transient* and worth retrying with backoff.
+    ///
+    /// Network failures, timeouts, and server-side errors surface as
+    /// [`SyncError::Transport`]; a background sync loop should tolerate these
+    /// (the device may simply be offline) and retry after a backoff rather than
+    /// stop. A missing relayed artifact ([`SyncError::NotFound`]) is likewise
+    /// treated as transient because the peer may not have uploaded it yet.
+    ///
+    /// Everything else — crypto, (de)serialization, base64, protocol shape,
+    /// missing local blobs, or an unconfigured account — is a *fatal* condition
+    /// that retrying cannot fix, so the caller should surface it instead of
+    /// spinning.
+    #[must_use]
+    pub const fn is_retryable(&self) -> bool {
+        matches!(self, Self::Transport(_) | Self::NotFound(_))
+    }
+}
+
 /// A sync result.
 pub type Result<T> = std::result::Result<T, SyncError>;
