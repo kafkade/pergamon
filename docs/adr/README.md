@@ -31,3 +31,4 @@ They follow the [MADR](https://adr.github.io/madr/) format.
 | [ADR-025](025-background-sync-scheduling-and-offline-policy.md) | Background Sync Scheduling and Offline Policy | Accepted |
 | [ADR-026](026-sync-server-deployment.md) | Sync Server Deployment | Accepted |
 | [ADR-027](027-browser-extension-architecture.md) | Browser Extension Architecture | Accepted |
+| [ADR-028](028-ai-privacy-and-provider-boundary.md) | AI Privacy and Provider Boundary | Accepted |
