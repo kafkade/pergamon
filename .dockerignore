@@ -35,5 +35,7 @@ exports/
 
 # Docker files themselves
 Dockerfile
+Dockerfile.sync-server
 .dockerignore
 docker-compose.yml
+docker-compose.sync-server.yml

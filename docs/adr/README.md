@@ -29,3 +29,4 @@ They follow the [MADR](https://adr.github.io/madr/) format.
 | [ADR-023](023-conflict-policy-by-entity-type.md) | Conflict Policy by Entity Type | Accepted |
 | [ADR-024](024-device-onboarding-and-key-lifecycle.md) | Device Onboarding and Key Lifecycle | Accepted |
 | [ADR-025](025-background-sync-scheduling-and-offline-policy.md) | Background Sync Scheduling and Offline Policy | Accepted |
+| [ADR-026](026-sync-server-deployment.md) | Sync Server Deployment | Accepted |

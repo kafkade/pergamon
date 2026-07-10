@@ -1,14 +1,16 @@
 name: Docker
 
-# Builds the Docker image on PRs that touch image-relevant files (build-only, no
+# Builds the Docker images on PRs that touch image-relevant files (build-only, no
 # push) to catch Dockerfile regressions, and publishes versioned images to GHCR on
-# version tags. This workflow is intentionally standalone and is NOT part of the
-# required status checks in the Terraform-managed branch protection
+# version tags. Two images are built: the web server (`pergamon-web`) and the sync
+# server (`pergamon-sync-server`). This workflow is intentionally standalone and is
+# NOT part of the required status checks in the Terraform-managed branch protection
 # (kafkade/github-infra) — Docker builds are slow and should not gate every PR.
 on:
   pull_request:
     paths:
       - "Dockerfile"
+      - "Dockerfile.sync-server"
       - ".dockerignore"
       - "crates/**"
       - "Cargo.toml"
@@ -28,18 +30,33 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: kafkade/pergamon-web
   # Compressed image size budget (ADR-018): < 100 MB.
   MAX_COMPRESSED_BYTES: "104857600"
 
 jobs:
   docker:
-    name: Build image
+    name: Build ${{ matrix.name }} image
     runs-on: ubuntu-latest
     permissions:
       contents: read
       # Needed only on tag pushes to log in and push to GHCR.
       packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Phase 5 web server (Apache-2.0 workspace; see ADR-018).
+          - name: web
+            image: kafkade/pergamon-web
+            dockerfile: Dockerfile
+            port: 3000
+            description: "pergamon web server — a unified, local-first personal information system (RSS, read-later, bookmarks, spaced repetition)."
+          # Phase 7 sync server (AGPL-3.0 blind relay; see ADR-026).
+          - name: sync-server
+            image: kafkade/pergamon-sync-server
+            dockerfile: Dockerfile.sync-server
+            port: 8787
+            description: "pergamon sync server — a blind, end-to-end-encrypted multi-device sync relay. Stores ciphertext only."
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -52,7 +69,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.REGISTRY }}/${{ matrix.image }}
           # Semantic version tags per ADR-018: 0.7.0, 0.7, 0, plus latest (added
           # automatically for the highest non-prerelease semver). On pull requests
           # (which never push) a `pr-<number>` tag is produced so the build can be
@@ -63,7 +80,7 @@ jobs:
             type=semver,pattern={{major}}
             type=ref,event=pr
           labels: |
-            org.opencontainers.image.description=pergamon web server — a unified, local-first personal information system (RSS, read-later, bookmarks, spaced repetition).
+            org.opencontainers.image.description=${{ matrix.description }}
 
       - name: Log in to GHCR
         # Only authenticate on tag pushes, which are the only builds that push.
@@ -78,6 +95,7 @@ jobs:
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
+          file: ${{ matrix.dockerfile }}
           platforms: linux/amd64
           # Load the built image into the runner's Docker daemon so the smoke test
           # and size check run against the exact artifact. Pushing happens in a
@@ -86,20 +104,22 @@ jobs:
           push: false
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
 
       - name: Smoke test (/health responds 200)
         env:
-          IMAGE_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+          IMAGE_REF: ${{ env.REGISTRY }}/${{ matrix.image }}:${{ steps.meta.outputs.version }}
+          PORT: ${{ matrix.port }}
+          CONTAINER: pergamon-smoke-${{ matrix.name }}
         run: |
           set -euo pipefail
           echo "Starting container from $IMAGE_REF"
-          docker run -d --name pergamon-smoke -p 3000:3000 "$IMAGE_REF"
+          docker run -d --name "$CONTAINER" -p "$PORT:$PORT" "$IMAGE_REF"
 
           ok=false
           for i in $(seq 1 30); do
-            code=$(curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/health || true)
+            code=$(curl -fsS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/health" || true)
             if [ "$code" = "200" ]; then
               echo "Health check passed after ${i} attempt(s)."
               ok=true
@@ -112,16 +132,16 @@ jobs:
           if [ "$ok" != "true" ]; then
             echo "::error::Health check did not return 200 within timeout."
             echo "----- container logs -----"
-            docker logs pergamon-smoke || true
-            docker rm -f pergamon-smoke >/dev/null 2>&1 || true
+            docker logs "$CONTAINER" || true
+            docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
             exit 1
           fi
 
-          docker rm -f pergamon-smoke >/dev/null 2>&1 || true
+          docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
 
       - name: Check compressed image size (< 100 MB)
         env:
-          IMAGE_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+          IMAGE_REF: ${{ env.REGISTRY }}/${{ matrix.image }}:${{ steps.meta.outputs.version }}
         run: |
           set -euo pipefail
           bytes=$(docker save "$IMAGE_REF" | gzip -c | wc -c)

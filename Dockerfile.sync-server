@@ -1,0 +1,73 @@
+# syntax=docker/dockerfile:1
+
+# ----------------------------------------------------------------------
+# pergamon sync server (AGPL-3.0) — a blind, end-to-end-encrypted relay.
+# It stores ciphertext and opaque onboarding artifacts only; it never sees
+# plaintext. See docs/sync-server.md and docs/adr/026-sync-server-deployment.md.
+# ----------------------------------------------------------------------
+
+# ----------------------------------------------------------------------
+# Builder stage: compile the sync server binary in release mode. The Rust
+# version matches the pin used by the web image (Dockerfile).
+# ----------------------------------------------------------------------
+FROM rust:1.96-bookworm AS builder
+
+WORKDIR /build
+
+# Copy the full workspace. BuildKit cache mounts below keep the compiled
+# dependency graph (cargo registry + target dir) warm across rebuilds, so a
+# source-only change does not recompile every dependency.
+COPY . .
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/build/target \
+    set -eux; \
+    cargo build --release -p pergamon-sync-server; \
+    cp target/release/pergamon-sync-server /usr/local/bin/pergamon-sync-server
+
+# ----------------------------------------------------------------------
+# Runtime stage: minimal Debian image with only the binary and CA certs.
+# SQLite is statically linked via rusqlite/bundled, so no libsqlite3 needed.
+# ----------------------------------------------------------------------
+FROM debian:bookworm-slim
+
+# AGPL-3.0: the image ships an AGPL-licensed binary. If you run a modified
+# version as a network service you must offer its source to your users.
+LABEL org.opencontainers.image.title="pergamon-sync-server" \
+      org.opencontainers.image.description="pergamon sync server — a blind, end-to-end-encrypted multi-device sync relay. Stores ciphertext only." \
+      org.opencontainers.image.licenses="AGPL-3.0-only" \
+      org.opencontainers.image.source="https://github.com/kafkade/pergamon"
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Run as an unprivileged user (UID/GID 1000).
+RUN groupadd -g 1000 pergamon \
+    && useradd -u 1000 -g pergamon -m -s /usr/sbin/nologin pergamon
+
+COPY --from=builder /usr/local/bin/pergamon-sync-server /usr/local/bin/pergamon-sync-server
+
+# Ship the AGPL-3.0 license text alongside the binary (source-availability).
+COPY --from=builder /build/crates/pergamon-sync-server/LICENSE /usr/share/doc/pergamon-sync-server/LICENSE
+
+# Data directory for the SQLite database, owned by the app user.
+# Mount a volume here in Compose / `docker run` for persistence.
+RUN mkdir -p /data && chown pergamon:pergamon /data
+
+USER pergamon
+
+EXPOSE 8787
+
+# Bind to all interfaces inside the container (the binary defaults to
+# 127.0.0.1 for native installs). Data lives under /data.
+ENV PERGAMON_SYNC_HOST=0.0.0.0 \
+    PERGAMON_SYNC_PORT=8787 \
+    PERGAMON_SYNC_DATA_DIR=/data \
+    RUST_LOG=info
+
+# Built-in health probe avoids needing curl/wget in the image.
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=10s \
+    CMD ["pergamon-sync-server", "health-check", "--url", "http://127.0.0.1:8787/health"]
+
+CMD ["pergamon-sync-server"]
