@@ -200,7 +200,7 @@ Use conventional commits: `feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `chore
 **Documentation:**
 
 - docs/roadmap.md — full product roadmap (20 sections)
-- docs/adr/ — Architecture Decision Records (ADR-001–010, 016–025)
+- docs/adr/ — Architecture Decision Records (ADR-001–010, 016–027)
 
 ## Reference Documents
 
