@@ -2625,6 +2625,7 @@ dependencies = [
  "pergamon-crypto",
  "pergamon-storage",
  "pergamon-sync",
+ "reqwest",
  "rusqlite",
  "serde",
  "serde_json",

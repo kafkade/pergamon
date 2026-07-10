@@ -1,0 +1,25 @@
+services:
+  pergamon-sync:
+    build:
+      context: .
+      dockerfile: Dockerfile.sync-server
+    image: pergamon-sync-server:latest
+    # Map the host port to the container. Adjust the host side (left) if 8787
+    # is taken, e.g. "9000:8787".
+    #
+    # SECURITY: the sync server has NO built-in authentication. It is a blind
+    # relay — it never sees plaintext — but anyone who can reach this port can
+    # push/pull ciphertext for any account. Do NOT expose it directly to the
+    # internet. Front it with a reverse proxy that enforces TLS *and* auth, or
+    # keep it on a trusted private network. See docs/sync-server.md.
+    ports:
+      - "8787:8787"
+    volumes:
+      - pergamon-sync-data:/data
+    environment:
+      # Override the log level/filter as needed (error, warn, info, debug, trace).
+      RUST_LOG: ${RUST_LOG:-info}
+    restart: unless-stopped
+
+volumes:
+  pergamon-sync-data:

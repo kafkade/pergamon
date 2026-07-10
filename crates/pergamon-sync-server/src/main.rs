@@ -33,6 +33,54 @@ struct Args {
     /// `./pergamon-sync.db`.
     #[arg(long, env = "PERGAMON_SYNC_DB")]
     db_path: Option<PathBuf>,
+
+    /// Optional subcommand. When present, it runs and the server does not start.
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+/// Subcommands for the pergamon sync server binary.
+#[derive(Debug, clap::Subcommand)]
+enum Command {
+    /// Probe a running server's health endpoint and exit.
+    ///
+    /// Performs an HTTP GET against the given URL and exits with status 0 when
+    /// the response is HTTP 200, or a non-zero status otherwise. Used as the
+    /// container `HEALTHCHECK` so the runtime image needs no `curl`/`wget`.
+    HealthCheck(HealthCheckArgs),
+}
+
+/// Arguments for the `health-check` subcommand.
+#[derive(Debug, clap::Args)]
+struct HealthCheckArgs {
+    /// URL of the health endpoint to probe.
+    #[arg(long, default_value = "http://127.0.0.1:8787/health")]
+    url: String,
+}
+
+/// Probe a server health endpoint and return an error if it is not healthy.
+///
+/// Sends an HTTP GET to `url` with a short timeout and succeeds only when the
+/// response status is 2xx. This backs the container `HEALTHCHECK`, avoiding the
+/// need for `curl`/`wget` in the minimal runtime image.
+async fn run_health_check(url: &str) -> Result<()> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .context("failed to build HTTP client")?;
+
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .with_context(|| format!("health check request to {url} failed"))?;
+
+    let status = response.status();
+    if status.is_success() {
+        Ok(())
+    } else {
+        anyhow::bail!("health check for {url} returned HTTP {status}");
+    }
 }
 
 /// Default database location: `$PERGAMON_SYNC_DATA_DIR` or the current directory.
@@ -84,6 +132,11 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
 
+    // Subcommands short-circuit before opening the store or binding a port.
+    if let Some(Command::HealthCheck(hc)) = &args.command {
+        return run_health_check(&hc.url).await;
+    }
+
     let db_path = args.db_path.unwrap_or_else(default_db_path);
     tracing::info!(path = %db_path.display(), "opening sync store");
 
@@ -110,4 +163,60 @@ async fn main() -> Result<()> {
 
     tracing::info!("sync server stopped");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    #![allow(clippy::expect_used)]
+    #![allow(clippy::panic)]
+
+    use super::*;
+
+    /// Build a router backed by an in-memory store for tests.
+    fn test_app() -> axum::Router {
+        let store = SyncStore::open_in_memory().expect("open in-memory store");
+        build_router(AppState::new(store))
+    }
+
+    #[test]
+    fn health_check_subcommand_parses() {
+        let args = Args::parse_from([
+            "pergamon-sync-server",
+            "health-check",
+            "--url",
+            "http://x/health",
+        ]);
+        match args.command {
+            Some(Command::HealthCheck(hc)) => assert_eq!(hc.url, "http://x/health"),
+            other => unreachable!("expected health-check subcommand, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_subcommand_runs_server() {
+        let args = Args::parse_from(["pergamon-sync-server"]);
+        assert!(args.command.is_none());
+    }
+
+    #[tokio::test]
+    async fn health_check_fails_for_unreachable_url() {
+        // Port 1 is privileged and not listening: the request must fail.
+        let result = run_health_check("http://127.0.0.1:1/health").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn health_check_succeeds_against_running_server() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = test_app();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let url = format!("http://{addr}/health");
+        let result = run_health_check(&url).await;
+        assert!(result.is_ok(), "health check failed: {result:?}");
+    }
 }

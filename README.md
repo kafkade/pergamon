@@ -152,11 +152,20 @@ docker compose up -d
 See **[docs/docker.md](docs/docker.md)** for configuration, data persistence,
 reverse-proxy (TLS) setup, and backups.
 
+To self-host the optional end-to-end-encrypted **sync server**, see
+**[docs/sync-server.md](docs/sync-server.md)**:
+
+```sh
+docker compose -f docker-compose.sync-server.yml up -d
+# blind relay on http://localhost:8787 (put it behind a reverse proxy)
+```
+
 ## Documentation
 
 - **[Product Roadmap](docs/roadmap.md)** — full phased roadmap with milestones
 - **[Architecture Decision Records](docs/adr/)** — ADRs covering core design choices
 - **[Docker / self-hosting guide](docs/docker.md)** — run the web server with Docker
+- **[Sync server self-hosting guide](docs/sync-server.md)** — run the E2EE sync server with Docker
 
 ## Related Projects
 
