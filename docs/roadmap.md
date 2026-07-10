@@ -1639,6 +1639,10 @@ That means:
 
 **Phase**: post-1.0 research, likely **Phase 6+**.
 
+See [ADR-028](adr/028-ai-privacy-and-provider-boundary.md) for the AI privacy and
+provider boundary (BYOK/BYOM, AI-off-by-default, and the data-egress opt-in
+contract).
+
 ### 7.2 — Email Newsletter Ingestion 🔴
 
 This is a high-value moonshot because newsletters are now a major reading source, but it is materially harder than RSS.
@@ -3183,7 +3187,7 @@ Predictable, portable, well-maintained, and aligned with the rest of the Rust ec
 **ADRs to write**
 
 - ADR-025 Browser extension architecture.
-- ADR-026 AI privacy and provider boundary.
+- ADR-028 AI privacy and provider boundary.
 - ADR-027 Digest generation and opt-in policy.
 
 ---
