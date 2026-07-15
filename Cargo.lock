@@ -2435,7 +2435,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "pergamon-cli"
-version = "0.7.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -2465,7 +2465,7 @@ dependencies = [
 
 [[package]]
 name = "pergamon-core"
-version = "0.7.0"
+version = "1.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2476,7 +2476,7 @@ dependencies = [
 
 [[package]]
 name = "pergamon-crypto"
-version = "0.7.0"
+version = "1.0.0"
 dependencies = [
  "argon2",
  "blake3",
@@ -2494,7 +2494,7 @@ dependencies = [
 
 [[package]]
 name = "pergamon-export"
-version = "0.7.0"
+version = "1.0.0"
 dependencies = [
  "pergamon-core",
  "serde",
@@ -2506,7 +2506,7 @@ dependencies = [
 
 [[package]]
 name = "pergamon-extract"
-version = "0.7.0"
+version = "1.0.0"
 dependencies = [
  "ammonia",
  "lopdf",
@@ -2521,7 +2521,7 @@ dependencies = [
 
 [[package]]
 name = "pergamon-feed"
-version = "0.7.0"
+version = "1.0.0"
 dependencies = [
  "feed-rs",
  "pergamon-core",
@@ -2533,7 +2533,7 @@ dependencies = [
 
 [[package]]
 name = "pergamon-import"
-version = "0.7.0"
+version = "1.0.0"
 dependencies = [
  "csv",
  "scraper 0.27.0",
@@ -2544,7 +2544,7 @@ dependencies = [
 
 [[package]]
 name = "pergamon-keystore"
-version = "0.7.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -2557,7 +2557,7 @@ dependencies = [
 
 [[package]]
 name = "pergamon-server"
-version = "0.7.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "askama",
@@ -2585,7 +2585,7 @@ dependencies = [
 
 [[package]]
 name = "pergamon-storage"
-version = "0.7.0"
+version = "1.0.0"
 dependencies = [
  "pergamon-core",
  "rusqlite",
@@ -2599,7 +2599,7 @@ dependencies = [
 
 [[package]]
 name = "pergamon-sync"
-version = "0.7.0"
+version = "1.0.0"
 dependencies = [
  "base64",
  "pergamon-core",
@@ -2615,7 +2615,7 @@ dependencies = [
 
 [[package]]
 name = "pergamon-sync-server"
-version = "0.7.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2642,7 +2642,7 @@ dependencies = [
 
 [[package]]
 name = "pergamon-uniffi"
-version = "0.7.0"
+version = "1.0.0"
 dependencies = [
  "pergamon-core",
  "pergamon-crypto",

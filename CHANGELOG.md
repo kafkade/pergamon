@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-07-09
+
 ### Added
 
 - `pergamon-crypto` crate: an Apache-2.0, client-side end-to-end-encryption library implementing the ADR-024 key scheme for sync (#125). Provides the account key hierarchy (Account Root Key → per-epoch account content keys → per-event and convergent per-blob keys), authenticated encryption of event bodies and blobs (XChaCha20-Poly1305) with the ADR-022 envelope header bound as associated data, `entity_ref` blinding (HMAC-SHA-256), device keypairs and signed device records (X25519 + Ed25519), an in-house sealed box for enrollment bundles, short-authentication-string (SAS) verification, trust/revocation attestations, passphrase- and recovery-code-based account recovery (Argon2id), and epoch rotation that re-wraps the new content key to the remaining devices. Pure derivations with a CSPRNG only for key/nonce generation; no I/O or networking
