@@ -80,7 +80,7 @@ blake3 = "1"
 zeroize = { version = "1", features = ["derive"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "linux-native"] }
-lopdf = "0.43"
+lopdf = "0.44"
 ratatui = "0.30"
 crossterm = "0.29"
 open = "5"
