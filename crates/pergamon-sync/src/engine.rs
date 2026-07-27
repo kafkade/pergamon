@@ -254,6 +254,41 @@ impl<T: Transport> SyncEngine<T> {
         let applied = self.pull(db, blobs)?;
         Ok(SyncStats { pushed, applied })
     }
+
+    /// Verify a push fully uploaded the local library (issue #184).
+    ///
+    /// A push is complete when the outbox is fully drained *and* every blob the
+    /// outbox referenced is present on the server. This is the upload-completeness
+    /// check that makes a failed or partial baseline loud instead of silent: it
+    /// returns [`SyncError::IncompleteUpload`] listing what is still pending or
+    /// missing, so callers (and tests) can assert the whole library landed.
+    ///
+    /// # Errors
+    /// Returns [`SyncError::IncompleteUpload`] when changes remain pending or
+    /// referenced blobs are still missing on the server, or a transport/storage
+    /// error while probing.
+    pub fn verify_upload_complete(&self, db: &Database) -> Result<()> {
+        let pending_events = db.pending_outbox_count()?;
+        let ct_hashes = db.outbox_blob_refs()?;
+        let missing_blobs = if ct_hashes.is_empty() {
+            Vec::new()
+        } else {
+            self.transport
+                .blob_probe(&BlobProbeRequest {
+                    account_id: self.crypto.account_id_hex.clone(),
+                    ct_hashes,
+                })?
+                .missing
+        };
+        if pending_events == 0 && missing_blobs.is_empty() {
+            Ok(())
+        } else {
+            Err(SyncError::IncompleteUpload {
+                pending_events,
+                missing_blobs,
+            })
+        }
+    }
 }
 
 /// Current wall-clock time in milliseconds since the Unix epoch.
