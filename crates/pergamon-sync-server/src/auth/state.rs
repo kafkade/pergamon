@@ -19,6 +19,7 @@ use uuid::Uuid;
 use crate::auth::PergamonCipherSuite;
 use crate::auth::store::AuthStore;
 use crate::auth::throttle::ThrottleConfig;
+use crate::auth::token::{AuthAccount, TokenConfig};
 use crate::error::ApiError;
 
 /// How long a pending login may sit between the start and finish steps.
@@ -58,6 +59,8 @@ pub struct AuthState {
     oprf_key_id: String,
     /// Per-identity throttle policy.
     throttle: ThrottleConfig,
+    /// Per-device token lifetime policy (WP-3b, #192).
+    token_config: TokenConfig,
     /// Short-lived server-side login states, keyed by `login_id`.
     ///
     /// **Single-instance / non-persistent seam — WP-3e ([#201]).** This map
@@ -76,6 +79,10 @@ pub struct AuthState {
 
 impl AuthState {
     /// Assemble auth state from its parts.
+    ///
+    /// The per-device token policy defaults to [`TokenConfig::default`]; override
+    /// it with [`Self::with_token_config`]. Keeping this constructor's signature
+    /// stable lets the WP-3a call sites and tests compile unchanged.
     #[must_use]
     pub fn new(
         store: AuthStore,
@@ -88,8 +95,16 @@ impl AuthState {
             server_setup: Arc::new(server_setup),
             oprf_key_id: oprf_key_id.into(),
             throttle,
+            token_config: TokenConfig::default(),
             pending: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Override the per-device token lifetime policy (builder style).
+    #[must_use]
+    pub const fn with_token_config(mut self, token_config: TokenConfig) -> Self {
+        self.token_config = token_config;
+        self
     }
 
     /// Lock the auth store, mapping a poisoned lock to a 500.
@@ -118,6 +133,26 @@ impl AuthState {
     #[must_use]
     pub const fn throttle(&self) -> &ThrottleConfig {
         &self.throttle
+    }
+
+    /// The per-device token lifetime policy (WP-3b, #192).
+    #[must_use]
+    pub const fn token_config(&self) -> &TokenConfig {
+        &self.token_config
+    }
+
+    /// Validate an access bearer token and resolve the authenticated principal.
+    ///
+    /// This is the reusable primitive WP-3c ([#197]) will call from an
+    /// authorization middleware to gate the blind content routes; in WP-3b it is
+    /// used only by the token-revocation endpoint (to authenticate the caller).
+    ///
+    /// [#197]: https://github.com/kafkade/pergamon/issues/197
+    ///
+    /// # Errors
+    /// Returns [`ApiError::internal`] on a poisoned lock or a store failure.
+    pub fn validate_token(&self, bearer: &str) -> Result<Option<AuthAccount>, ApiError> {
+        Ok(self.lock_store()?.validate_token(bearer)?)
     }
 
     /// Store a pending login's server state, returning a fresh `login_id`.

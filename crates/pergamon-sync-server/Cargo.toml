@@ -48,6 +48,15 @@ opaque-ke = { workspace = true }
 rand = { workspace = true }
 sha2-opaque = { workspace = true }
 argon2 = { workspace = true }
+# Per-device bearer/refresh token PoP verification (WP-3b, #192). `ed25519-dalek`
+# (BSD-3-Clause) verifies the ADR-024 device signature; `blake3` (CC0-1.0 OR
+# Apache-2.0 OR Apache-2.0 WITH LLVM-exception) both derives the `device_id`
+# (`blake3(ed25519_pub)[..16]`, replicating pergamon-crypto server-side) and
+# hashes token secrets — both licenses are AGPL-compatible. pergamon-crypto
+# (Apache-2.0) is deliberately kept a dev-dependency only (see below, ADR-008),
+# so the AGPL server never links the Apache client crypto at runtime.
+ed25519-dalek = { workspace = true }
+blake3 = { workspace = true }
 
 [dev-dependencies]
 # Apache-2.0 client crypto, used only in tests to prove a real end-to-end
