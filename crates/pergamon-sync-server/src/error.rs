@@ -69,6 +69,38 @@ impl ApiError {
         }
     }
 
+    /// 401 Unauthorized. Used as the **uniform** failure for a wrong password
+    /// and for an unknown identity alike, so the two are indistinguishable (no
+    /// account-existence oracle — design §1.6).
+    pub fn unauthorized(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            message: message.into(),
+            code: "UNAUTHORIZED",
+        }
+    }
+
+    /// 429 Too Many Requests — per-identity online-guess throttling (design
+    /// §1.7). Keyed uniformly on the identity handle, so it does not leak
+    /// account existence.
+    pub fn too_many_requests(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            message: message.into(),
+            code: "TOO_MANY_REQUESTS",
+        }
+    }
+
+    /// 503 Service Unavailable — transient capacity limit (e.g. the pending
+    /// login table is saturated).
+    pub fn unavailable(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: message.into(),
+            code: "UNAVAILABLE",
+        }
+    }
+
     /// 409 Conflict — used when an event references a blob that has not been
     /// uploaded yet (violating upload-before-commit).
     pub fn conflict(message: impl Into<String>) -> Self {
@@ -100,6 +132,19 @@ impl From<StoreError> for ApiError {
             }
             StoreError::Json(e) => {
                 tracing::error!(error = %e, "store blob_refs encoding error");
+                Self::internal("internal storage error")
+            }
+        }
+    }
+}
+
+impl From<crate::auth::store::AuthStoreError> for ApiError {
+    fn from(err: crate::auth::store::AuthStoreError) -> Self {
+        use crate::auth::store::AuthStoreError;
+        match err {
+            AuthStoreError::HandleExists => Self::conflict(err.to_string()),
+            AuthStoreError::Db(e) => {
+                tracing::error!(error = %e, "auth store database error");
                 Self::internal("internal storage error")
             }
         }

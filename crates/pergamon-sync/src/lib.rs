@@ -37,6 +37,8 @@
 #![forbid(unsafe_code)]
 
 pub mod apply;
+#[cfg(feature = "auth")]
+pub mod auth;
 pub mod blob;
 pub mod credential;
 pub mod crypto;

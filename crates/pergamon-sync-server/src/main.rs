@@ -3,11 +3,16 @@
 //! Binary entry point for the pergamon sync server.
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use pergamon_sync_server::{AppState, SyncStore, build_router};
+use opaque_ke::ServerSetup;
+use pergamon_sync_server::auth::store::AuthStore;
+use pergamon_sync_server::auth::throttle::ThrottleConfig;
+use pergamon_sync_server::auth::{AuthState, PergamonCipherSuite, ServerMode};
+use pergamon_sync_server::{AppState, SyncStore, build_router, build_router_multitenant};
+use rand::rngs::OsRng;
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 
@@ -33,6 +38,32 @@ struct Args {
     /// `./pergamon-sync.db`.
     #[arg(long, env = "PERGAMON_SYNC_DB")]
     db_path: Option<PathBuf>,
+
+    /// Deployment mode: `blind` (default) keeps the single-account blind relay
+    /// (ADR-026) with no auth plane; `multitenant` additionally mounts the
+    /// OPAQUE auth control plane (WP-3a, #189).
+    ///
+    /// The OPAQUE auth plane is NOT YET EXTERNALLY SECURITY-REVIEWED and must
+    /// not be deployed to production until the review checklist is signed off.
+    #[arg(long, default_value = "blind", env = "PERGAMON_SYNC_MODE")]
+    mode: String,
+
+    /// Path to the separate `SQLite` auth database (multi-tenant mode only).
+    ///
+    /// Holds OPAQUE verifiers, the identity→account map, and throttling
+    /// counters — never co-mingled with the blind content store. Defaults to
+    /// `$PERGAMON_SYNC_DATA_DIR/pergamon-auth.db` or `./pergamon-auth.db`.
+    #[arg(long, env = "PERGAMON_AUTH_DB")]
+    auth_db: Option<PathBuf>,
+
+    /// Path to the OPRF server-setup secret file (multi-tenant mode only).
+    ///
+    /// This is the OPAQUE server secret (comparable to a TLS private key). It is
+    /// stored **outside** the auth database (design §1.8) and generated on first
+    /// run if absent. Defaults to `$PERGAMON_SYNC_DATA_DIR/pergamon-oprf.key` or
+    /// `./pergamon-oprf.key`.
+    #[arg(long, env = "PERGAMON_AUTH_SERVER_SETUP")]
+    auth_server_setup: Option<PathBuf>,
 
     /// Optional subcommand. When present, it runs and the server does not start.
     #[command(subcommand)]
@@ -90,6 +121,55 @@ fn default_db_path() -> PathBuf {
         .join("pergamon-sync.db")
 }
 
+/// Default auth-database location (multi-tenant mode).
+fn default_auth_db_path() -> PathBuf {
+    std::env::var_os("PERGAMON_SYNC_DATA_DIR")
+        .map_or_else(|| PathBuf::from("."), PathBuf::from)
+        .join("pergamon-auth.db")
+}
+
+/// Default OPRF server-setup secret location (multi-tenant mode).
+fn default_server_setup_path() -> PathBuf {
+    std::env::var_os("PERGAMON_SYNC_DATA_DIR")
+        .map_or_else(|| PathBuf::from("."), PathBuf::from)
+        .join("pergamon-oprf.key")
+}
+
+/// Load the OPRF server secret from `path`, or generate and persist a new one on
+/// first run.
+///
+/// The secret is stored **outside** the auth database (design §1.8). On Unix the
+/// generated file is written with `0600` permissions.
+fn load_or_create_server_setup(path: &Path) -> Result<ServerSetup<PergamonCipherSuite>> {
+    if path.exists() {
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("failed to read OPRF server setup at {}", path.display()))?;
+        ServerSetup::<PergamonCipherSuite>::deserialize(&bytes)
+            .map_err(|e| anyhow::anyhow!("failed to parse OPRF server setup: {e}"))
+    } else {
+        let mut rng = OsRng;
+        let setup = ServerSetup::<PergamonCipherSuite>::new(&mut rng);
+        std::fs::write(path, setup.serialize())
+            .with_context(|| format!("failed to write OPRF server setup to {}", path.display()))?;
+        restrict_permissions(path);
+        tracing::info!(path = %path.display(), "generated a new OPRF server-setup secret");
+        Ok(setup)
+    }
+}
+
+/// Best-effort tighten of a secret file's permissions to owner-only on Unix.
+#[cfg(unix)]
+fn restrict_permissions(path: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+    if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+        tracing::warn!(path = %path.display(), error = %e, "failed to restrict secret file permissions");
+    }
+}
+
+/// No-op on non-Unix platforms.
+#[cfg(not(unix))]
+fn restrict_permissions(_path: &Path) {}
+
 /// Wait for a shutdown signal (Ctrl+C or SIGTERM on Unix).
 async fn shutdown_signal() {
     let ctrl_c = async {
@@ -144,7 +224,36 @@ async fn main() -> Result<()> {
         .with_context(|| format!("failed to open sync store at {}", db_path.display()))?;
     let state = AppState::new(store);
 
-    let app = build_router(state);
+    let mode = ServerMode::from_env_value(&args.mode).unwrap_or_else(|| {
+        tracing::warn!(mode = %args.mode, "unknown PERGAMON_SYNC_MODE; defaulting to blind");
+        ServerMode::Blind
+    });
+
+    let app = match mode {
+        ServerMode::Blind => {
+            tracing::info!("mode=blind: single-account blind relay (ADR-026), no auth plane");
+            build_router(state)
+        }
+        ServerMode::Multitenant => {
+            tracing::warn!(
+                "mode=multitenant: mounting the OPAQUE auth control plane (WP-3a). \
+                 This auth code is NOT YET EXTERNALLY SECURITY-REVIEWED — do not deploy \
+                 to production until the review checklist (design §1.11) is signed off."
+            );
+            let auth_db_path = args.auth_db.unwrap_or_else(default_auth_db_path);
+            let setup_path = args
+                .auth_server_setup
+                .unwrap_or_else(default_server_setup_path);
+            tracing::info!(path = %auth_db_path.display(), "opening auth store");
+            let auth_store = AuthStore::open(&auth_db_path).with_context(|| {
+                format!("failed to open auth store at {}", auth_db_path.display())
+            })?;
+            let server_setup = load_or_create_server_setup(&setup_path)?;
+            let auth_state =
+                AuthState::new(auth_store, server_setup, "v1", ThrottleConfig::default());
+            build_router_multitenant(state, auth_state)
+        }
+    };
 
     let addr: SocketAddr = format!("{}:{}", args.host, args.port)
         .parse()

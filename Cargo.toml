@@ -67,6 +67,16 @@ url = "2"
 base64 = "0.22"
 sha2 = "0.11"
 
+# OPAQUE aPAKE for hosted-sync server auth identity (WP-3a, ADR-029). Dual
+# MIT/Apache-2.0, so it is usable from both the AGPL server and the Apache
+# client. `opaque-ke 4.x` is built on the `digest 0.10` generation, so its
+# `TripleDh<_, Sha512>` cipher suite requires `sha2 0.10` (aliased below as
+# `sha2-opaque`), distinct from the workspace `sha2 = 0.11` used for `ct_hash`.
+# It also uses `rand 0.8` (`rand_core 0.6`) for its OS CSPRNG.
+opaque-ke = { version = "4.0.1", features = ["argon2", "std"] }
+rand = "0.8"
+sha2-opaque = { package = "sha2", version = "0.10" }
+
 # End-to-end encryption (ADR-024). RustCrypto/dalek stack on the digest 0.11
 # generation, coherent with the workspace `sha2 = 0.11`. Randomness is sourced
 # via the crate's own OS-CSPRNG helpers, so `rand_core` stays at 0.6.
