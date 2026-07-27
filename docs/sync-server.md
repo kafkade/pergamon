@@ -243,11 +243,28 @@ internal Compose network only (no host `ports:` mapping) and set
 
 ## Connecting a client
 
-Once the server is reachable over HTTPS, point pergamon at it. On the **first**
-device for an account, bootstrap the account, then sync:
+Once the server is reachable over HTTPS, point pergamon at it. Sync is opt-in and
+client-initiated — a fresh, local-only install needs **no account and no key
+ceremony**; you only create an account when you decide to sync. Onboarding is
+split into **three explicit flows** so a device with existing data can't
+silently make a duplicate account (ADR-029):
+
+- **Create a new account** (first device) — `sync-device bootstrap`. Mints the
+  account key, publishes this device, binds it to the server, and surfaces a
+  **recovery code you must save**.
+- **Attach an existing local account to a server** — `sync-remote enable`. Binds
+  a local account you already have to a server. No new account key is created;
+  it is a transport change only.
+- **Join an existing account on a new device** — `sync-device enroll` +
+  `accept` (SAS from a trusted device), or `sync-device recover` (recovery
+  code). The new device receives the *existing* account key and never invents
+  its own.
+
+On the **first** device, create the account, then sync:
 
 ```sh
-# First device: create the account and publish this device's identity.
+# First device: CREATE a new account and publish this device's identity.
+# Prints a recovery code — write it down and store it offline.
 pergamon sync-device bootstrap --server https://sync.example.com --account default
 
 # Link the local database to that account + server and do the first round.
@@ -255,10 +272,26 @@ pergamon sync-remote enable --server https://sync.example.com --account default
 pergamon sync-remote sync
 ```
 
+If this device already has a local library (you used pergamon offline first),
+`bootstrap` refuses unless you confirm with `--create-new-account`, so you don't
+accidentally fork your data into a second account instead of joining the one you
+already have elsewhere. A device that already belongs to an account is refused
+outright — join with `enroll`/`recover` instead.
+
+> **Save your recovery code.** `bootstrap` prints a high-entropy recovery code by
+> default. It is the **only** way back into the account if you lose every
+> device: **kafkade and the sync server cannot recover it for you** — the server
+> only ever holds ciphertext. Store it offline. To create an account *without* a
+> recovery code, pass `--no-recovery-code` (recovery stays off until you run
+> `sync-device recovery-enable`); if you then lose every device, the account is
+> unrecoverable. Set `PERGAMON_RECOVERY_PASSPHRASE` before `bootstrap` to wrap
+> recovery under your own passphrase instead of a generated code.
+
 Additional devices join through the onboarding flow (`sync-device invite` /
 `enroll` / `approve` / `accept`, or `recovery-enable` / `recover`). See the
-`pergamon sync-device --help` output and
-[ADR-024](adr/024-device-onboarding-and-key-lifecycle.md). The account key never
+`pergamon sync-device --help` output,
+[ADR-024](adr/024-device-onboarding-and-key-lifecycle.md), and
+[ADR-029](adr/029-server-auth-identity-and-join-flows.md). The account key never
 leaves your devices — the server only relays sealed artifacts.
 
 ### Authenticating through a reverse proxy
