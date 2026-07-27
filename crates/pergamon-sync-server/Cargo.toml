@@ -23,7 +23,10 @@ workspace = true
 [dependencies]
 axum = { workspace = true }
 tokio = { workspace = true }
-tower-http = { workspace = true }
+tower = { workspace = true, features = ["limit", "load-shed"] }
+tower-http = { workspace = true, features = ["limit"] }
+# Pre-auth abuse controls: per-IP rate limiting (WP-4, #195). See `src/abuse.rs`.
+tower_governor = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 clap = { workspace = true }
@@ -47,7 +50,6 @@ sha2-opaque = { workspace = true }
 argon2 = { workspace = true }
 
 [dev-dependencies]
-tower = { workspace = true }
 # Apache-2.0 client crypto, used only in tests to prove a real end-to-end
 # encrypt -> upload -> download -> decrypt round-trip against the blind server
 # (ADR-008 permits an Apache dev-dependency in this AGPL crate).

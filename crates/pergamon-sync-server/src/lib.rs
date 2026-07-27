@@ -37,6 +37,7 @@
 //!   attestations, cursored.
 //! - `PUT/GET /v1/recovery/{account_id}` — the optional recovery blob.
 
+pub mod abuse;
 pub mod auth;
 pub mod envelope;
 pub mod error;
@@ -48,6 +49,7 @@ use axum::Router;
 use tower_http::compression::CompressionLayer;
 use tower_http::trace::TraceLayer;
 
+pub use abuse::{AbuseConfig, apply_abuse_controls};
 pub use state::AppState;
 pub use store::{SyncStore, ct_hash};
 
@@ -71,6 +73,44 @@ pub fn build_router(state: AppState) -> Router {
 pub fn build_router_multitenant(state: AppState, auth_state: auth::AuthState) -> Router {
     routes::router(state)
         .merge(auth::auth_router(auth_state))
+        .layer(CompressionLayer::new())
+        .layer(TraceLayer::new_for_http())
+}
+
+/// Build the blind router with **per-route** abuse controls (WP-4, #195).
+///
+/// Same routes as [`build_router`], but the sensitive event-push and blob-upload
+/// routes get the strict per-IP rate-limit tier and per-route body caps (see
+/// [`routes::hardened_router`]). The caller is expected to additionally wrap the
+/// result with [`apply_abuse_controls`] at the serve site for the global controls.
+pub fn build_router_hardened(state: AppState, abuse: &AbuseConfig) -> Router {
+    routes::hardened_router(state, abuse)
+        .layer(CompressionLayer::new())
+        .layer(TraceLayer::new_for_http())
+}
+
+/// Build the multi-tenant router with per-route abuse controls (WP-4, #195).
+///
+/// The blind content routes are hardened as in [`build_router_hardened`], and the
+/// OPAQUE auth control plane additionally gets the strict per-IP rate-limit tier
+/// and the default body cap — bounding registration/login abuse and handle-spray
+/// (the transport-level complement to the per-identity throttle in
+/// [`auth::throttle`]). This is the point of shipping WP-4 (#195) alongside WP-3a
+/// (#189). As above, wrap the result with [`apply_abuse_controls`] at the serve
+/// site for the global controls.
+///
+/// **NOT YET EXTERNALLY SECURITY-REVIEWED — do not deploy** (see [`auth`]).
+pub fn build_router_multitenant_hardened(
+    state: AppState,
+    auth_state: auth::AuthState,
+    abuse: &AbuseConfig,
+) -> Router {
+    let auth = abuse::apply_strict_rate_limit(
+        auth::auth_router(auth_state).layer(abuse::body_limit_layer(abuse.max_body_bytes)),
+        abuse,
+    );
+    routes::hardened_router(state, abuse)
+        .merge(auth)
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
 }

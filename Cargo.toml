@@ -43,6 +43,11 @@ axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net"] }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.7", features = ["compression-gzip", "cors", "trace", "fs"] }
+# Per-IP rate limiting for the AGPL sync server's pre-auth abuse controls (WP-4,
+# #195). MIT OR Apache-2.0 (AGPL-compatible), backed by the `governor` GCRA
+# limiter. `default-features = false` drops the unused `tonic` integration; the
+# `axum` feature pulls the `ConnectInfo`-based peer-IP key extractors.
+tower_governor = { version = "0.8", default-features = false, features = ["axum"] }
 askama = "0.16"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
