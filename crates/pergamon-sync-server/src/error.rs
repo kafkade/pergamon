@@ -80,6 +80,19 @@ impl ApiError {
         }
     }
 
+    /// 403 Forbidden — the caller authenticated successfully but is not
+    /// authorized for the target tenant (WP-3c, #197). Distinct from
+    /// [`Self::unauthorized`]: a 401 means "we could not authenticate you"
+    /// (uniform, no account-existence leak), a 403 means "you are authenticated
+    /// but this is not your account".
+    pub fn forbidden(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            message: message.into(),
+            code: "FORBIDDEN",
+        }
+    }
+
     /// 429 Too Many Requests — per-identity online-guess throttling (design
     /// §1.7). Keyed uniformly on the identity handle, so it does not leak
     /// account existence.

@@ -2,12 +2,15 @@
 
 //! Content-addressed blob endpoints: dedup probe, upload, and download.
 
+use axum::Extension;
 use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 
+use crate::auth::AuthAccount;
+use crate::auth::authorize_account;
 use crate::envelope::{BlobProbeRequest, BlobProbeResponse};
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -18,12 +21,23 @@ use crate::state::AppState;
 /// The client uploads only the `missing` ones before referencing them from an
 /// event, so the log never gains a dangling reference.
 ///
+/// **WP-3c tenant isolation (#197):** `account_id` is in the request **body**,
+/// not the path. An unauthorized probe would be a cross-tenant blob-existence
+/// oracle, so when the middleware injected an [`AuthAccount`] (multi-tenant mode)
+/// this handler asserts the token's `account_id` equals `req.account_id` before
+/// touching the store. Blind mode has no extension and is unchanged.
+///
 /// # Errors
-/// Returns 500 on a store failure.
+/// Returns 401/403 in multi-tenant mode when the caller is unauthenticated or
+/// targets another tenant; 500 on a store failure.
 pub async fn probe(
     State(state): State<AppState>,
+    maybe_auth: Option<Extension<AuthAccount>>,
     Json(req): Json<BlobProbeRequest>,
 ) -> Result<Json<BlobProbeResponse>, ApiError> {
+    if let Some(Extension(auth)) = maybe_auth {
+        authorize_account(&auth, &req.account_id, "POST", "/v1/blobs/probe")?;
+    }
     let (present, missing) = {
         let store = state.lock_store()?;
         store.blob_probe(&req.account_id, &req.ct_hashes)?
