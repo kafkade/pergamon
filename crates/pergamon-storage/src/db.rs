@@ -167,6 +167,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "sync_engine",
         include_str!("../migrations/V13__sync_engine.sql"),
     ),
+    (
+        14,
+        "sync_baseline",
+        include_str!("../migrations/V14__sync_baseline.sql"),
+    ),
 ];
 
 /// Run all pending migrations inside a transaction.
