@@ -255,6 +255,35 @@ enum DeviceKeyAction {
         #[arg(long)]
         key_file: Option<PathBuf>,
     },
+    /// Export a passphrase-protected key package (wraps the Account Root Key).
+    ///
+    /// The package plus its passphrase (`PERGAMON_KEY_PACKAGE_PASSPHRASE`) is
+    /// enough to recover the account from a client alone. A `export backup`
+    /// archive does not contain this material.
+    ExportPackage {
+        /// Account handle whose ARK to wrap.
+        #[arg(long, default_value = "default")]
+        account: String,
+        /// Read keys from an encrypted key file instead of the OS keychain.
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+        /// Output file path for the key package.
+        #[arg(long, short)]
+        output: PathBuf,
+    },
+    /// Import a key package, restoring the Account Root Key into this device.
+    ///
+    /// Reads the passphrase from `PERGAMON_KEY_PACKAGE_PASSPHRASE`.
+    ImportPackage {
+        /// Account handle to store the recovered keys under.
+        #[arg(long, default_value = "default")]
+        account: String,
+        /// Write keys to an encrypted key file instead of the OS keychain.
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+        /// Path to the key package to import.
+        input: PathBuf,
+    },
 }
 
 /// Remote-sync subcommands (ADR-022/023/024, #126).
@@ -541,10 +570,18 @@ enum ExportAction {
         output: Option<PathBuf>,
     },
     /// Create a full backup archive.
+    ///
+    /// The archive is a plaintext ZIP of JSON and contains no key material.
+    /// Pass `--encrypt` (with `PERGAMON_BACKUP_PASSPHRASE`) to protect it at
+    /// rest.
     Backup {
         /// Output file path.
         #[arg(long, short)]
         output: PathBuf,
+        /// Encrypt the archive with a passphrase from
+        /// `PERGAMON_BACKUP_PASSPHRASE` (Argon2id + XChaCha20-Poly1305).
+        #[arg(long)]
+        encrypt: bool,
     },
     /// Export highlights and bookmarks to an Obsidian vault.
     Obsidian {
@@ -1511,7 +1548,7 @@ fn handle_import(db: &Database, action: ImportAction) -> Result<()> {
 fn handle_export(db: &Database, action: ExportAction) -> Result<()> {
     match action {
         ExportAction::Opml { output } => export_opml(db, output.as_deref()),
-        ExportAction::Backup { output } => export_backup(db, &output),
+        ExportAction::Backup { output, encrypt } => export_backup(db, &output, encrypt),
         ExportAction::Obsidian {
             vault,
             folder,
@@ -5755,13 +5792,44 @@ fn apply_rules_to_item(db: &Database, item: &ContentItem, feed_title: Option<&st
 // (#118) — round-trips the exact same bytes. These handlers only add CLI
 // concerns: file I/O, user-facing summaries, and import-history logging.
 
+/// Environment variable holding the passphrase for encrypted backup archives.
+const BACKUP_PASSPHRASE_ENV: &str = "PERGAMON_BACKUP_PASSPHRASE";
+
 /// Create a full backup archive (ZIP with JSON files).
-fn export_backup(db: &Database, output: &std::path::Path) -> Result<()> {
+///
+/// When `encrypt` is set the archive is wrapped in a passphrase-protected
+/// container (passphrase from `PERGAMON_BACKUP_PASSPHRASE`); otherwise it is a
+/// plaintext ZIP. Either way the archive contains **no key material**.
+fn export_backup(db: &Database, output: &std::path::Path, encrypt: bool) -> Result<()> {
     let file = std::fs::File::create(output)
         .with_context(|| format!("failed to create backup file: {}", output.display()))?;
-    let stats = pergamon_storage::backup::export(db, file).context("writing backup archive")?;
+
+    let stats = if encrypt {
+        let passphrase = std::env::var(BACKUP_PASSPHRASE_ENV).with_context(|| {
+            format!("set {BACKUP_PASSPHRASE_ENV} to a passphrase to encrypt the backup archive")
+        })?;
+        if passphrase.is_empty() {
+            bail!("{BACKUP_PASSPHRASE_ENV} is set but empty");
+        }
+        pergamon_storage::backup::export_encrypted(db, file, passphrase.as_bytes())
+            .context("writing encrypted backup archive")?
+    } else {
+        pergamon_storage::backup::export(db, file).context("writing backup archive")?
+    };
 
     println!("Backup written to {}", output.display());
+    if encrypt {
+        println!("  Archive is ENCRYPTED (passphrase-protected).");
+    } else {
+        println!("  Archive is PLAINTEXT — store it securely.");
+    }
+    println!(
+        "  Note: backups exclude key material (account root key, device keys). A plaintext or"
+    );
+    println!(
+        "  encrypted archive alone cannot recover an encrypted/sync-enabled account — export a"
+    );
+    println!("  key package with `pergamon device-key export-package` for that.");
     println!(
         "  {} feeds, {} items, {} tags, {} collections, {} notes, {} review cards, {} rules ({} records total)",
         stats.feeds,
@@ -5777,12 +5845,28 @@ fn export_backup(db: &Database, output: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-/// Restore from a full backup archive.
+/// Restore from a full backup archive, auto-detecting the encrypted container.
 fn restore_backup(db: &Database, path: &std::path::Path) -> Result<()> {
-    let file = std::fs::File::open(path)
+    let bytes = std::fs::read(path)
         .with_context(|| format!("failed to open backup file: {}", path.display()))?;
-    let stats = pergamon_storage::backup::restore(db, file)
-        .context("failed to restore backup into database")?;
+
+    let stats = if pergamon_storage::is_encrypted_backup(&bytes) {
+        let passphrase = std::env::var(BACKUP_PASSPHRASE_ENV).with_context(|| {
+            format!(
+                "{} is an encrypted backup — set {BACKUP_PASSPHRASE_ENV} to its passphrase",
+                path.display()
+            )
+        })?;
+        pergamon_storage::backup::restore_encrypted(
+            db,
+            std::io::Cursor::new(bytes),
+            passphrase.as_bytes(),
+        )
+        .context("failed to restore encrypted backup into database")?
+    } else {
+        pergamon_storage::backup::restore(db, std::io::Cursor::new(bytes))
+            .context("failed to restore backup into database")?
+    };
 
     println!("Backup restored from {}", path.display());
     println!(
@@ -5975,7 +6059,91 @@ fn handle_device_key(action: &DeviceKeyAction) -> Result<()> {
             }
             Ok(())
         }
+        DeviceKeyAction::ExportPackage {
+            account,
+            key_file,
+            output,
+        } => export_key_package_cmd(account, key_file.as_ref(), output),
+        DeviceKeyAction::ImportPackage {
+            account,
+            key_file,
+            input,
+        } => import_key_package_cmd(account, key_file.as_ref(), input),
     }
+}
+
+/// Environment variable holding the passphrase for a device key package.
+const KEY_PACKAGE_PASSPHRASE_ENV: &str = "PERGAMON_KEY_PACKAGE_PASSPHRASE";
+
+/// Read and validate the key-package passphrase from the environment.
+fn key_package_passphrase() -> Result<String> {
+    let passphrase = std::env::var(KEY_PACKAGE_PASSPHRASE_ENV).with_context(|| {
+        format!("set {KEY_PACKAGE_PASSPHRASE_ENV} to the passphrase protecting the key package")
+    })?;
+    if passphrase.is_empty() {
+        bail!("{KEY_PACKAGE_PASSPHRASE_ENV} is set but empty");
+    }
+    Ok(passphrase)
+}
+
+/// Export a passphrase-protected key package wrapping the account's ARK.
+fn export_key_package_cmd(
+    account: &str,
+    key_file: Option<&PathBuf>,
+    output: &std::path::Path,
+) -> Result<()> {
+    let passphrase = key_package_passphrase()?;
+    let mut store = open_key_store(key_file)?;
+
+    let ark = store.load_ark(account)?.with_context(|| {
+        format!("no account root key stored for '{account}' — run `pergamon device-key init` first")
+    })?;
+    // Load or bootstrap the account handle so the package is self-contained.
+    let account_id = if let Some(id) = store.load_account_id(account)? {
+        id
+    } else {
+        let id =
+            pergamon_crypto::hierarchy::AccountId::generate().context("generating account id")?;
+        store.save_account_id(account, &id)?;
+        id
+    };
+
+    let package = pergamon_crypto::export_key_package(&ark, &account_id, passphrase.as_bytes())
+        .context("wrapping account root key into a key package")?;
+    std::fs::write(output, package.to_bytes())
+        .with_context(|| format!("failed to write key package: {}", output.display()))?;
+
+    println!("Key package written to {}", output.display());
+    println!("  account: {account} ({})", account_id.to_hex());
+    println!("  WARNING: this file plus its passphrase grants FULL access to the account.");
+    println!("  It is the only thing (besides another enrolled device) that can recover the");
+    println!("  account root key, so store it securely and keep the passphrase separate.");
+    Ok(())
+}
+
+/// Import a key package, restoring the account's ARK onto this device.
+fn import_key_package_cmd(
+    account: &str,
+    key_file: Option<&PathBuf>,
+    input: &std::path::Path,
+) -> Result<()> {
+    let passphrase = key_package_passphrase()?;
+    let bytes = std::fs::read(input)
+        .with_context(|| format!("failed to read key package: {}", input.display()))?;
+
+    let package = pergamon_crypto::KeyPackage::from_bytes(&bytes)
+        .map_err(|e| anyhow::anyhow!("not a valid pergamon key package: {e}"))?;
+    let ark = pergamon_crypto::import_key_package(&package, passphrase.as_bytes())
+        .map_err(|e| anyhow::anyhow!("failed to open key package (wrong passphrase?): {e}"))?;
+
+    let mut store = open_key_store(key_file)?;
+    store.save_ark(account, &ark)?;
+    store.save_account_id(account, &package.account_id)?;
+
+    println!("Key package imported into account '{account}'.");
+    println!("  account: {}", package.account_id.to_hex());
+    println!("  account_root_key: restored");
+    Ok(())
 }
 
 // ------------------------------------------------------------------

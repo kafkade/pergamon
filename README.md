@@ -23,7 +23,8 @@ pergamon import opml ~/subscriptions.opml        # Bring your feeds
 pergamon import raindrop ~/export.csv            # Bring your bookmarks
 pergamon import kindle ~/My\ Clippings.txt       # Bring your Kindle highlights
 pergamon import readwise ~/readwise-export.csv   # Bring your Readwise highlights
-pergamon export backup -o library.zip            # Full backup
+pergamon export backup -o library.zip            # Full backup (plaintext ZIP, excludes keys)
+pergamon export backup -o library.pgbak --encrypt  # Encrypted backup (PERGAMON_BACKUP_PASSPHRASE)
 ```
 
 > **Status**: Active development — Phase 3 complete. Core reading, bookmarking, organization, highlights, spaced repetition, Kindle/Readwise import, Obsidian integration, and stable export contracts are implemented.
@@ -89,7 +90,8 @@ The name captures what this project is about:
 - 📚 Kindle My Clippings.txt import with highlight and note extraction
 - 📥 Readwise CSV import with tags, source grouping, and provenance tracking
 - 📥 Import from OPML, Raindrop.io (CSV), and Pocket (HTML) with dry-run and idempotent re-import
-- 📤 Export: OPML feeds, full backup (ZIP with JSON), highlight export (Markdown/JSON)
+- 📤 Export: OPML feeds, full backup (plaintext ZIP-of-JSON, excludes key material; optional passphrase-encrypted archive), highlight export (Markdown/JSON)
+- 🔑 Key package export/import (`device-key export-package`): passphrase-wraps the account root key so a full recovery is possible from a client alone
 - 📝 Stable export contracts: general-purpose Markdown (frontmatter, backlinks, slug templates) and versioned JSON
 - 🔌 Obsidian plugin for syncing highlights and notes to your vault
 - 🔗 URL canonicalization, duplicate detection, and link health checking
