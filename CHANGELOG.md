@@ -12,14 +12,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Remote sync now verifies that a push fully uploaded your library and reports a clear error if any queued change or referenced blob did not land on the server, so a partial or interrupted sync is surfaced loudly instead of silently leaving your library incomplete on the server (#184)
+- Optional passphrase-encrypted backup archives (#182): `pergamon export backup --encrypt` now wraps the portable backup in an authenticated, passphrase-protected container (Argon2id key derivation + XChaCha20-Poly1305), reading the passphrase from `PERGAMON_BACKUP_PASSPHRASE`. `pergamon import backup` auto-detects an encrypted archive and restores it transparently (prompting for the same env passphrase), so encrypted and plaintext backups share one restore command. Without `--encrypt`, `export backup` behaves exactly as before. The encrypted container format is canonical and shared across the CLI, web, and iOS clients
+- Protected key-package export and import for full account recovery (#182): `pergamon device-key export-package` writes a passphrase-protected file that wraps your Account Root Key, and `pergamon device-key import-package` restores it onto another device from the file plus its passphrase (`PERGAMON_KEY_PACKAGE_PASSPHRASE`) — no server and no second enrolled device required. Because a plaintext backup deliberately excludes all key material, this key package (or another enrolled device) is what makes an encrypted, sync-enabled account fully recoverable from a client alone
 
 ### Changed
 
 - Synced blobs are now written to a durable on-disk store instead of being held only in memory, so blob data persists across restarts and stays available to later syncs (#184)
+- `export backup` now prints an explicit at-rest security notice on every run, stating whether the archive is encrypted and reminding you that a plaintext archive excludes all key material and cannot on its own recover an encrypted or sync-enabled account (#182)
 
 ### Fixed
 
 - Enabling remote sync on a device that already has content now uploads your **entire** existing library, not just changes made after enabling. The first time you enable sync, a complete baseline of every existing document, tag, collection, note, highlight, and review card/log (plus tag and collection memberships) is queued for upload, so a newly added device reconstructs your full library on its first pull. Previously nothing pre-existing was uploaded, so a fresh device would come up almost empty until each item was edited again (#184)
+
+### Security
+
+- Updated `ammonia` to 4.1.4 to pull in the fix for RUSTSEC-2026-0213, an XSS via SVG `animate`/`set` animation tags in the HTML sanitizer used for article extraction and reader mode
 
 ## [1.0.0] - 2026-07-09
 

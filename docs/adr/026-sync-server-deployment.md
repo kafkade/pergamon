@@ -133,6 +133,13 @@ consistent (copy `/data`). The image intentionally omits the `pergamon` CLI:
 the store is opaque ciphertext, so an application-level `export backup` would add
 no value here (unlike the web image, where it exports readable content).
 
+Note that the web image's `export backup` produces a **plaintext ZIP of JSON
+that excludes all key material** (account root key, device keys), so it must be
+stored securely and cannot on its own recover an encrypted/sync-enabled account.
+That image offers `export backup --encrypt` for an at-rest-encrypted archive and
+`device-key export-package` to wrap the account root key for full recovery; this
+blind-relay image, holding only ciphertext, needs neither.
+
 ### AGPL image obligations
 
 The image ships an AGPL-3.0 binary. To make this explicit and compliant:

@@ -2408,7 +2408,7 @@ Exports should be both **human-usable** and **lossless**.
 | JSON (queryable) | Programmatic export, automation, debugging | MVP | 🟢 | [Validated] |
 | Markdown note bundle | Obsidian and plain-text workflows | Phase 2 | 🟢 | [Validated] |
 | CSV | Lightweight spreadsheet/report export | Phase 2 | 🟢 | [Validated] |
-| ZIP backup (canonical) | Full-fidelity backup and migration | Phase 2 | 🟡 | [Validated] |
+| ZIP backup (canonical) | Full-fidelity backup and migration (plaintext; excludes keys) | Phase 2 | 🟡 | [Validated] |
 | Highlight package | Quotes/annotations only, filtered by query | Phase 3 | 🟢 | [Validated] |
 | Static HTML export | Publish/share personal archive locally | Phase 5 | 🟡 | [Validation Required] |
 
@@ -2492,6 +2492,22 @@ pergamon-export-2026-03-18.zip
 - and materially the same Obsidian mapping state.
 
 That round-trip guarantee is the real moat for a personal data product.
+
+**At-rest security and key material**:
+
+The canonical archive `pergamon export backup` writes is an **unencrypted ZIP of
+JSON**: anyone who can read the file can read the whole library, so it must be
+stored securely. It also **excludes all key material** — the account root key,
+device keys, and recovery blobs live only in the OS keychain / encrypted key
+file, never in a backup. A content archive therefore **cannot on its own restore
+an encrypted / sync-enabled account**. Two opt-in mechanisms close the gap:
+
+- `pergamon export backup --encrypt` wraps the same canonical ZIP in a
+  passphrase-protected container (Argon2id + XChaCha20-Poly1305, from
+  `PERGAMON_BACKUP_PASSPHRASE`); `import backup` auto-detects and decrypts it.
+- `pergamon device-key export-package` writes a passphrase-protected **key
+  package** that wraps the account root key, so a full recovery is possible from
+  a client alone. Keep it separate from the content backup.
 
 **Manifest recommendation**:
 `manifest.json` should include:
