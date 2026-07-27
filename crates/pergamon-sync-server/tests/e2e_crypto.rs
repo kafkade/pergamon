@@ -131,8 +131,10 @@ async fn real_crypto_event_and_blob_round_trip() {
     let header = EventHeader {
         protocol_version: 1,
         account_id: account_hex.clone(),
+        device_id: "device-A".to_owned(),
         change_id: change_id.clone(),
         key_epoch: epoch,
+        entity_ref: None,
         blob_refs: vec![blob.ct_hash.clone()],
     };
     let event_ct = encrypt_event(
@@ -202,8 +204,10 @@ async fn real_crypto_event_and_blob_round_trip() {
     let pulled_header = EventHeader {
         protocol_version: u32::try_from(ev["protocol_version"].as_u64().unwrap()).unwrap(),
         account_id: ev["account_id"].as_str().unwrap().to_owned(),
+        device_id: ev["device_id"].as_str().unwrap().to_owned(),
         change_id: ev["change_id"].as_str().unwrap().to_owned(),
         key_epoch: u32::try_from(ev["key_epoch"].as_u64().unwrap()).unwrap(),
+        entity_ref: ev["entity_ref"].as_str().map(ToOwned::to_owned),
         blob_refs: ev["blob_refs"]
             .as_array()
             .unwrap()

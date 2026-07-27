@@ -19,7 +19,7 @@ use pergamon_storage::Database;
 
 use crate::apply::apply_change;
 use crate::blob::BlobStore;
-use crate::crypto::CryptoContext;
+use crate::crypto::{CryptoContext, DeviceKeyDirectory};
 use crate::error::{Result, SyncError};
 use crate::transport::Transport;
 use crate::wire::{BlobProbeRequest, EventInput, PushRequest};
@@ -51,12 +51,25 @@ impl SyncStats {
 pub struct SyncEngine<T: Transport> {
     transport: T,
     crypto: CryptoContext,
+    /// `device_id -> Ed25519 public key` roster used to verify the signature on
+    /// each pulled event (ADR-030). Built by the caller from a verified roster.
+    directory: DeviceKeyDirectory,
 }
 
 impl<T: Transport> SyncEngine<T> {
-    /// Build an engine from a transport and account crypto context.
-    pub const fn new(transport: T, crypto: CryptoContext) -> Self {
-        Self { transport, crypto }
+    /// Build an engine from a transport, account crypto context, and the device
+    /// key directory used to verify pulled events' signatures (ADR-030).
+    ///
+    /// For push-only use an empty [`DeviceKeyDirectory`] is fine; pulling
+    /// requires the directory to contain every device whose events will be
+    /// applied (unknown signers are rejected as retryable so the caller can
+    /// refresh the roster).
+    pub const fn new(transport: T, crypto: CryptoContext, directory: DeviceKeyDirectory) -> Self {
+        Self {
+            transport,
+            crypto,
+            directory,
+        }
     }
 
     /// Borrow the underlying transport (test introspection).
@@ -153,6 +166,11 @@ impl<T: Transport> SyncEngine<T> {
                 if db.is_change_applied(&ev.change_id)? {
                     continue;
                 }
+                // ADR-030: authenticate authorship before doing anything with
+                // the body. An unknown signer is retryable (refresh the roster);
+                // a known signer with a bad signature is a forgery — reject it
+                // and do not advance the cursor past it.
+                self.verify_signature(ev)?;
                 let body = self.crypto.decrypt_change(ev)?;
                 self.fetch_blobs(&account, &body, ev.key_epoch, blobs)?;
                 let server_seq = ev.server_seq;
@@ -171,6 +189,31 @@ impl<T: Transport> SyncEngine<T> {
             }
         }
         Ok(applied)
+    }
+
+    /// Authenticate a pulled event against the device roster (ADR-030).
+    ///
+    /// Policy: a valid signature from a known device passes; a **known** device
+    /// with an invalid signature yields a fatal [`SyncError::BadEventSignature`]
+    /// (a forgery — do not apply, do not advance past it); an **unknown** signer
+    /// yields a retryable [`SyncError::UnknownSigner`] so the caller can refresh
+    /// the roster and retry. Strict trust-chain enforcement (rejecting a
+    /// known-but-revoked signer via the ADR-024 attestation chain) is deferred to
+    /// a sibling of epic #185 and is *not* applied here.
+    fn verify_signature(&self, ev: &crate::wire::StoredEvent) -> Result<()> {
+        let Some(signer_pub) = self.directory.get(&ev.device_id) else {
+            return Err(SyncError::UnknownSigner {
+                device_id: ev.device_id.clone(),
+            });
+        };
+        if self.crypto.verify_event_sig(ev, signer_pub)? {
+            Ok(())
+        } else {
+            Err(SyncError::BadEventSignature {
+                change_id: ev.change_id.clone(),
+                device_id: ev.device_id.clone(),
+            })
+        }
     }
 
     /// Fetch and locally store every blob a change references.

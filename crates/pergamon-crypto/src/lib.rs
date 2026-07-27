@@ -62,7 +62,10 @@ pub use device::{DeviceKeypairs, DeviceRecord, SignedDeviceRecord};
 pub use enrollment::{
     EnrollmentBundle, EnrollmentPeer, Sas, open_enrollment_bundle, seal_enrollment_bundle,
 };
-pub use envelope::{EventHeader, decrypt_event, encrypt_event, entity_ref};
+pub use envelope::{
+    EventHeader, decrypt_event, encrypt_event, entity_ref, event_signing_bytes, sign_event,
+    verify_event,
+};
 pub use error::{CryptoError, Result};
 pub use hierarchy::{AccountContentKey, AccountId, AccountRootKey};
 pub use recovery::{

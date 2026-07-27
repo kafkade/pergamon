@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 
 - Updated `ammonia` to 4.1.4 to pull in the fix for RUSTSEC-2026-0213, an XSS via SVG `animate`/`set` animation tags in the HTML sanitizer used for article extraction and reader mode
+- Authenticated sync events against a hostile or rolled-back server (#185): every encrypted change is now individually signed by the device that created it, and the device and item identity that route the change are bound into its authenticated encryption. On pull, pergamon verifies each event's signature against the account's device roster before applying it — a change carrying an invalid signature is rejected outright, and one from an unrecognized device is held (pending a roster refresh) instead of being trusted. A malicious server can therefore no longer forge changes, re-attribute them to another device, or re-route them to a different item without detection, even though it still only ever stores opaque ciphertext. Sync remains opt-in and client-initiated
 
 ## [1.0.0] - 2026-07-09
 

@@ -31,7 +31,9 @@ use pergamon_sync::error::Result as SyncResult;
 use pergamon_sync::wire::{
     BlobProbeRequest, BlobProbeResponse, PullResponse, PushRequest, PushResponse,
 };
-use pergamon_sync::{CryptoContext, MemoryBlobStore, SyncEngine, SyncError, Transport};
+use pergamon_sync::{
+    CryptoContext, DeviceKeyDirectory, MemoryBlobStore, SyncEngine, SyncError, Transport,
+};
 use tower::ServiceExt;
 
 use serde_json::{Value, json};
@@ -43,11 +45,34 @@ fn account_hex() -> String {
     AccountId::from_bytes(ACCOUNT_SEED).to_hex()
 }
 
+/// Deterministic per-device Ed25519 signing seed for tests (ADR-030).
+fn signing_seed(device: &str) -> [u8; 32] {
+    let mut seed = [0u8; 32];
+    let bytes = device.as_bytes();
+    let n = bytes.len().min(32);
+    seed[..n].copy_from_slice(&bytes[..n]);
+    seed
+}
+
+/// A directory mapping the two test devices to their Ed25519 public keys, so the
+/// engine can verify each pulled event's signature against its author.
+fn directory() -> DeviceKeyDirectory {
+    let mut dir = DeviceKeyDirectory::new();
+    for device in ["device-a", "device-b"] {
+        dir.insert(
+            device,
+            pergamon_crypto::primitives::ed25519_public(&signing_seed(device)),
+        );
+    }
+    dir
+}
+
 fn crypto(device: &str) -> CryptoContext {
     CryptoContext::new(
         AccountRootKey::from_bytes(ARK_SEED),
         account_hex(),
         device.to_owned(),
+        signing_seed(device),
         0,
     )
     .unwrap()
@@ -213,8 +238,16 @@ fn settle(
 #[test]
 fn two_databases_converge_over_the_real_server() {
     let app = server_router();
-    let eng_a = SyncEngine::new(RouterTransport::new(app.clone()), crypto("device-a"));
-    let eng_b = SyncEngine::new(RouterTransport::new(app.clone()), crypto("device-b"));
+    let eng_a = SyncEngine::new(
+        RouterTransport::new(app.clone()),
+        crypto("device-a"),
+        directory(),
+    );
+    let eng_b = SyncEngine::new(
+        RouterTransport::new(app.clone()),
+        crypto("device-b"),
+        directory(),
+    );
     let db_a = synced_db("device-a");
     let db_b = synced_db("device-b");
     let (blob_a, blob_b) = (MemoryBlobStore::new(), MemoryBlobStore::new());

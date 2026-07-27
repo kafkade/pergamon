@@ -32,3 +32,4 @@ They follow the [MADR](https://adr.github.io/madr/) format.
 | [ADR-026](026-sync-server-deployment.md) | Sync Server Deployment | Accepted |
 | [ADR-027](027-browser-extension-architecture.md) | Browser Extension Architecture | Accepted |
 | [ADR-028](028-ai-privacy-and-provider-boundary.md) | AI Privacy and Provider Boundary | Accepted |
+| [ADR-030](030-sync-trust-hardening.md) | Sync Trust Hardening — Event Authenticity, AAD Identity Binding, Rollback Detection, and Forward-Secret Revocation | Accepted |

@@ -130,6 +130,13 @@ alongside the ciphertext in the encrypted-body frame. The specific AEAD
 construction and key schedule are ADR-024/#125; this ADR requires only that it be
 a modern AEAD and that the AAD cover those fields.
 
+> **Amended by [ADR-030](030-sync-trust-hardening.md).** The envelope now also
+> carries a per-device **Ed25519 signature** over the event (a `sig_b64` header
+> field, opaque to the server), and the AAD is **expanded** to additionally bind
+> `device_id` and `entity_ref`, so a hostile or rolled-back server can neither
+> forge an event nor re-attribute/re-route one without detection. See ADR-030 for
+> the signature digest and the exact expanded AAD framing.
+
 **Why identity lives inside the ciphertext.** `entity_type`, `entity_id`, the
 clock, and the field changes are all in the encrypted body. The server orders
 and prunes purely on `server_seq`, deduplicates on `change_id`, attributes

@@ -24,7 +24,9 @@ use pergamon_crypto::device::DeviceKeypairs;
 use pergamon_crypto::hierarchy::{AccountId, AccountRootKey};
 use pergamon_storage::Database;
 use pergamon_storage::sync::FieldMap;
-use pergamon_sync::{CryptoContext, MemoryBlobStore, MemoryRelay, MemoryTransport, SyncEngine};
+use pergamon_sync::{
+    CryptoContext, DeviceKeyDirectory, MemoryBlobStore, MemoryRelay, MemoryTransport, SyncEngine,
+};
 use serde_json::{Value, json};
 
 /// Size of the "large library" the new device must restore.
@@ -181,9 +183,11 @@ fn new_device_onboards_and_restores_library_and_review_state() {
             AccountRootKey::from_bytes(*ark.expose_bytes()),
             account_hex,
             dev_a.device_id().to_owned(),
+            *dev_a.ed25519_signing(),
             0,
         )
         .unwrap(),
+        DeviceKeyDirectory::new(),
     );
     let blob_a = MemoryBlobStore::new();
     seed_library(&db_a);
@@ -247,15 +251,26 @@ fn new_device_onboards_and_restores_library_and_review_state() {
         Some("mem://test"),
     )
     .unwrap();
+    // B verifies pulled events against the account roster it just joined: the
+    // roster maps each device_id to its Ed25519 public key (ADR-030), so B can
+    // authenticate that the library changes were genuinely authored by A.
+    let roster = pergamon_sync::onboarding::roster(&relay, &account_id).unwrap();
+    let directory = DeviceKeyDirectory::from_roster(&roster);
+    assert!(
+        directory.get(dev_a.device_id()).is_some(),
+        "roster-derived directory must know the founding device A"
+    );
     let eng_b = SyncEngine::new(
         transport,
         CryptoContext::new(
             accepted.bundle.ark,
             accepted.bundle.account_id.to_hex(),
             dev_b.device_id().to_owned(),
+            *dev_b.ed25519_signing(),
             accepted.bundle.key_epoch,
         )
         .unwrap(),
+        directory,
     );
     let blob_b = MemoryBlobStore::new();
     let applied = eng_b.pull(&db_b, &blob_b).unwrap();

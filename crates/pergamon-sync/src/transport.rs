@@ -134,6 +134,7 @@ impl Transport for MemoryTransport {
                 server_seq: seq,
                 server_committed_at: 0,
                 ciphertext_b64: ev.ciphertext_b64.clone(),
+                sig_b64: ev.sig_b64.clone(),
             });
             log.by_change.insert(ev.change_id.clone(), seq);
             results.push(PushResult {

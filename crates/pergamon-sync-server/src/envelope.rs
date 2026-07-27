@@ -40,6 +40,12 @@ pub struct EventInput {
     /// Opaque AEAD ciphertext body, standard-base64 encoded. Never decoded by
     /// the server.
     pub ciphertext_b64: String,
+    /// The origin device's opaque Ed25519 event signature (ADR-030),
+    /// standard-base64 encoded. The server stores and echoes it verbatim and
+    /// never inspects it — authenticity is enforced entirely client-side.
+    /// Defaults to empty for deserialization tolerance.
+    #[serde(default)]
+    pub sig_b64: String,
 }
 
 /// A batch of event envelopes to append to one account's log.
@@ -99,6 +105,11 @@ pub struct StoredEvent {
     pub server_committed_at: i64,
     /// Opaque AEAD ciphertext body, standard-base64 encoded.
     pub ciphertext_b64: String,
+    /// The origin device's opaque Ed25519 event signature (ADR-030),
+    /// standard-base64 encoded. Echoed verbatim, never inspected by the server.
+    /// Defaults to empty for deserialization tolerance.
+    #[serde(default)]
+    pub sig_b64: String,
 }
 
 /// Response body for a pull.
