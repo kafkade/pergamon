@@ -33,11 +33,13 @@
 //!
 //! ## Out of scope (seams left for later WPs)
 //! - Per-IP rate limiting, body caps, storage-DoS isolation — WP-4/#195.
-//! - Per-route authorization + tenant isolation middleware — WP-3c/#197. This
-//!   module mints/refreshes/revokes device tokens (WP-3b/#192) and exposes
-//!   [`store::AuthStore::validate_token`] as the primitive, but does not yet gate
-//!   the blind content routes on it.
+//! - Per-route authorization + tenant isolation — WP-3c/#197, implemented in
+//!   [`authz`]. This module mints/refreshes/revokes device tokens (WP-3b/#192)
+//!   and exposes [`store::AuthStore::validate_token`] as the primitive;
+//!   [`authz::require_account_auth`] consumes it to gate the blind content
+//!   routes in the multi-tenant router builders.
 
+pub mod authz;
 pub mod cipher_suite;
 pub mod routes;
 pub mod state;
@@ -46,6 +48,7 @@ pub mod throttle;
 pub mod token;
 pub mod wire;
 
+pub use authz::{authorize_account, require_account_auth};
 pub use cipher_suite::PergamonCipherSuite;
 pub use state::AuthState;
 pub use token::{AuthAccount, TokenConfig};
