@@ -301,8 +301,8 @@ you can create a portable, self-contained backup archive.
 
 ### Application-level backup (recommended, while running)
 
-`export backup` uses the SQLite backup API and produces a single ZIP that is safe
-to take while the server is running:
+`export backup` reads a consistent snapshot of the library and produces a single
+ZIP that is safe to take while the server is running:
 
 ```sh
 docker exec pergamon pergamon export backup --output /data/exports/backup.zip
@@ -311,6 +311,28 @@ docker cp pergamon:/data/exports/backup.zip ./backup.zip
 
 > Note the `--output` (`-o`) flag: `export backup` takes the destination as a
 > flag, not a positional argument.
+>
+> **At-rest security.** The archive is a **plaintext ZIP of JSON** — anyone who
+> can read the file can read your whole library — and it **excludes all key
+> material** (account root key, device keys). Store it somewhere you trust, and
+> note that a content backup alone cannot recover an encrypted/sync-enabled
+> account. For an at-rest-encrypted archive, pass `--encrypt` with a passphrase
+> in `PERGAMON_BACKUP_PASSPHRASE`; `import backup` auto-detects the encrypted
+> container and prompts for the same variable:
+>
+> ```sh
+> docker exec -e PERGAMON_BACKUP_PASSPHRASE=… pergamon \
+>   pergamon export backup --output /data/exports/backup.pgbak --encrypt
+> ```
+>
+> To make full account recovery possible from a client alone, also export a
+> **key package** (which passphrase-wraps the account root key) and keep it
+> separate from the content backup:
+>
+> ```sh
+> docker exec -e PERGAMON_KEY_PACKAGE_PASSPHRASE=… pergamon \
+>   pergamon device-key export-package --output /data/exports/account.pgkey
+> ```
 
 Because the CLI inside the container reads `PERGAMON_DATA_DIR=/data`, it operates
 on the same database the server uses — no extra flags needed.
@@ -350,6 +372,14 @@ docker compose run --rm pergamon pergamon import backup /data/exports/backup.zip
 
 docker compose start
 ```
+
+> For an encrypted archive (`--encrypt`), pass the same passphrase via
+> `PERGAMON_BACKUP_PASSPHRASE` to `import backup`; it auto-detects the container:
+>
+> ```sh
+> docker compose run --rm -e PERGAMON_BACKUP_PASSPHRASE=… pergamon \
+>   pergamon import backup /data/exports/backup.pgbak
+> ```
 
 Verify afterward with `curl http://localhost:3000/health` and a quick look at the
 UI.

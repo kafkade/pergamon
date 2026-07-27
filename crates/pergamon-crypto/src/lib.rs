@@ -65,5 +65,8 @@ pub use enrollment::{
 pub use envelope::{EventHeader, decrypt_event, encrypt_event, entity_ref};
 pub use error::{CryptoError, Result};
 pub use hierarchy::{AccountContentKey, AccountId, AccountRootKey};
-pub use recovery::{RecoveryBlob, enable_recovery, generate_recovery_code, recover};
+pub use recovery::{
+    KeyPackage, RecoveryBlob, enable_recovery, export_key_package, generate_recovery_code,
+    import_key_package, recover,
+};
 pub use rotation::{RewrapRecipient, RewrappedKey, open_rewrapped, rotate_and_rewrap};

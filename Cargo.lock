@@ -2588,6 +2588,7 @@ name = "pergamon-storage"
 version = "1.0.0"
 dependencies = [
  "pergamon-core",
+ "pergamon-crypto",
  "rusqlite",
  "serde",
  "serde_json",

@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Optional passphrase-encrypted backup archives (#182): `pergamon export backup --encrypt` now wraps the portable backup in an authenticated, passphrase-protected container (Argon2id key derivation + XChaCha20-Poly1305), reading the passphrase from `PERGAMON_BACKUP_PASSPHRASE`. `pergamon import backup` auto-detects an encrypted archive and restores it transparently (prompting for the same env passphrase), so encrypted and plaintext backups share one restore command. Without `--encrypt`, `export backup` behaves exactly as before. The encrypted container format is canonical and shared across the CLI, web, and iOS clients
+- Protected key-package export and import for full account recovery (#182): `pergamon device-key export-package` writes a passphrase-protected file that wraps your Account Root Key, and `pergamon device-key import-package` restores it onto another device from the file plus its passphrase (`PERGAMON_KEY_PACKAGE_PASSPHRASE`) — no server and no second enrolled device required. Because a plaintext backup deliberately excludes all key material, this key package (or another enrolled device) is what makes an encrypted, sync-enabled account fully recoverable from a client alone
+
+### Changed
+
+- `export backup` now prints an explicit at-rest security notice on every run, stating whether the archive is encrypted and reminding you that a plaintext archive excludes all key material and cannot on its own recover an encrypted or sync-enabled account (#182)
+
 ## [1.0.0] - 2026-07-09
 
 ### Added
