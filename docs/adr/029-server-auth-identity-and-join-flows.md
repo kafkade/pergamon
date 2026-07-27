@@ -325,6 +325,9 @@ distinct to avoid the ADR-017 confusion:
   — the blind relay this ADR authenticates in front of, without making it read content.
 - [ADR-030: Sync Trust Hardening](030-sync-trust-hardening.md)
   — event authenticity/authorship on the content plane, complementary to server auth.
+- [Hosted Auth Control Plane — OPAQUE Security Design](../design/hosted-auth-control-plane.md)
+  — the dedicated OPAQUE security design Decision 1 requires before WP-3a (#189),
+  plus the multi-tenant control-plane architecture and epic #187 decomposition.
 - Epic #179 — hosted-sync program. This ADR is the gate that unblocks WP-2 (#188),
   the WP-3 epic (#187) and children, WP-5a (#191), and WP-12 (#190); the metadata
   inventory/retention/traffic-log policy is tracked under WP-13.
