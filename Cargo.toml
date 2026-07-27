@@ -69,7 +69,7 @@ ammonia = "4"
 scraper = "0.27"
 csv = "1"
 url = "2"
-base64 = "0.22"
+base64 = "0.23"
 sha2 = "0.11"
 
 # OPAQUE aPAKE for hosted-sync server auth identity (WP-3a, ADR-029). Dual
@@ -79,7 +79,7 @@ sha2 = "0.11"
 # `sha2-opaque`), distinct from the workspace `sha2 = 0.11` used for `ct_hash`.
 # It also uses `rand 0.8` (`rand_core 0.6`) for its OS CSPRNG.
 opaque-ke = { version = "4.0.1", features = ["argon2", "std"] }
-rand = "0.8"
+rand = "0.10"
 sha2-opaque = { package = "sha2", version = "0.10" }
 
 # End-to-end encryption (ADR-024). RustCrypto/dalek stack on the digest 0.11
@@ -95,7 +95,7 @@ blake3 = "1"
 zeroize = { version = "1", features = ["derive"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "linux-native"] }
-lopdf = "0.43"
+lopdf = "0.44"
 ratatui = "0.30"
 crossterm = "0.29"
 open = "5"
