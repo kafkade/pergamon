@@ -594,11 +594,13 @@ This is the right middle ground between:
 
 #### Recommended server role
 
-`pergamon-server` should do only the following:
+In the base model, `pergamon-server` is a **blind relay**: it stores ciphertext
+plus opaque onboarding artifacts and performs no content-level authentication —
+an account is a client-side secret, not a server login (ADR-024, ADR-026). It
+should do only the following:
 
-- authenticate devices/users,
 - accept encrypted event batches,
-- store encrypted blobs/chunks,
+- store encrypted blobs/chunks and opaque onboarding artifacts,
 - serve cursor-based sync streams,
 - prune acknowledged data by retention policy.
 
@@ -612,6 +614,8 @@ It should **not**:
 - or generate review cards.
 
 That keeps trust boundaries clean and license boundaries obvious.
+
+Authenticated multi-tenant hosting (server-side auth) is introduced later; see the proposed ADR-029 and the multi-tenant control-plane epic (#187, WP-3-EPIC), tracked under epic #179.
 
 #### Conflict policy by entity class
 
