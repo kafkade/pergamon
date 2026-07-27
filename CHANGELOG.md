@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `export backup` now prints an explicit at-rest security notice on every run, stating whether the archive is encrypted and reminding you that a plaintext archive excludes all key material and cannot on its own recover an encrypted or sync-enabled account (#182)
 
+### Security
+
+- Updated `ammonia` to 4.1.4 to pull in the fix for RUSTSEC-2026-0213, an XSS via SVG `animate`/`set` animation tags in the HTML sanitizer used for article extraction and reader mode
+
 ## [1.0.0] - 2026-07-09
 
 ### Added
