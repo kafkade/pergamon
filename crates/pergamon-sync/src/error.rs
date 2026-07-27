@@ -44,6 +44,27 @@ pub enum SyncError {
     #[error("protocol error: {0}")]
     Protocol(String),
 
+    /// A pulled event's Ed25519 signature did not verify against its (known)
+    /// signing device's public key (ADR-030) — a forged or tampered event. Fatal:
+    /// retrying cannot make a bad signature good, and the event must not apply.
+    #[error("bad event signature from device {device_id} for change {change_id}")]
+    BadEventSignature {
+        /// The idempotency key of the offending event.
+        change_id: String,
+        /// The opaque handle of the device that claimed to author it.
+        device_id: String,
+    },
+
+    /// A pulled event was signed by a device absent from the local roster
+    /// (ADR-030). Treated as *transient*: the roster may simply be stale, so the
+    /// caller should refresh it (re-run onboarding `roster()`) and retry rather
+    /// than apply an unverifiable event or advance past it.
+    #[error("event signed by unknown device {device_id}; refresh the device roster")]
+    UnknownSigner {
+        /// The opaque handle of the unrecognized signing device.
+        device_id: String,
+    },
+
     /// A push did not fully upload the local library: some outbox changes are
     /// still pending and/or some referenced blobs are still missing on the
     /// server (issue #184). Signals an incomplete/partial baseline upload loudly.
@@ -67,15 +88,20 @@ impl SyncError {
     /// [`SyncError::Transport`]; a background sync loop should tolerate these
     /// (the device may simply be offline) and retry after a backoff rather than
     /// stop. A missing relayed artifact ([`SyncError::NotFound`]) is likewise
-    /// treated as transient because the peer may not have uploaded it yet.
+    /// treated as transient because the peer may not have uploaded it yet. An
+    /// event from an [`SyncError::UnknownSigner`] is transient too: the local
+    /// device roster may simply be stale, and a refresh can resolve it.
     ///
-    /// Everything else — crypto, (de)serialization, base64, protocol shape,
-    /// missing local blobs, or an unconfigured account — is a *fatal* condition
-    /// that retrying cannot fix, so the caller should surface it instead of
-    /// spinning.
+    /// Everything else — crypto, (de)serialization, base64, protocol shape, a
+    /// [`SyncError::BadEventSignature`] (a forgery, not a glitch), missing local
+    /// blobs, or an unconfigured account — is a *fatal* condition that retrying
+    /// cannot fix, so the caller should surface it instead of spinning.
     #[must_use]
     pub const fn is_retryable(&self) -> bool {
-        matches!(self, Self::Transport(_) | Self::NotFound(_))
+        matches!(
+            self,
+            Self::Transport(_) | Self::NotFound(_) | Self::UnknownSigner { .. }
+        )
     }
 }
 

@@ -2041,14 +2041,21 @@ impl Library {
     /// The app supplies the relay `server` URL, its account identity
     /// (`account_id_hex`, `device_id`), the 32-byte account root key
     /// (`account_root_key`, held in the iOS keychain and never persisted by this
-    /// crate), and the active `key_epoch`. This builds the crypto context and
-    /// HTTP transport once and stores them so [`Self::background_refresh`] can
-    /// run cheap single-shot rounds. Calling it again replaces the session,
-    /// e.g. after an epoch rotation.
+    /// crate), this device's 32-byte Ed25519 signing seed (`device_signing_key`,
+    /// used to sign outgoing events per ADR-030), and the active `key_epoch`.
+    /// This builds the crypto context and HTTP transport once and stores them so
+    /// [`Self::background_refresh`] can run cheap single-shot rounds. Calling it
+    /// again replaces the session, e.g. after an epoch rotation.
+    ///
+    /// The pulled-event signature-verification directory is currently empty:
+    /// multi-device roster onboarding on iOS is deferred to a sibling of epic
+    /// #185. Single-device pull is unaffected (a device's own echoes are
+    /// suppressed before verification); events from other devices surface a
+    /// retryable `UnknownSigner` until the directory is populated.
     ///
     /// # Errors
     ///
-    /// [`PergamonError::InvalidInput`] if the key is not 32 bytes,
+    /// [`PergamonError::InvalidInput`] if a key is not 32 bytes,
     /// [`PergamonError::Network`] if the server URL is invalid, or
     /// [`PergamonError::Internal`] if the crypto context cannot be derived.
     #[allow(clippy::needless_pass_by_value)] // owned args are the idiomatic UniFFI signature
@@ -2058,6 +2065,7 @@ impl Library {
         account_id_hex: String,
         device_id: String,
         account_root_key: Vec<u8>,
+        device_signing_key: Vec<u8>,
         key_epoch: u32,
     ) -> Result<(), PergamonError> {
         let ark_bytes: [u8; 32] =
@@ -2070,9 +2078,25 @@ impl Library {
                         account_root_key.len()
                     ),
                 })?;
+        let signing_key: [u8; 32] =
+            device_signing_key
+                .as_slice()
+                .try_into()
+                .map_err(|_| PergamonError::InvalidInput {
+                    message: format!(
+                        "device signing key must be 32 bytes, got {}",
+                        device_signing_key.len()
+                    ),
+                })?;
         let ark = pergamon_crypto::hierarchy::AccountRootKey::from_bytes(ark_bytes);
-        let crypto = pergamon_sync::CryptoContext::new(ark, account_id_hex, device_id, key_epoch)
-            .map_err(|e| PergamonError::Internal {
+        let crypto = pergamon_sync::CryptoContext::new(
+            ark,
+            account_id_hex,
+            device_id,
+            signing_key,
+            key_epoch,
+        )
+        .map_err(|e| PergamonError::Internal {
             message: e.to_string(),
         })?;
         let transport = pergamon_sync::http::HttpTransport::new(server).map_err(|e| {
@@ -2080,7 +2104,11 @@ impl Library {
                 message: e.to_string(),
             }
         })?;
-        let engine = pergamon_sync::SyncEngine::new(transport, crypto);
+        let engine = pergamon_sync::SyncEngine::new(
+            transport,
+            crypto,
+            pergamon_sync::DeviceKeyDirectory::new(),
+        );
         let backoff = pergamon_sync::BackoffPolicy::new(
             SYNC_BACKOFF_BASE,
             SYNC_BACKOFF_MAX,

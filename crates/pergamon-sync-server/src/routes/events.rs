@@ -54,6 +54,14 @@ pub async fn push(
                 ev.change_id
             ))
         })?;
+        // The signature is opaque to the server: decode it only to store raw
+        // bytes and echo them back verbatim (ADR-030). Never inspected.
+        let signature = STANDARD.decode(ev.sig_b64.as_bytes()).map_err(|e| {
+            ApiError::bad_request(format!(
+                "invalid base64 signature for change_id {}: {e}",
+                ev.change_id
+            ))
+        })?;
         records.push(EventRecord {
             protocol_version: ev.protocol_version,
             account_id: ev.account_id.clone(),
@@ -63,6 +71,7 @@ pub async fn push(
             key_epoch: ev.key_epoch,
             blob_refs: ev.blob_refs.clone(),
             ciphertext,
+            signature,
         });
     }
 
@@ -125,6 +134,7 @@ pub async fn pull(
             server_seq: r.server_seq,
             server_committed_at: r.server_committed_at,
             ciphertext_b64: STANDARD.encode(&r.ciphertext),
+            sig_b64: STANDARD.encode(&r.signature),
         });
     }
 

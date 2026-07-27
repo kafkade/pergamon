@@ -6249,15 +6249,61 @@ fn open_sync_session(
     let ark = store.load_ark(account)?.with_context(|| {
         format!("no account root key for '{account}'; run `pergamon device-key init` first")
     })?;
+    let keys = store.load_device_keys(account)?.with_context(|| {
+        format!("no device key for '{account}'; run `pergamon device-key init` first")
+    })?;
+    let signing_key = *keys.ed25519_signing();
 
-    let crypto = pergamon_sync::CryptoContext::new(ark, account_hex, device_id, state.key_epoch)
-        .context("building crypto context")?;
-    let transport =
-        pergamon_sync::http::HttpTransport::new(server).context("building HTTP transport")?;
-    let engine = pergamon_sync::SyncEngine::new(transport, crypto);
+    let crypto = pergamon_sync::CryptoContext::new(
+        ark,
+        account_hex.clone(),
+        device_id,
+        signing_key,
+        state.key_epoch,
+    )
+    .context("building crypto context")?;
+    let transport = pergamon_sync::http::HttpTransport::new(server.clone())
+        .context("building HTTP transport")?;
+    // Build the device-key directory from the account roster so pulled events'
+    // signatures can be verified against their signing device (ADR-030). This is
+    // best-effort: a failure (e.g. offline) leaves it empty, which still allows
+    // push (never consults it) and single-device pull (own echoes are
+    // suppressed before verification); a genuinely unknown multi-device signer
+    // surfaces a retryable `UnknownSigner` so a later refresh resolves it.
+    let directory = load_device_directory(&store, account, &account_hex, &server);
+    let engine = pergamon_sync::SyncEngine::new(transport, crypto, directory);
     let blobs = pergamon_sync::FsBlobStore::new(blob_store_dir())
         .map_err(|e| anyhow::anyhow!("opening durable blob store: {e}"))?;
     Ok((engine, blobs))
+}
+
+/// Fetch the account's device roster and project it into a
+/// [`pergamon_sync::DeviceKeyDirectory`] (`device_id -> ed25519_pub`) for event
+/// signature verification (ADR-030). Returns an empty directory on any failure,
+/// warning to stderr, so sync operations that do not require it still proceed.
+fn load_device_directory(
+    store: &keystore::DeviceKeyStore,
+    account: &str,
+    account_hex: &str,
+    server: &str,
+) -> pergamon_sync::DeviceKeyDirectory {
+    let build = || -> Result<pergamon_sync::DeviceKeyDirectory> {
+        let account_id = match store.load_account_id(account)? {
+            Some(id) => id,
+            None => parse_account_id(account_hex)?,
+        };
+        let relay = open_relay(server)?;
+        let roster = pergamon_sync::onboarding::roster(&relay, &account_id)
+            .context("listing device roster")?;
+        Ok(pergamon_sync::DeviceKeyDirectory::from_roster(&roster))
+    };
+    match build() {
+        Ok(dir) => dir,
+        Err(e) => {
+            eprintln!("warning: could not load device roster for signature verification: {e:#}");
+            pergamon_sync::DeviceKeyDirectory::new()
+        }
+    }
 }
 
 /// Handle `sync-remote` subcommands.

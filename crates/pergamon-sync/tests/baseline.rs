@@ -17,7 +17,9 @@ use pergamon_core::sync::event::{EntityType, Op};
 use pergamon_crypto::hierarchy::{AccountId, AccountRootKey};
 use pergamon_storage::Database;
 use pergamon_storage::sync::FieldMap;
-use pergamon_sync::{CryptoContext, MemoryBlobStore, MemoryTransport, SyncEngine, SyncError};
+use pergamon_sync::{
+    CryptoContext, DeviceKeyDirectory, MemoryBlobStore, MemoryTransport, SyncEngine, SyncError,
+};
 use serde_json::{Value, json};
 
 const ACCOUNT_HEX_SEED: [u8; 16] = [3u8; 16];
@@ -27,18 +29,41 @@ fn account_hex() -> String {
     AccountId::from_bytes(ACCOUNT_HEX_SEED).to_hex()
 }
 
+/// Deterministic per-device Ed25519 signing seed for tests (ADR-030).
+fn signing_seed(device: &str) -> [u8; 32] {
+    let mut seed = [0u8; 32];
+    let bytes = device.as_bytes();
+    let n = bytes.len().min(32);
+    seed[..n].copy_from_slice(&bytes[..n]);
+    seed
+}
+
+/// A directory mapping the two test devices to their Ed25519 public keys, so the
+/// engine can verify pulled events' signatures.
+fn directory() -> DeviceKeyDirectory {
+    let mut dir = DeviceKeyDirectory::new();
+    for device in ["device-a", "device-b"] {
+        dir.insert(
+            device,
+            pergamon_crypto::primitives::ed25519_public(&signing_seed(device)),
+        );
+    }
+    dir
+}
+
 fn crypto(device: &str) -> CryptoContext {
     CryptoContext::new(
         AccountRootKey::from_bytes(ARK_SEED),
         account_hex(),
         device.to_owned(),
+        signing_seed(device),
         0,
     )
     .unwrap()
 }
 
 fn engine(transport: &MemoryTransport, device: &str) -> SyncEngine<MemoryTransport> {
-    SyncEngine::new(transport.clone(), crypto(device))
+    SyncEngine::new(transport.clone(), crypto(device), directory())
 }
 
 /// A fresh in-memory DB with sync **disabled** (no device identity).

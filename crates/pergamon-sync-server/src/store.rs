@@ -67,6 +67,9 @@ pub struct EventRecord {
     pub blob_refs: Vec<String>,
     /// Opaque AEAD ciphertext body.
     pub ciphertext: Vec<u8>,
+    /// Opaque Ed25519 event signature bytes (ADR-030). Stored and echoed
+    /// verbatim; never inspected by the server.
+    pub signature: Vec<u8>,
 }
 
 /// A stored event as read back on pull, with the raw ciphertext body.
@@ -94,6 +97,8 @@ pub struct StoredEventRecord {
     pub server_committed_at: i64,
     /// Opaque AEAD ciphertext body.
     pub ciphertext: Vec<u8>,
+    /// Opaque Ed25519 event signature bytes (ADR-030), echoed verbatim.
+    pub signature: Vec<u8>,
 }
 
 /// The per-event result of a push.
@@ -219,6 +224,7 @@ impl SyncStore {
                 blob_refs           TEXT    NOT NULL,
                 payload_bytes       INTEGER NOT NULL,
                 ciphertext          BLOB    NOT NULL,
+                signature           BLOB    NOT NULL DEFAULT (x''),
                 server_committed_at INTEGER NOT NULL,
                 PRIMARY KEY (account_id, server_seq)
             );
@@ -439,8 +445,8 @@ impl SyncStore {
                 "INSERT INTO events (
                     account_id, server_seq, change_id, device_id, protocol_version,
                     entity_ref, key_epoch, blob_refs, payload_bytes, ciphertext,
-                    server_committed_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                    signature, server_committed_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     account_id,
                     seq_i,
@@ -452,6 +458,7 @@ impl SyncStore {
                     blob_refs_json,
                     payload_bytes,
                     ev.ciphertext,
+                    ev.signature,
                     committed_at,
                 ],
             )?;
@@ -487,7 +494,7 @@ impl SyncStore {
         let mut stmt = self.conn.prepare(
             "SELECT protocol_version, account_id, device_id, change_id, entity_ref,
                     key_epoch, blob_refs, payload_bytes, server_seq, server_committed_at,
-                    ciphertext
+                    ciphertext, signature
              FROM events
              WHERE account_id = ?1 AND server_seq > ?2
              ORDER BY server_seq ASC
@@ -507,6 +514,7 @@ impl SyncStore {
                 row.get::<_, i64>(8)?,
                 row.get::<_, i64>(9)?,
                 row.get::<_, Vec<u8>>(10)?,
+                row.get::<_, Vec<u8>>(11)?,
             ))
         })?;
 
@@ -524,6 +532,7 @@ impl SyncStore {
                 server_seq,
                 server_committed_at,
                 ciphertext,
+                signature,
             ) = row?;
             let blob_refs: Vec<String> = serde_json::from_str(&blob_refs_json)?;
             out.push(StoredEventRecord {
@@ -538,6 +547,7 @@ impl SyncStore {
                 server_seq: u64::try_from(server_seq).unwrap_or(0),
                 server_committed_at,
                 ciphertext,
+                signature,
             });
         }
         Ok(out)

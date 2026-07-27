@@ -54,7 +54,7 @@ pub mod http;
 pub mod http_relay;
 
 pub use blob::{BlobStore, FsBlobStore, MemoryBlobStore};
-pub use crypto::CryptoContext;
+pub use crypto::{CryptoContext, DeviceKeyDirectory};
 pub use daemon::{
     Jitter, RoundOutcome, RoundReport, Sleeper, SyncControl, Wake, control, run_forever,
 };
