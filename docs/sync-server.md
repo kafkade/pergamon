@@ -192,9 +192,9 @@ sync.example.com {
 
 Bring it up with
 `docker compose -f docker-compose.sync-server.yml up -d`; the certificate is
-issued on first request. Clients then use
-`--server https://youruser:your-password@sync.example.com` (or configure the
-credential however your client supports Basic auth).
+issued on first request. Clients then point at
+`https://sync.example.com` and supply the reverse-proxy credential through the
+environment (see [Connecting a client](#connecting-a-client) below).
 
 ### nginx (manual certificate)
 
@@ -261,8 +261,37 @@ Additional devices join through the onboarding flow (`sync-device invite` /
 [ADR-024](adr/024-device-onboarding-and-key-lifecycle.md). The account key never
 leaves your devices — the server only relays sealed artifacts.
 
-If your reverse proxy enforces Basic auth, embed the credentials in the server
-URL (`https://user:pass@sync.example.com`).
+### Authenticating through a reverse proxy
+
+If your reverse proxy enforces authentication (as the Caddy and nginx
+examples above do), give the client the credential through the **environment**
+rather than embedding it in the server URL. The client sends it as an
+`Authorization` header on every request, marks that header sensitive so it is
+never logged, and — unlike a URL-embedded credential — never writes it to the
+local sync state.
+
+For HTTP Basic auth, export the username and password before running any
+`pergamon sync-remote` or `pergamon sync-device` command:
+
+```sh
+export PERGAMON_SYNC_BASIC_USER=youruser
+export PERGAMON_SYNC_BASIC_PASSWORD=your-password
+pergamon sync-remote sync
+```
+
+For a bearer token instead, set `PERGAMON_SYNC_BEARER_TOKEN` (it takes
+precedence over the Basic-auth variables when both are set):
+
+```sh
+export PERGAMON_SYNC_BEARER_TOKEN=your-token
+pergamon sync-remote sync
+```
+
+The same variables also configure the `pergamon-server` background sync worker
+when it syncs through the proxy.
+
+Embedding the credential in the server URL still works as a last resort, but
+is discouraged: it can leak into shell history, process listings, and logs.
 
 ## Data persistence
 
@@ -405,8 +434,10 @@ same endpoint; no `curl`/`wget` is installed in the image.
 
 - Confirm the server is reachable from the client host over HTTPS (through your
   reverse proxy), not just on `localhost`.
-- If the proxy enforces Basic auth, make sure the client URL includes valid
-  credentials.
+- If the proxy enforces authentication, make sure the client has valid
+  credentials configured via `PERGAMON_SYNC_BASIC_USER` /
+  `PERGAMON_SYNC_BASIC_PASSWORD` (or `PERGAMON_SYNC_BEARER_TOKEN`); see
+  [Authenticating through a reverse proxy](#authenticating-through-a-reverse-proxy).
 - Check the proxy's `client_max_body_size` / upload limits if large blob pushes
   fail.
 

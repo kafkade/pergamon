@@ -14,7 +14,9 @@ use reqwest::blocking::Client;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::credential::TransportCredential;
 use crate::error::{Result, SyncError};
+use crate::http::build_client;
 use crate::relay::{RelayAttestation, RelayDevice, RelayTransport, RelayWrap};
 
 /// A blocking HTTP relay client to a pergamon sync server.
@@ -88,9 +90,22 @@ impl HttpRelay {
     /// # Errors
     /// Returns a [`SyncError::Transport`] if the HTTP client cannot be built.
     pub fn new(base_url: impl Into<String>) -> Result<Self> {
-        let client = Client::builder()
-            .build()
-            .map_err(|e| SyncError::Transport(e.to_string()))?;
+        Self::with_credential(base_url, None)
+    }
+
+    /// Build a relay client for `base_url` that authenticates every request with
+    /// `credential` (e.g. HTTP Basic when the server sits behind a reverse proxy
+    /// that enforces auth). Pass `None` for an unauthenticated client.
+    ///
+    /// # Errors
+    /// Returns a [`SyncError::Transport`] if the HTTP client cannot be built or
+    /// the credential cannot be encoded as a header value. The error message
+    /// never contains the credential.
+    pub fn with_credential(
+        base_url: impl Into<String>,
+        credential: Option<TransportCredential>,
+    ) -> Result<Self> {
+        let client = build_client(credential)?;
         Ok(Self {
             client,
             base_url: base_url.into().trim_end_matches('/').to_owned(),
