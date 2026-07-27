@@ -43,6 +43,21 @@ pub enum SyncError {
     /// A protocol or data-shape invariant was violated.
     #[error("protocol error: {0}")]
     Protocol(String),
+
+    /// A push did not fully upload the local library: some outbox changes are
+    /// still pending and/or some referenced blobs are still missing on the
+    /// server (issue #184). Signals an incomplete/partial baseline upload loudly.
+    #[error(
+        "upload incomplete: {pending_events} change(s) still pending, \
+         {} blob(s) missing on server",
+        missing_blobs.len()
+    )]
+    IncompleteUpload {
+        /// Outbox changes still awaiting acknowledgement after the push.
+        pending_events: u64,
+        /// Referenced blob ciphertext hashes the server reports as still missing.
+        missing_blobs: Vec<String>,
+    },
 }
 
 impl SyncError {

@@ -6030,19 +6030,33 @@ fn track_document_upsert(db: &Database, item: &ContentItem) {
     }
 }
 
-/// A remote-sync session: an HTTP-backed engine plus a local blob store.
+/// A remote-sync session: an HTTP-backed engine plus a durable blob store.
 type SyncSession = (
     pergamon_sync::SyncEngine<pergamon_sync::http::HttpTransport>,
-    pergamon_sync::MemoryBlobStore,
+    pergamon_sync::FsBlobStore,
 );
+
+/// The durable blob-plaintext store directory.
+///
+/// Mirrors [`default_db_path`]'s resolution so blobs sit beside the library:
+/// `$PERGAMON_DATA_DIR/blobs` when set, else the platform data dir, else the
+/// current directory. The store is content-addressed, so sharing one directory
+/// across libraries is safe.
+fn blob_store_dir() -> PathBuf {
+    std::env::var_os("PERGAMON_DATA_DIR")
+        .map(PathBuf::from)
+        .or_else(|| dirs::data_dir().map(|d| d.join("pergamon")))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("blobs")
+}
 
 /// Build the crypto context and HTTP transport for an enabled sync session.
 ///
 /// Loads the account keys from the keystore and the server URL and identity
 /// from the local sync state, failing with actionable guidance when either is
-/// missing. The blob store is ephemeral for now: current CLI mutations do not
-/// emit blob-referencing events, so no blob plaintext needs to persist between
-/// invocations (a durable store lands with full change-tracking).
+/// missing. Blob plaintext is kept in a durable filesystem store (issue #184)
+/// under [`blob_store_dir`], so any blob a change references persists between
+/// invocations rather than being lost with an ephemeral in-memory store.
 fn open_sync_session(
     db: &Database,
     account: &str,
@@ -6073,7 +6087,9 @@ fn open_sync_session(
     let transport =
         pergamon_sync::http::HttpTransport::new(server).context("building HTTP transport")?;
     let engine = pergamon_sync::SyncEngine::new(transport, crypto);
-    Ok((engine, pergamon_sync::MemoryBlobStore::new()))
+    let blobs = pergamon_sync::FsBlobStore::new(blob_store_dir())
+        .map_err(|e| anyhow::anyhow!("opening durable blob store: {e}"))?;
+    Ok((engine, blobs))
 }
 
 /// Handle `sync-remote` subcommands.
@@ -6087,6 +6103,9 @@ fn handle_sync_remote(db: &Database, action: SyncRemoteAction) -> Result<()> {
         SyncRemoteAction::Push { account, key_file } => {
             let (engine, blobs) = open_sync_session(db, &account, key_file.as_ref())?;
             let pushed = engine.push(db, &blobs).context("pushing changes")?;
+            engine
+                .verify_upload_complete(db)
+                .context("verifying upload completeness")?;
             println!("Pushed {pushed} change(s).");
             Ok(())
         }
@@ -6099,6 +6118,9 @@ fn handle_sync_remote(db: &Database, action: SyncRemoteAction) -> Result<()> {
         SyncRemoteAction::Sync { account, key_file } => {
             let (engine, blobs) = open_sync_session(db, &account, key_file.as_ref())?;
             let stats = engine.sync(db, &blobs).context("syncing")?;
+            engine
+                .verify_upload_complete(db)
+                .context("verifying upload completeness")?;
             println!(
                 "Pushed {} change(s), applied {} change(s).",
                 stats.pushed, stats.applied
@@ -6148,10 +6170,20 @@ fn sync_remote_enable(
     db.set_sync_identity(&account_hex, &device_id, epoch, Some(server))
         .context("writing sync identity")?;
 
+    // Enqueue a complete baseline of the existing library so the first push
+    // uploads everything, not just post-enable mutations (issue #184). Run-once
+    // and idempotent: a persistent guard makes re-enabling a no-op.
+    let baseline = db
+        .enqueue_sync_baseline(now_millis())
+        .context("enqueuing sync baseline")?;
+
     println!("Remote sync enabled for account '{account}'.");
     println!("  server:  {server}");
     println!("  account: {account_hex}");
     println!("  device:  {device_id}");
+    if baseline > 0 {
+        println!("  baseline: {baseline} change(s) enqueued from existing library");
+    }
     println!("Run `pergamon sync-remote sync` to exchange changes.");
     Ok(())
 }

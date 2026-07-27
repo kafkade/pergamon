@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Remote sync now verifies that a push fully uploaded your library and reports a clear error if any queued change or referenced blob did not land on the server, so a partial or interrupted sync is surfaced loudly instead of silently leaving your library incomplete on the server (#184)
+
+### Changed
+
+- Synced blobs are now written to a durable on-disk store instead of being held only in memory, so blob data persists across restarts and stays available to later syncs (#184)
+
+### Fixed
+
+- Enabling remote sync on a device that already has content now uploads your **entire** existing library, not just changes made after enabling. The first time you enable sync, a complete baseline of every existing document, tag, collection, note, highlight, and review card/log (plus tag and collection memberships) is queued for upload, so a newly added device reconstructs your full library on its first pull. Previously nothing pre-existing was uploaded, so a fresh device would come up almost empty until each item was edited again (#184)
+
 ## [1.0.0] - 2026-07-09
 
 ### Added
