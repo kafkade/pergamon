@@ -32,19 +32,23 @@
 //! handles, and throttling state.
 //!
 //! ## Out of scope (seams left for later WPs)
-//! - Bearer/refresh token minting bound to the device Ed25519 key — WP-3b/#192.
 //! - Per-IP rate limiting, body caps, storage-DoS isolation — WP-4/#195.
-//! - Per-route authorization + tenant isolation middleware — WP-3c/#197.
+//! - Per-route authorization + tenant isolation middleware — WP-3c/#197. This
+//!   module mints/refreshes/revokes device tokens (WP-3b/#192) and exposes
+//!   [`store::AuthStore::validate_token`] as the primitive, but does not yet gate
+//!   the blind content routes on it.
 
 pub mod cipher_suite;
 pub mod routes;
 pub mod state;
 pub mod store;
 pub mod throttle;
+pub mod token;
 pub mod wire;
 
 pub use cipher_suite::PergamonCipherSuite;
 pub use state::AuthState;
+pub use token::{AuthAccount, TokenConfig};
 
 use axum::Router;
 use axum::routing::post;
@@ -52,12 +56,17 @@ use axum::routing::post;
 /// Build the OPAQUE auth sub-router (mounted only in multi-tenant mode).
 ///
 /// Returns a fully-stated `Router` that can be merged into the content router.
+/// Covers OPAQUE register/login (WP-3a, #189) plus per-device token
+/// refresh/revocation (WP-3b, #192). Token **issuance** is folded into
+/// `login/finish`, so it needs no separate route.
 pub fn auth_router(auth_state: AuthState) -> Router {
     Router::new()
         .route("/v1/auth/register/start", post(routes::register_start))
         .route("/v1/auth/register/finish", post(routes::register_finish))
         .route("/v1/auth/login/start", post(routes::login_start))
         .route("/v1/auth/login/finish", post(routes::login_finish))
+        .route("/v1/auth/token/refresh", post(routes::token_refresh))
+        .route("/v1/auth/token/revoke", post(routes::token_revoke))
         .with_state(auth_state)
 }
 

@@ -69,6 +69,14 @@ pub fn build_router(state: AppState) -> Router {
 /// Used in [`auth::ServerMode::Multitenant`]. The content store stays blind; the
 /// auth routes live in a separate module with a separate store.
 ///
+/// **WP-3c enforcement seam (#197):** the blind content routes below are merged
+/// **without** a per-request authorization layer. WP-3c will wrap every
+/// `{account_id}` content route with a middleware that calls
+/// [`auth::store::AuthStore::validate_token`] (surfaced as
+/// [`auth::AuthState::validate_token`]) and asserts the token's `account_id`
+/// equals the route's `{account_id}`. WP-3b (#192) provides that primitive and
+/// the mint/refresh/revoke endpoints but deliberately does not gate content here.
+///
 /// **NOT YET EXTERNALLY SECURITY-REVIEWED — do not deploy** (see [`auth`]).
 pub fn build_router_multitenant(state: AppState, auth_state: auth::AuthState) -> Router {
     routes::router(state)
@@ -98,6 +106,10 @@ pub fn build_router_hardened(state: AppState, abuse: &AbuseConfig) -> Router {
 /// [`auth::throttle`]). This is the point of shipping WP-4 (#195) alongside WP-3a
 /// (#189). As above, wrap the result with [`apply_abuse_controls`] at the serve
 /// site for the global controls.
+///
+/// The token refresh/revoke endpoints (WP-3b, #192) are part of the auth router
+/// and get the same strict per-IP tier + body cap here. The WP-3c content-route
+/// authorization seam is as documented on [`build_router_multitenant`].
 ///
 /// **NOT YET EXTERNALLY SECURITY-REVIEWED — do not deploy** (see [`auth`]).
 pub fn build_router_multitenant_hardened(
