@@ -43,6 +43,32 @@ const BACKOFF_MAX: Duration = Duration::from_secs(300);
 /// Backoff growth factor per consecutive failure.
 const BACKOFF_MULTIPLIER: f64 = 2.0;
 
+/// Read the sync transport credential from the environment (issue #183).
+///
+/// Mirrors the CLI's precedence so a server whose background worker syncs
+/// through an authenticating reverse proxy can supply the same credential:
+/// 1. `PERGAMON_SYNC_BEARER_TOKEN` (non-empty) → bearer token.
+/// 2. `PERGAMON_SYNC_BASIC_USER` + `PERGAMON_SYNC_BASIC_PASSWORD` → HTTP Basic.
+/// 3. otherwise `None` (unauthenticated).
+///
+/// The credential is read only from the environment and is never logged.
+fn sync_credential_from_env() -> Option<pergamon_sync::TransportCredential> {
+    if let Ok(token) = std::env::var("PERGAMON_SYNC_BEARER_TOKEN")
+        && !token.is_empty()
+    {
+        return Some(pergamon_sync::TransportCredential::Bearer { token });
+    }
+    match (
+        std::env::var("PERGAMON_SYNC_BASIC_USER"),
+        std::env::var("PERGAMON_SYNC_BASIC_PASSWORD"),
+    ) {
+        (Ok(username), Ok(password)) if !username.is_empty() => {
+            Some(pergamon_sync::TransportCredential::Basic { username, password })
+        }
+        _ => None,
+    }
+}
+
 /// Start the background sync worker, returning a control handle.
 ///
 /// # Errors
@@ -97,8 +123,11 @@ pub fn spawn(config: SyncWorkerConfig) -> Result<pergamon_sync::SyncControl> {
         state.key_epoch,
     )
     .context("building crypto context")?;
-    let transport = pergamon_sync::http::HttpTransport::new(server.clone())
-        .context("building HTTP transport")?;
+    let transport = pergamon_sync::http::HttpTransport::with_credential(
+        server.clone(),
+        sync_credential_from_env(),
+    )
+    .context("building HTTP transport")?;
     // Verify pulled events against the account roster (ADR-030). Best-effort:
     // an empty directory still lets push and single-device pull proceed, while
     // an unknown multi-device signer surfaces as a retryable `UnknownSigner`.
@@ -149,8 +178,11 @@ fn load_device_directory(
         let account_id = store
             .load_account_id(account)?
             .ok_or_else(|| anyhow!("no account id for '{account}' in the key file"))?;
-        let relay =
-            pergamon_sync::HttpRelay::new(server.to_owned()).context("building relay client")?;
+        let relay = pergamon_sync::HttpRelay::with_credential(
+            server.to_owned(),
+            sync_credential_from_env(),
+        )
+        .context("building relay client")?;
         let roster = pergamon_sync::onboarding::roster(&relay, &account_id)
             .context("listing device roster")?;
         Ok(pergamon_sync::DeviceKeyDirectory::from_roster(&roster))

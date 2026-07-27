@@ -38,6 +38,7 @@
 
 pub mod apply;
 pub mod blob;
+pub mod credential;
 pub mod crypto;
 pub mod daemon;
 pub mod engine;
@@ -54,6 +55,7 @@ pub mod http;
 pub mod http_relay;
 
 pub use blob::{BlobStore, FsBlobStore, MemoryBlobStore};
+pub use credential::TransportCredential;
 pub use crypto::{CryptoContext, DeviceKeyDirectory};
 pub use daemon::{
     Jitter, RoundOutcome, RoundReport, Sleeper, SyncControl, Wake, control, run_forever,

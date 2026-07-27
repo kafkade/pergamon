@@ -6218,6 +6218,36 @@ fn blob_store_dir() -> PathBuf {
         .join("blobs")
 }
 
+/// Read the sync transport credential from the environment (issue #183).
+///
+/// Lets the client authenticate to a sync server that sits behind a reverse
+/// proxy enforcing auth, *without* embedding credentials in the server URL
+/// (which would leak into logs, process lists, and the persisted `server_url`).
+/// The credential is read only from the environment — never from `config.toml`
+/// or the database — and is never logged.
+///
+/// Precedence:
+/// 1. `PERGAMON_SYNC_BEARER_TOKEN` (non-empty) → bearer token.
+/// 2. `PERGAMON_SYNC_BASIC_USER` + `PERGAMON_SYNC_BASIC_PASSWORD` (both set) →
+///    HTTP Basic.
+/// 3. otherwise `None` (unauthenticated).
+fn sync_credential_from_env() -> Option<pergamon_sync::TransportCredential> {
+    if let Ok(token) = std::env::var("PERGAMON_SYNC_BEARER_TOKEN")
+        && !token.is_empty()
+    {
+        return Some(pergamon_sync::TransportCredential::Bearer { token });
+    }
+    match (
+        std::env::var("PERGAMON_SYNC_BASIC_USER"),
+        std::env::var("PERGAMON_SYNC_BASIC_PASSWORD"),
+    ) {
+        (Ok(username), Ok(password)) if !username.is_empty() => {
+            Some(pergamon_sync::TransportCredential::Basic { username, password })
+        }
+        _ => None,
+    }
+}
+
 /// Build the crypto context and HTTP transport for an enabled sync session.
 ///
 /// Loads the account keys from the keystore and the server URL and identity
@@ -6262,8 +6292,11 @@ fn open_sync_session(
         state.key_epoch,
     )
     .context("building crypto context")?;
-    let transport = pergamon_sync::http::HttpTransport::new(server.clone())
-        .context("building HTTP transport")?;
+    let transport = pergamon_sync::http::HttpTransport::with_credential(
+        server.clone(),
+        sync_credential_from_env(),
+    )
+    .context("building HTTP transport")?;
     // Build the device-key directory from the account roster so pulled events'
     // signatures can be verified against their signing device (ADR-030). This is
     // best-effort: a failure (e.g. offline) leaves it empty, which still allows
@@ -6534,7 +6567,8 @@ fn now_millis_i64() -> i64 {
 
 /// Build an HTTP relay client for the onboarding flows.
 fn open_relay(server: &str) -> Result<pergamon_sync::HttpRelay> {
-    pergamon_sync::HttpRelay::new(server.to_owned()).context("building relay client")
+    pergamon_sync::HttpRelay::with_credential(server.to_owned(), sync_credential_from_env())
+        .context("building relay client")
 }
 
 /// Parse an account handle from its hex wire form.
