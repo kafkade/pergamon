@@ -37,6 +37,7 @@
 //!   attestations, cursored.
 //! - `PUT/GET /v1/recovery/{account_id}` — the optional recovery blob.
 
+pub mod auth;
 pub mod envelope;
 pub mod error;
 pub mod routes;
@@ -51,8 +52,25 @@ pub use state::AppState;
 pub use store::{SyncStore, ct_hash};
 
 /// Build the Axum application router with all routes and middleware.
+///
+/// This is the **blind** router (today's ADR-026 behavior, byte-for-byte): no
+/// auth plane. It is used in [`auth::ServerMode::Blind`] (the default).
 pub fn build_router(state: AppState) -> Router {
     routes::router(state)
+        .layer(CompressionLayer::new())
+        .layer(TraceLayer::new_for_http())
+}
+
+/// Build the multi-tenant router: the blind content routes **plus** the OPAQUE
+/// auth control plane ([`auth`]).
+///
+/// Used in [`auth::ServerMode::Multitenant`]. The content store stays blind; the
+/// auth routes live in a separate module with a separate store.
+///
+/// **NOT YET EXTERNALLY SECURITY-REVIEWED — do not deploy** (see [`auth`]).
+pub fn build_router_multitenant(state: AppState, auth_state: auth::AuthState) -> Router {
+    routes::router(state)
+        .merge(auth::auth_router(auth_state))
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
 }

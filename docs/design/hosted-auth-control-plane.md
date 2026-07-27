@@ -42,6 +42,18 @@ retention, and traffic-log policy remain tracked under WP-13. Values marked
 **(to confirm)** are asserted here but must be re-verified against upstream
 before WP-3a starts.
 
+> **⚠️ WP-3a implementation status (issue
+> [#189](https://github.com/kafkade/pergamon/issues/189)):** a first
+> implementation of the server-side OPAQUE identity primitives now exists in the
+> AGPL `pergamon-sync-server` crate (`src/auth/`) with an Apache-2.0 client
+> helper in `pergamon-sync` (`auth` feature). It is a **reviewable first
+> implementation, NOT production-ready**: OPAQUE auth is **NOT YET EXTERNALLY
+> SECURITY-REVIEWED — do not deploy to production until the external-review
+> checklist ([§1.11](#111-external-review-checklist)) is
+> signed off.** The auth routes are gated behind `PERGAMON_SYNC_MODE=multitenant`
+> and are not mounted in the default `blind` mode, so existing self-host
+> deployments are unaffected.
+
 ## Part 1 — OPAQUE authentication security design
 
 ### 1.1 Why OPAQUE, restated

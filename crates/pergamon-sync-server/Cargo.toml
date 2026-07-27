@@ -37,6 +37,14 @@ uuid = { workspace = true }
 time = { workspace = true }
 base64 = { workspace = true }
 sha2 = { workspace = true }
+# OPAQUE server-auth identity (WP-3a, ADR-029). NOT co-mingled with the blind
+# relay store — see `src/auth/`. `opaque-ke` is dual MIT/Apache-2.0 (usable from
+# this AGPL crate); `sha2-opaque` is `sha2 0.10` for the cipher suite (the
+# workspace `sha2 = 0.11` above is kept for `ct_hash`).
+opaque-ke = { workspace = true }
+rand = { workspace = true }
+sha2-opaque = { workspace = true }
+argon2 = { workspace = true }
 
 [dev-dependencies]
 tower = { workspace = true }
@@ -48,7 +56,8 @@ pergamon-crypto = { workspace = true }
 # databases through the real router and prove they converge (issue #126). ADR-008
 # permits Apache dev-dependencies in this AGPL crate; the server never links them
 # at runtime. The `http` feature adds the blocking reqwest relay client, exercised
-# over real TCP by the onboarding e2e test (issue #128).
-pergamon-sync = { workspace = true, features = ["http"] }
+# over real TCP by the onboarding e2e test (issue #128). The `auth` feature adds
+# the OPAQUE client helpers used to drive register/login round-trips (WP-3a, #189).
+pergamon-sync = { workspace = true, features = ["http", "auth"] }
 pergamon-storage = { workspace = true }
 pergamon-core = { workspace = true }
