@@ -159,15 +159,21 @@ Account Root Key (ARK, 256-bit random, never leaves a device in plaintext)
   scoped per epoch, so the same plaintext under a new epoch re-encrypts to a new
   blob (acceptable; blobs are immutable and reference-counted in ADR-022).
 
-  Convergent encryption has a known trade-off: an attacker who *guesses* a
-  plaintext can confirm the account stores it (a "confirmation-of-file" oracle),
-  and equal plaintexts are linkable. Scoping the key under the secret `ACK_e`
-  (rather than a pure hash of the plaintext) means only a party who already holds
-  the account key can run that check — the blind server cannot — so the residual
-  leak is limited to cross-account "do two accounts share this exact blob"
-  observations. For a personal library of articles and PDFs this dedup win
-  outweighs the narrow leak; an account may disable convergent keys and fall
-  back to random per-blob keys (losing dedup) as a future opt-in.
+  Convergent encryption has a known trade-off: equal plaintexts encrypt to
+  equal ciphertext, so identical blobs are linkable. Scoping the key under the
+  secret `ACK_e` (rather than a pure hash of the plaintext) means an outsider
+  who *guesses* a plaintext cannot reproduce the ciphertext to confirm it — the
+  classic "confirmation-of-file" oracle needs `ACK_e`, which only the account's
+  own devices hold and the blind server never sees. Because `ACK_e` is derived
+  from the account's ARK for a specific epoch, the blob key — and therefore the
+  ciphertext — is **account- and epoch-scoped**: the same plaintext under a
+  different account or a different epoch yields unrelated ciphertext. The
+  residual leak is therefore **same-account, same-epoch equality only** — within
+  one account and epoch, two identical blobs are visibly the same (exactly the
+  dedup the scheme relies on); it does *not* let anyone compare blobs across
+  accounts or across epochs. For a personal library of articles and PDFs this
+  dedup win outweighs the narrow leak; an account may disable convergent keys and
+  fall back to random per-blob keys (losing dedup) as a future opt-in.
 
 ### Device keypairs
 
@@ -283,17 +289,22 @@ Removing a device (lost, sold, compromised) is a **key-epoch rotation**:
    a server cannot silently downgrade a client to an older epoch.
 5. If recovery is enabled, the recovery blob is re-wrapped for epoch `e+1`.
 
-**Secrecy boundary — stated honestly.** A revoked device *keeps whatever epoch
-keys it already held* (`ACK_0 … ACK_e`) and *keeps any plaintext it already
-downloaded*. Rotation therefore protects **future** content (encrypted under
-`ACK_{e+1}`, which the revoked device never receives) but does **not**
-retroactively re-protect content the device could already read. Because ADR-022
-blobs are immutable and content-addressed, true forward-secrecy for *old* content
-would require re-encrypting and re-uploading the entire library under the new
-epoch and pruning the old blobs — expensive and explicitly **out of scope** here;
-it is offered as a future "full re-key" operation. This bounded guarantee — new
-content is protected immediately, old content is assumed already-seen by a device
-that held its keys — is the pragmatic and honest choice for a personal library.
+**Secrecy boundary — stated honestly.** This rotation is **roster hygiene, not
+forward secrecy.** Every enrolled device holds the Account Root Key, and
+`ACK_{e+1} = HKDF(ARK, "pergamon/v1/account-content" ‖ e+1)` is derived from
+that stable ARK with a public label and epoch number. A revoked device that
+retains the ARK can therefore derive `ACK_{e+1}` — and every later epoch key —
+**on its own**, without ever receiving the re-wrap. Advancing the epoch and
+re-wrapping only to remaining devices updates the trusted-device roster and lets
+honest devices agree on the current epoch and honor the revocation attestation;
+it does **not** cryptographically deny a retained-ARK device access to *new*
+content, and (because ADR-022 blobs are immutable and content-addressed) it does
+not re-protect *old* content either. **True forward secrecy on revocation is
+deliberately out of scope for this ADR** — it would require moving to a rotating
+secret the revoked device cannot re-derive plus a library-wide re-key of
+already-uploaded content — and is planned as future work in the crypto-hardening
+epic WP-A (#185). Until then, revocation should be understood as removing a
+device from the trusted roster, not as revoking its ability to decrypt.
 
 ### Wrapped-key envelope AAD binding
 
@@ -341,9 +352,11 @@ ADR-022 wire fields change.
 - **Trust-on-first-use with a human check.** Device-to-device enrollment with an
   out-of-band SAS gives strong MITM resistance without a certificate authority
   or cloud identity, matching the local-first, no-accounts ethos.
-- **Rotation is cheap and immediate for new content.** Revocation is an epoch
-  bump plus a re-wrap to remaining devices — no library-wide re-encryption on the
-  hot path — and downgrade-proof because `key_epoch` is authenticated in AAD.
+- **Rotation is cheap.** Revocation is an epoch bump plus a re-wrap to remaining
+  devices — no library-wide re-encryption on the hot path — and downgrade-proof
+  because `key_epoch` is authenticated in AAD. It is roster hygiene, not forward
+  secrecy (see "Revocation and key rotation"); real forward secrecy on
+  revocation is deferred to WP-A (#185).
 - **Recovery is honest.** Off by default, opt-in, warned, with a stronger
   recovery-code alternative — the user consciously chooses the passphrase risk
   rather than having it imposed.
@@ -353,13 +366,18 @@ ADR-022 wire fields change.
 
 ### Negative
 
-- **No retroactive forward secrecy without a full re-key.** A revoked device
-  keeps the epoch keys and plaintext it already had; protecting *old* content
-  from it requires an expensive, out-of-scope library-wide re-encryption.
-- **Convergent encryption leaks equality/existence.** Equal blobs are linkable
-  and a plaintext guess can be confirmed by a party holding the account key;
-  mitigated by scoping the key under `ACK_e` (the blind server cannot exploit it)
-  and by an opt-out that sacrifices dedup.
+- **Revocation is roster hygiene, not forward secrecy.** Because every device
+  holds the ARK and each `ACK_e` is derived from it, a revoked device that
+  retains the ARK can still derive future epoch keys and keeps whatever it
+  already downloaded; epoch rotation only updates the roster. Real forward
+  secrecy on revocation requires a rotating secret plus a library-wide re-key
+  and is deferred to WP-A (#185).
+- **Convergent encryption leaks same-account, same-epoch equality.** Within one
+  account and epoch, identical blobs are linkable — that is precisely the dedup
+  the scheme buys. The leak does **not** extend across accounts or epochs,
+  because the blob key is scoped under the secret `ACK_e` (the blind server
+  cannot exploit it), and an opt-out to random per-blob keys sacrifices dedup for
+  accounts that want to avoid even this.
 - **Enrollment needs two live devices and a human.** Onboarding a device without
   an existing trusted device *and* without recovery enabled is impossible by
   design — the safety property that the server cannot mint access is exactly what
