@@ -13,6 +13,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, Parser, Subcommand};
+use pergamon_core::account_flow::{CreateAccountBlock, LocalAccountState, guard_create_new};
 use pergamon_core::content_type::ContentType;
 use pergamon_core::diagnostics::{ExtractionEvent, ExtractionSource, ImportLogEntry, ImportSource};
 use pergamon_core::model::{
@@ -289,7 +290,11 @@ enum DeviceKeyAction {
 /// Remote-sync subcommands (ADR-022/023/024, #126).
 #[derive(Debug, Subcommand)]
 enum SyncRemoteAction {
-    /// Enable remote sync: bind the local database to an account and server.
+    /// ATTACH this existing local account to a server: bind the local database
+    /// to its account and a sync server. This is a transport change — it does
+    /// not create or change the account key. To create a new account use
+    /// `sync-device bootstrap`; to join one on a fresh device use
+    /// `sync-device enroll`/`recover`.
     Enable {
         /// Base URL of the sync server (e.g. `https://sync.example.com`).
         #[arg(long)]
@@ -364,9 +369,15 @@ enum SyncRemoteAction {
 /// opaque ciphertext.
 #[derive(Debug, Subcommand)]
 enum SyncDeviceAction {
-    /// First device on a new account: create keys + account root key, publish
-    /// this device's record and a self-trust attestation, and bind sync
-    /// identity to the server.
+    /// CREATE a new account (first device): mint the account key, publish this
+    /// device's record and self-trust attestation, bind sync identity to the
+    /// server, and surface a recovery code you must save.
+    ///
+    /// This is the *create* flow (ADR-029). To use an existing account on this
+    /// device instead, JOIN it with `enroll`/`accept`/`recover`. Refuses to run
+    /// if this device already belongs to an account, so you can't silently make
+    /// a duplicate; if it has local data but no account yet, pass
+    /// `--create-new-account` to confirm you want a brand-new account.
     Bootstrap {
         /// Base URL of the sync server (e.g. `https://sync.example.com`).
         #[arg(long)]
@@ -377,6 +388,16 @@ enum SyncDeviceAction {
         /// Use an encrypted key file instead of the OS keychain.
         #[arg(long)]
         key_file: Option<PathBuf>,
+        /// Confirm creating a brand-new account when this device already has
+        /// local data. Does not override the refusal when the device already
+        /// belongs to an account.
+        #[arg(long)]
+        create_new_account: bool,
+        /// Do not mint or upload a recovery code. Recovery stays OFF until you
+        /// run `sync-device recovery-enable`; if you lose every device the
+        /// account is unrecoverable.
+        #[arg(long)]
+        no_recovery_code: bool,
     },
     /// Existing device: print an invite blob to hand to a new device so it can
     /// enroll onto this account.
@@ -388,8 +409,11 @@ enum SyncDeviceAction {
         #[arg(long)]
         key_file: Option<PathBuf>,
     },
-    /// New device: publish this device's record under an invited account and
-    /// print its Short Authentication String for out-of-band comparison.
+    /// JOIN an existing account on this new device: publish this device's
+    /// record under an invited account and print its Short Authentication
+    /// String for out-of-band comparison. Pairs with `approve` on a trusted
+    /// device, then `accept` here. This device receives the existing account
+    /// key — it never creates a new one.
     Enroll {
         /// Invite blob produced by `sync-device invite` on a trusted device.
         #[arg(long)]
@@ -426,8 +450,9 @@ enum SyncDeviceAction {
         #[arg(long)]
         key_file: Option<PathBuf>,
     },
-    /// New device: fetch the sealed bundle a trusted device published, store the
-    /// account key, and bind sync identity. Then pull to restore the library.
+    /// JOIN (finish): fetch the sealed bundle a trusted device published, store
+    /// the existing account key, and bind sync identity. Then pull to restore
+    /// the library. No new account is created.
     Accept {
         /// Sync server URL (when not already bound from `enroll`).
         #[arg(long)]
@@ -473,9 +498,11 @@ enum SyncDeviceAction {
         #[arg(long)]
         key_file: Option<PathBuf>,
     },
-    /// Recover on a fresh device with no trusted peer: unwrap the account key
-    /// from the recovery secret (`PERGAMON_RECOVERY_PASSPHRASE`), publish a
-    /// device record + self-trust, bind identity, and pull.
+    /// JOIN via recovery: on a fresh device with no trusted peer, unwrap the
+    /// existing account key from the recovery secret
+    /// (`PERGAMON_RECOVERY_PASSPHRASE`), publish a device record + self-trust,
+    /// bind identity, and pull. This obtains the existing account key — it never
+    /// creates a new account.
     Recover {
         /// Base URL of the sync server.
         #[arg(long)]
@@ -6034,6 +6061,16 @@ fn handle_device_key(action: &DeviceKeyAction) -> Result<()> {
                     "Initialized device keys and a new account root key for '{account}' (device {}).",
                     keys.device_id()
                 );
+                println!(
+                    "Note: this created keys and an account key locally WITHOUT a recovery code."
+                );
+                println!(
+                    "To create + publish an account with a saved recovery code, use \
+                     `pergamon sync-device bootstrap`;"
+                );
+                println!(
+                    "or add recovery to this account later with `pergamon sync-device recovery-enable`."
+                );
             } else {
                 println!(
                     "Initialized device keys for account '{account}' (device {}).",
@@ -6584,7 +6621,16 @@ fn handle_sync_device(db: &Database, action: SyncDeviceAction) -> Result<()> {
             server,
             account,
             key_file,
-        } => sync_device_bootstrap(db, &server, &account, key_file.as_ref()),
+            create_new_account,
+            no_recovery_code,
+        } => sync_device_bootstrap(
+            db,
+            &server,
+            &account,
+            key_file.as_ref(),
+            create_new_account,
+            no_recovery_code,
+        ),
         SyncDeviceAction::Invite { account, key_file } => {
             sync_device_invite(db, &account, key_file.as_ref())
         }
@@ -6676,13 +6722,40 @@ fn ensure_device_keys(
 
 /// First device on a new account: create keys + ARK + account id, publish the
 /// device record and self-trust attestation, and bind sync identity.
+///
+/// This is the canonical **create-a-new-account** flow (ADR-029, Decision 3).
+/// Before minting anything it checks the local state so a device that already
+/// belongs to an account cannot silently create a duplicate, and a device with
+/// existing local data must confirm with `--create-new-account`. On success it
+/// surfaces a recovery code by default (opt out with `--no-recovery-code`).
 fn sync_device_bootstrap(
     db: &Database,
     server: &str,
     account: &str,
     key_file: Option<&PathBuf>,
+    create_new_account: bool,
+    no_recovery_code: bool,
 ) -> Result<()> {
     let mut store = open_key_store(key_file)?;
+
+    // Gather the pre-creation local state (local reads only) and let the pure
+    // core guard decide whether creating a new account is safe.
+    let sync_state = db.sync_state()?;
+    let state = LocalAccountState {
+        has_device_keys: store.load_device_keys(account)?.is_some(),
+        has_ark: store.load_ark(account)?.is_some(),
+        has_account_id: store.load_account_id(account)?.is_some(),
+        is_sync_bound: sync_state.server_url.is_some() || sync_state.account_id.is_some(),
+        has_local_content: db.count_content_items(None)? > 0,
+    };
+    if let Err(block) = guard_create_new(&state, create_new_account) {
+        if block == CreateAccountBlock::AlreadyHasAccount
+            && let Some(id) = store.load_account_id(account)?
+        {
+            eprintln!("This device already belongs to account {}.", id.to_hex());
+        }
+        bail!("{block}");
+    }
 
     let keys = ensure_device_keys(&mut store, account)?;
     if store.load_ark(account)?.is_none() {
@@ -6709,13 +6782,91 @@ fn sync_device_bootstrap(
     db.set_sync_identity(&account_hex, &device_id, epoch, Some(server))
         .context("writing sync identity")?;
 
-    println!("Bootstrapped account '{account}' on {server}.");
+    println!("Created account '{account}' on {server}.");
     println!("  account: {account_hex}");
     println!("  device:  {device_id}");
     println!("  epoch:   {epoch}");
+
+    // Surface a recovery secret by default so a lost-all-devices account is
+    // still recoverable. The ARK is still held above; reload it to wrap.
+    let ark = store
+        .load_ark(account)?
+        .context("account root key missing after bootstrap")?;
+    match publish_bootstrap_recovery(&relay, &account_id, &ark, no_recovery_code)? {
+        RecoveryOutcome::Code(code) => {
+            println!();
+            print_recovery_code(&code);
+            print_recovery_warning();
+        }
+        RecoveryOutcome::Passphrase => {
+            println!();
+            println!("Recovery enabled with PERGAMON_RECOVERY_PASSPHRASE.");
+            print_recovery_warning();
+        }
+        RecoveryOutcome::Disabled => {
+            println!();
+            println!("Recovery is OFF (--no-recovery-code). If you lose every device this");
+            println!("account cannot be recovered. Enable it later with:");
+            println!("  pergamon sync-device recovery-enable --generate-code");
+        }
+    }
+
+    println!();
     println!("Add another device with `pergamon sync-device invite` on this device,");
     println!("then `pergamon sync-device enroll` on the new one.");
     Ok(())
+}
+
+/// Which recovery secret [`publish_bootstrap_recovery`] wrapped the ARK under.
+enum RecoveryOutcome {
+    /// A freshly generated high-entropy recovery code (return it to print once).
+    Code(String),
+    /// The user-supplied `PERGAMON_RECOVERY_PASSPHRASE`.
+    Passphrase,
+    /// Recovery was skipped (`--no-recovery-code`).
+    Disabled,
+}
+
+/// Wrap and upload a recovery copy of the ARK during bootstrap, choosing the
+/// secret by policy: skip when `no_recovery_code`, otherwise use
+/// `PERGAMON_RECOVERY_PASSPHRASE` when set, else mint a strong recovery code.
+fn publish_bootstrap_recovery(
+    relay: &pergamon_sync::HttpRelay,
+    account_id: &pergamon_crypto::hierarchy::AccountId,
+    ark: &pergamon_crypto::hierarchy::AccountRootKey,
+    no_recovery_code: bool,
+) -> Result<RecoveryOutcome> {
+    if no_recovery_code {
+        return Ok(RecoveryOutcome::Disabled);
+    }
+    if let Ok(pass) = std::env::var("PERGAMON_RECOVERY_PASSPHRASE")
+        && !pass.is_empty()
+    {
+        pergamon_sync::onboarding::recovery_publish(relay, account_id, ark, pass.as_bytes())
+            .context("uploading recovery blob")?;
+        return Ok(RecoveryOutcome::Passphrase);
+    }
+    let code =
+        pergamon_crypto::recovery::generate_recovery_code().context("generating recovery code")?;
+    pergamon_sync::onboarding::recovery_publish(relay, account_id, ark, code.as_bytes())
+        .context("uploading recovery blob")?;
+    Ok(RecoveryOutcome::Code(code))
+}
+
+/// Print a freshly minted recovery code in a copyable block.
+fn print_recovery_code(code: &str) {
+    println!("Recovery code (write this down and store it safely):");
+    println!();
+    println!("    {code}");
+    println!();
+}
+
+/// Print the blunt, 1Password-style warning shown with every recovery secret.
+fn print_recovery_warning() {
+    println!("This recovery secret is the ONLY way to get back into this account if");
+    println!("you lose every device. kafkade and the sync server CANNOT recover it for");
+    println!("you — the server only ever holds ciphertext. Store it offline, somewhere");
+    println!("safe. Anyone who has it can decrypt everything in this account.");
 }
 
 /// Existing device: print an invite blob for a new device to enroll with.
@@ -7013,10 +7164,7 @@ fn sync_device_recovery_enable(
     let secret = if generate_code {
         let code = pergamon_crypto::recovery::generate_recovery_code()
             .context("generating recovery code")?;
-        println!("Recovery code (write this down and store it safely):");
-        println!();
-        println!("    {code}");
-        println!();
+        print_recovery_code(&code);
         code
     } else {
         std::env::var("PERGAMON_RECOVERY_PASSPHRASE").map_err(|_| {
@@ -7032,9 +7180,7 @@ fn sync_device_recovery_enable(
 
     println!("Recovery enabled for account {}.", account_id.to_hex());
     println!();
-    println!("Warning: anyone who learns this secret can recover the account key and");
-    println!("decrypt everything. It is only as strong as the secret you chose — treat");
-    println!("it like a master password.");
+    print_recovery_warning();
     Ok(())
 }
 
