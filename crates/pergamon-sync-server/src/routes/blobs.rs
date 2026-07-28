@@ -38,10 +38,13 @@ pub async fn probe(
     if let Some(Extension(auth)) = maybe_auth {
         authorize_account(&auth, &req.account_id, "POST", "/v1/blobs/probe")?;
     }
-    let (present, missing) = {
-        let store = state.lock_store()?;
-        store.blob_probe(&req.account_id, &req.ct_hashes)?
-    };
+    let account_id = req.account_id.clone();
+    let hashes = req.ct_hashes.clone();
+    let (present, missing) = state
+        .with_tenant_store(&req.account_id, move |store| {
+            store.blob_probe(&account_id, &hashes)
+        })
+        .await?;
     Ok(Json(BlobProbeResponse { present, missing }))
 }
 
@@ -58,10 +61,12 @@ pub async fn put(
     Path((account_id, ct_hash)): Path<(String, String)>,
     body: Bytes,
 ) -> Result<StatusCode, ApiError> {
-    {
-        let store = state.lock_store()?;
-        store.blob_put(&account_id, &ct_hash, &body)?;
-    }
+    let tenant = account_id.clone();
+    state
+        .with_tenant_store(&tenant, move |store| {
+            store.blob_put(&account_id, &ct_hash, &body)
+        })
+        .await?;
     Ok(StatusCode::CREATED)
 }
 
@@ -76,10 +81,11 @@ pub async fn get(
     State(state): State<AppState>,
     Path((account_id, ct_hash)): Path<(String, String)>,
 ) -> Result<Response, ApiError> {
-    let bytes = {
-        let store = state.lock_store()?;
-        store.blob_get(&account_id, &ct_hash)?
-    };
+    let tenant = account_id.clone();
+    let hash = ct_hash.clone();
+    let bytes = state
+        .with_tenant_store(&tenant, move |store| store.blob_get(&account_id, &hash))
+        .await?;
     bytes.map_or_else(
         || {
             Err(ApiError::not_found(format!(

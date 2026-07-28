@@ -170,6 +170,7 @@ Use conventional commits: `feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `chore
 - `pergamon sync-remote` CLI: `enable/push/pull/sync/status/conflicts` for opt-in, client-initiated sync; `pergamon device-key` CLI: `init/show` device keypair management via OS keychain or encrypted key file (#125, #126)
 - `pergamon sync-device` CLI: multi-device onboarding, account bootstrap, and key management (#128) — `bootstrap`, `invite`, `enroll`, `approve`/`accept` (SAS-verified handoff), `devices`, `revoke` (epoch rotation + re-wrap), and `recovery-enable`/`recover`. Client-side flows live in `pergamon-sync::onboarding`; canonical `to_bytes`/`from_bytes` wire encodings for signed device records and attestations round-trip the full signed artifacts through the blind relay
 - Background sync scheduling for web and iOS (ADR-025, epic #35, #129): pure `pergamon-sync::schedule` core (`BackoffPolicy` exp+jitter, `SyncScheduler` state machine) plus a blocking `run_forever` driver (injectable `Sleeper`, `SyncControl` trigger/shutdown, deterministic `Jitter`) and `SyncError::is_retryable()` offline classification; shared Apache-2.0 `pergamon-keystore` crate (encrypted-file + optional `keyring` feature) extracted from the CLI so the AGPL server can unlock keys. Drivers: CLI `sync-remote daemon`; `pergamon-server` background worker (own WAL connection, `--sync-key-file`/`PERGAMON_SYNC_KEY_PASSPHRASE`/`--sync-interval`, `POST /admin/sync-remote/trigger`, server-mutation change-tracking); iOS `Library::configure_sync` + `background_refresh() -> BackgroundRefreshResult` single-shot with backoff hint (`pergamon-uniffi`)
+- Sync-server concurrency and scaling (WP-3e, #201, ADR-031): the AGPL relay no longer serializes every request behind one mutexed SQLite connection. `SyncStore` runs the database in **WAL mode** (`synchronous = NORMAL`, `busy_timeout = 5000`) behind one writer connection plus a bounded reader pool (`src/pool.rs`, hand-rolled, no new deps; readers get `query_only = ON`). Handlers reach the store only through `AppState::with_store` / `with_tenant_store`, which run blocking work on `tokio::task::spawn_blocking`. A per-`account_id` in-flight cap (`src/fairness.rs`, default `read_pool_size - 1`, map pruned at zero) closes the per-tenant fairness gap WP-4 (#195) deferred here. Knobs: `--read-pool-size`/`PERGAMON_READ_POOL_SIZE`, `--store-checkout-timeout-ms`, `--max-tenant-concurrency`, `--no-tenant-concurrency-limit`. **Honest ceiling: SQLite allows one writer at a time even in WAL, so this is a read-path win** — measured 3.38x (store level) / 1.93x (HTTP) with writes flat at 1.01x. Saturation surfaces as a retryable `503`, and `open_in_memory()` deliberately stays a single connection (a `:memory:` pool would give each connection its own empty database). **ADR-026 was amended**: WAL creates `-wal`/`-shm` sidecars, so a hot copy of `pergamon-sync.db` alone is no longer a complete backup
 
 ### What's NOT yet implemented
 
@@ -193,14 +194,14 @@ Use conventional commits: `feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `chore
 - `crates/pergamon-crypto/` — Apache-2.0 client E2EE library: ADR-024 key hierarchy, device keys, sealed enrollment bundles, SAS, attestations, epoch rotation, recovery (zero I/O)
 - `crates/pergamon-keystore/` — Apache-2.0 shared key store: encrypted-file (Argon2id) backend plus an optional `keyring` (OS keychain) feature; unlocks the account root key for the CLI and the AGPL server
 - `crates/pergamon-sync/` — Apache-2.0 client sync engine: wire protocol, conflict resolution, `Transport`/`RelayTransport` (in-memory + `HttpRelay`), the `onboarding` orchestration module, and the `schedule`/`daemon` background-sync scheduler (`BackoffPolicy`, `SyncScheduler`, `run_forever`, `SyncControl`)
-- `crates/pergamon-sync-server/` — AGPL-3.0 blind relay: stores ciphertext + opaque onboarding artifacts only
+- `crates/pergamon-sync-server/` — AGPL-3.0 blind relay: stores ciphertext + opaque onboarding artifacts only. WAL + writer/reader-pool concurrency (`pool.rs`), per-tenant fairness cap (`fairness.rs`), `spawn_blocking` store access (`state.rs`) — ADR-031
 - `crates/pergamon-server/` — AGPL-3.0 Axum web server; background sync worker in `sync_worker.rs` and server-mutation change-tracking in `sync_tracking.rs`
 - `crates/pergamon-uniffi/` — UniFFI facade for Apple clients; `configure_sync` + `background_refresh` drive iOS background sync
 
 **Documentation:**
 
 - docs/roadmap.md — full product roadmap (20 sections)
-- docs/adr/ — Architecture Decision Records (ADR-001–010, 016–027)
+- docs/adr/ — Architecture Decision Records (ADR-001–010, 016–031)
 
 ## Reference Documents
 

@@ -21,10 +21,14 @@ pub struct HealthResponse {
 
 /// Health check endpoint (`GET /health`).
 ///
-/// Returns HTTP 200 when the store lock is acquirable, or HTTP 503 if it is
-/// poisoned.
+/// Returns HTTP 200 when the store is healthy, or HTTP 503 if the store's writer
+/// lock has been poisoned by a panic.
+///
+/// It deliberately does **not** probe the reader pool (WP-3e, #201): a saturated
+/// pool is transient load, and failing the container health check under load
+/// would make an orchestrator restart a perfectly working server.
 pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
-    let (code, status) = if state.store.lock().is_ok() {
+    let (code, status) = if state.store.is_healthy() {
         (StatusCode::OK, "ok")
     } else {
         (StatusCode::SERVICE_UNAVAILABLE, "error")

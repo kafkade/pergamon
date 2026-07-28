@@ -91,8 +91,12 @@ pub async fn push(
     }
 
     let outcome = {
-        let mut store = state.lock_store()?;
-        store.push_events(&req.account_id, &records)?
+        let account_id = req.account_id.clone();
+        state
+            .with_tenant_store(&req.account_id, move |store| {
+                store.push_events(&account_id, &records)
+            })
+            .await?
     };
 
     let results = outcome
@@ -136,11 +140,17 @@ pub async fn pull(
     let limit = query.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
 
     let (records, high_water_seq) = {
-        let store = state.lock_store()?;
-        let records = store.pull_events(&query.account_id, query.after, limit)?;
-        let high_water = store.high_water(&query.account_id)?;
-        drop(store);
-        (records, high_water)
+        let account_id = query.account_id.clone();
+        let after = query.after;
+        // One closure is one connection checkout, and `pull_page` runs both
+        // statements inside a single read transaction — so the page and the
+        // high-water mark come from one consistent snapshot, as they did under
+        // the pre-WP-3e global store mutex.
+        state
+            .with_tenant_store(&query.account_id, move |store| {
+                store.pull_page(&account_id, after, limit)
+            })
+            .await?
     };
 
     let mut next_cursor = query.after;
