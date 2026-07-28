@@ -25,6 +25,8 @@
 //! - `GET  /v1/blobs/{account_id}/{ct_hash}` — download an opaque blob.
 //! - `POST /v1/events` — push a batch of encrypted event envelopes.
 //! - `GET  /v1/events` — pull events with `server_seq > cursor`, ascending.
+//! - `GET  /v1/usage/{account_id}` — per-tenant ciphertext usage + quota status
+//!   for billing/metrics (WP-3d, #198); tenant isolated in multi-tenant mode.
 //!
 //! ## Onboarding-artifact relay (ADR-024)
 //! Opaque stores for the E2EE onboarding artifacts; the server relays these
@@ -41,6 +43,7 @@ pub mod abuse;
 pub mod auth;
 pub mod envelope;
 pub mod error;
+pub mod quota;
 pub mod routes;
 pub mod state;
 pub mod store;
@@ -51,6 +54,7 @@ use tower_http::compression::CompressionLayer;
 use tower_http::trace::TraceLayer;
 
 pub use abuse::{AbuseConfig, apply_abuse_controls};
+pub use quota::{QuotaConfig, QuotaLimit};
 pub use state::AppState;
 pub use store::{SyncStore, ct_hash};
 

@@ -6,6 +6,7 @@ pub mod blobs;
 pub mod events;
 pub mod health;
 pub mod relay;
+pub mod usage;
 
 use axum::Router;
 use axum::routing::{get, post, put};
@@ -46,6 +47,9 @@ pub fn router(state: AppState) -> Router {
             "/v1/recovery/{account_id}",
             put(relay::recovery_put).get(relay::recovery_get),
         )
+        // Per-tenant usage/metrics for billing (WP-3d, #198). Path-scoped by
+        // `{account_id}`, so the multi-tenant auth middleware gates it.
+        .route("/v1/usage/{account_id}", get(usage::get))
         .with_state(state)
 }
 
@@ -112,6 +116,10 @@ pub fn hardened_router(state: AppState, abuse: &AbuseConfig) -> Router {
             "/v1/recovery/{account_id}",
             put(relay::recovery_put).get(relay::recovery_get),
         )
+        // Per-tenant usage/metrics for billing (WP-3d, #198). A cheap read, so it
+        // stays off the strict tier (like the probe/relay reads) and carries the
+        // default body cap.
+        .route("/v1/usage/{account_id}", get(usage::get))
         .layer(body_limit_layer(abuse.max_body_bytes))
         .with_state(state);
 
