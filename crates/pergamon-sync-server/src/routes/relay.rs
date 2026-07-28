@@ -47,10 +47,12 @@ pub async fn device_put(
     Json(req): Json<DeviceRecordInput>,
 ) -> Result<StatusCode, ApiError> {
     let bytes = decode_b64("record_b64", &req.record_b64)?;
-    {
-        let store = state.lock_store()?;
-        store.device_record_put(&account_id, &device_id, &bytes)?;
-    }
+    let tenant = account_id.clone();
+    state
+        .with_tenant_store(&tenant, move |store| {
+            store.device_record_put(&account_id, &device_id, &bytes)
+        })
+        .await?;
     Ok(StatusCode::CREATED)
 }
 
@@ -63,10 +65,13 @@ pub async fn device_get(
     State(state): State<AppState>,
     Path((account_id, device_id)): Path<(String, String)>,
 ) -> Result<Json<DeviceRecordEntry>, ApiError> {
-    let bytes = {
-        let store = state.lock_store()?;
-        store.device_record_get(&account_id, &device_id)?
-    };
+    let tenant = account_id.clone();
+    let device = device_id.clone();
+    let bytes = state
+        .with_tenant_store(&tenant, move |store| {
+            store.device_record_get(&account_id, &device)
+        })
+        .await?;
     match bytes {
         Some(bytes) => Ok(Json(DeviceRecordEntry {
             device_id,
@@ -86,10 +91,10 @@ pub async fn devices_list(
     State(state): State<AppState>,
     Path(account_id): Path<String>,
 ) -> Result<Json<DeviceRecordsResponse>, ApiError> {
-    let rows = {
-        let store = state.lock_store()?;
-        store.device_records_list(&account_id)?
-    };
+    let tenant = account_id.clone();
+    let rows = state
+        .with_tenant_store(&tenant, move |store| store.device_records_list(&account_id))
+        .await?;
     let devices = rows
         .into_iter()
         .map(|r| DeviceRecordEntry {
@@ -111,10 +116,12 @@ pub async fn wrap_put(
     Json(req): Json<WrappedBundleInput>,
 ) -> Result<Json<WrappedBundleAck>, ApiError> {
     let bytes = decode_b64("bundle_b64", &req.bundle_b64)?;
-    let result = {
-        let mut store = state.lock_store()?;
-        store.wrapped_bundle_put(&account_id, &device_id, &bytes)?
-    };
+    let tenant = account_id.clone();
+    let result = state
+        .with_tenant_store(&tenant, move |store| {
+            store.wrapped_bundle_put(&account_id, &device_id, &bytes)
+        })
+        .await?;
     Ok(Json(WrappedBundleAck {
         seq: result.seq,
         deduplicated: result.deduplicated,
@@ -132,10 +139,13 @@ pub async fn wraps_list(
     Query(query): Query<RelayListQuery>,
 ) -> Result<Json<WrappedBundlesResponse>, ApiError> {
     let limit = query.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
-    let rows = {
-        let store = state.lock_store()?;
-        store.wrapped_bundles_list(&account_id, &device_id, query.after, limit)?
-    };
+    let tenant = account_id.clone();
+    let after = query.after;
+    let rows = state
+        .with_tenant_store(&tenant, move |store| {
+            store.wrapped_bundles_list(&account_id, &device_id, after, limit)
+        })
+        .await?;
     let mut next_cursor = query.after;
     let mut bundles = Vec::with_capacity(rows.len());
     for r in rows {
@@ -162,10 +172,12 @@ pub async fn attestation_append(
     Json(req): Json<AttestationInput>,
 ) -> Result<Json<AttestationAck>, ApiError> {
     let bytes = decode_b64("attestation_b64", &req.attestation_b64)?;
-    let result = {
-        let mut store = state.lock_store()?;
-        store.attestation_append(&account_id, &bytes)?
-    };
+    let tenant = account_id.clone();
+    let result = state
+        .with_tenant_store(&tenant, move |store| {
+            store.attestation_append(&account_id, &bytes)
+        })
+        .await?;
     Ok(Json(AttestationAck {
         seq: result.seq,
         deduplicated: result.deduplicated,
@@ -183,10 +195,13 @@ pub async fn attestations_list(
     Query(query): Query<RelayListQuery>,
 ) -> Result<Json<AttestationsResponse>, ApiError> {
     let limit = query.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
-    let rows = {
-        let store = state.lock_store()?;
-        store.attestations_list(&account_id, query.after, limit)?
-    };
+    let tenant = account_id.clone();
+    let after = query.after;
+    let rows = state
+        .with_tenant_store(&tenant, move |store| {
+            store.attestations_list(&account_id, after, limit)
+        })
+        .await?;
     let mut next_cursor = query.after;
     let mut attestations = Vec::with_capacity(rows.len());
     for r in rows {
@@ -213,10 +228,12 @@ pub async fn recovery_put(
     Json(req): Json<RecoveryBlobInput>,
 ) -> Result<StatusCode, ApiError> {
     let bytes = decode_b64("blob_b64", &req.blob_b64)?;
-    {
-        let store = state.lock_store()?;
-        store.recovery_blob_put(&account_id, &bytes)?;
-    }
+    let tenant = account_id.clone();
+    state
+        .with_tenant_store(&tenant, move |store| {
+            store.recovery_blob_put(&account_id, &bytes)
+        })
+        .await?;
     Ok(StatusCode::CREATED)
 }
 
@@ -228,10 +245,10 @@ pub async fn recovery_get(
     State(state): State<AppState>,
     Path(account_id): Path<String>,
 ) -> Result<Json<RecoveryBlobResponse>, ApiError> {
-    let bytes = {
-        let store = state.lock_store()?;
-        store.recovery_blob_get(&account_id)?
-    };
+    let tenant = account_id.clone();
+    let bytes = state
+        .with_tenant_store(&tenant, move |store| store.recovery_blob_get(&account_id))
+        .await?;
     bytes.map_or_else(
         || Err(ApiError::not_found("no recovery blob for this account")),
         |bytes| {

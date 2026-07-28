@@ -41,8 +41,12 @@ pub async fn get(
     Path(account_id): Path<String>,
 ) -> Result<Json<UsageResponse>, ApiError> {
     let (usage, quota) = {
-        let store = state.lock_store()?;
-        (store.account_usage(&account_id)?, store.quota())
+        let account = account_id.clone();
+        state
+            .with_tenant_store(&account_id, move |store| {
+                Ok((store.account_usage(&account)?, store.quota()))
+            })
+            .await?
     };
 
     let total_bytes = usage.total_bytes();

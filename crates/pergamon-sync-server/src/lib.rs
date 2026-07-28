@@ -38,11 +38,21 @@
 //! - `POST/GET /v1/attestations/{account_id}` — signed trust/revocation
 //!   attestations, cursored.
 //! - `PUT/GET /v1/recovery/{account_id}` — the optional recovery blob.
+//!
+//! ## Concurrency (WP-3e, #201)
+//! The store is a WAL `SQLite` database behind **one writer connection and a
+//! bounded pool of reader connections** ([`pool`]), not a single process-wide
+//! mutex. Handlers run blocking store work on `tokio::task::spawn_blocking` via
+//! [`AppState`], and a per-`account_id` in-flight cap ([`fairness`]) keeps one
+//! heavy tenant from holding every pooled connection. `SQLite` still allows
+//! exactly one writer at a time; see ADR-031 for the full scaling story.
 
 pub mod abuse;
 pub mod auth;
 pub mod envelope;
 pub mod error;
+pub mod fairness;
+pub mod pool;
 pub mod quota;
 pub mod routes;
 pub mod state;
@@ -54,6 +64,8 @@ use tower_http::compression::CompressionLayer;
 use tower_http::trace::TraceLayer;
 
 pub use abuse::{AbuseConfig, apply_abuse_controls};
+pub use fairness::{FairnessConfig, TenantLimiter};
+pub use pool::{DEFAULT_CHECKOUT_TIMEOUT, DEFAULT_READ_POOL_SIZE, PoolConfig};
 pub use quota::{QuotaConfig, QuotaLimit};
 pub use state::AppState;
 pub use store::{SyncStore, ct_hash};

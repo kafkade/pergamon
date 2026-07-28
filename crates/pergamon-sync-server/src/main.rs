@@ -12,8 +12,8 @@ use pergamon_sync_server::auth::store::AuthStore;
 use pergamon_sync_server::auth::throttle::ThrottleConfig;
 use pergamon_sync_server::auth::{AuthState, PergamonCipherSuite, ServerMode};
 use pergamon_sync_server::{
-    AbuseConfig, AppState, QuotaConfig, SyncStore, apply_abuse_controls, build_router_hardened,
-    build_router_multitenant_hardened,
+    AbuseConfig, AppState, FairnessConfig, PoolConfig, QuotaConfig, SyncStore,
+    apply_abuse_controls, build_router_hardened, build_router_multitenant_hardened,
 };
 use rand::rngs::OsRng;
 use tokio::net::TcpListener;
@@ -125,6 +125,47 @@ struct Args {
     /// default).
     #[arg(long, default_value_t = 0, env = "PERGAMON_MAX_ACCOUNT_OBJECTS")]
     max_account_objects: u64,
+
+    // --- Concurrency and per-tenant fairness (WP-3e, #201) --------------------
+    // The content store runs one writer connection plus a bounded pool of reader
+    // connections over a WAL database, so concurrent tenants no longer serialize
+    // behind a single lock. Defaults keep a single-tenant self-host sane.
+    /// Number of pooled `SQLite` reader connections.
+    ///
+    /// `SQLite` allows exactly one writer at a time even in WAL mode, so this
+    /// sizes the **read** concurrency only; writes always serialize.
+    #[arg(long, default_value_t = 8, env = "PERGAMON_READ_POOL_SIZE")]
+    read_pool_size: usize,
+
+    /// How long a request waits for a free reader connection (or a per-tenant
+    /// slot) before being shed with `503`, in milliseconds.
+    #[arg(
+        long,
+        default_value_t = 5000,
+        env = "PERGAMON_STORE_CHECKOUT_TIMEOUT_MS"
+    )]
+    store_checkout_timeout_ms: u64,
+
+    /// Maximum store operations a single account may have in flight, so one
+    /// heavy tenant cannot hold every pooled connection.
+    ///
+    /// `0` (the default) means "derive from the pool": `read-pool-size - 1`, so
+    /// a tenant can never take the last connection and another tenant always
+    /// gets in. Set an explicit value to tighten it, or use
+    /// `--no-tenant-concurrency-limit` to switch the cap off entirely.
+    #[arg(long, default_value_t = 0, env = "PERGAMON_MAX_TENANT_CONCURRENCY")]
+    max_tenant_concurrency: usize,
+
+    /// Disable the per-tenant concurrency cap entirely (WP-3e, #201).
+    ///
+    /// Every tenant may then use the whole reader pool, which is fine for a
+    /// single-account self-host and unwise for managed multi-tenant hosting.
+    #[arg(
+        long,
+        default_value_t = false,
+        env = "PERGAMON_NO_TENANT_CONCURRENCY_LIMIT"
+    )]
+    no_tenant_concurrency_limit: bool,
 
     /// Optional subcommand. When present, it runs and the server does not start.
     #[command(subcommand)]
@@ -264,6 +305,9 @@ async fn shutdown_signal() {
 }
 
 #[tokio::main]
+// Startup wiring: parse args, open the store, pick a router, bind. Splitting it
+// would scatter the configuration story across helpers for no benefit.
+#[allow(clippy::too_many_lines)]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -295,10 +339,38 @@ async fn main() -> Result<()> {
         );
     }
 
-    let store = SyncStore::open(&db_path)
+    // WP-3e (#201) concurrency: WAL + one writer connection + a bounded reader
+    // pool, replacing the single process-wide store mutex.
+    let checkout_timeout = std::time::Duration::from_millis(args.store_checkout_timeout_ms);
+    let pool = PoolConfig {
+        size: args.read_pool_size,
+        checkout_timeout,
+    };
+
+    let store = SyncStore::open_with_pool(&db_path, pool)
         .with_context(|| format!("failed to open sync store at {}", db_path.display()))?
         .with_quota(quota);
-    let state = AppState::new(store);
+
+    let fairness = if args.no_tenant_concurrency_limit {
+        FairnessConfig::disabled()
+    } else if args.max_tenant_concurrency > 0 {
+        FairnessConfig {
+            max_tenant_concurrency: args.max_tenant_concurrency,
+            wait_timeout: checkout_timeout,
+        }
+    } else {
+        FairnessConfig::for_pool(store.read_pool_size(), checkout_timeout)
+    };
+    tracing::info!(
+        journal_mode = %store.journal_mode().unwrap_or_else(|_| "unknown".to_owned()),
+        read_pool_size = store.read_pool_size(),
+        checkout_timeout_ms = args.store_checkout_timeout_ms,
+        max_tenant_concurrency = fairness.max_tenant_concurrency,
+        "store concurrency configured (0 tenant concurrency = no per-tenant cap; \
+         SQLite allows one writer at a time regardless of pool size)"
+    );
+
+    let state = AppState::with_fairness(store, fairness);
 
     let mode = ServerMode::from_env_value(&args.mode).unwrap_or_else(|| {
         tracing::warn!(mode = %args.mode, "unknown PERGAMON_SYNC_MODE; defaulting to blind");

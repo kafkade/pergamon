@@ -35,12 +35,19 @@
 //! The global concurrency + load-shed layer caps total in-flight work, so one
 //! IP/tenant flooding uploads cannot drive unbounded queueing/OOM — excess is
 //! shed cleanly with `503`. Combined with per-IP rate limiting, a single source
-//! is bounded. It does **not** provide per-tenant *fairness*: the content store
-//! is a single `Arc<Mutex<SyncStore>>` over one `SQLite` database
-//! ([`crate::state::AppState`]), so a flood still contends on that lock. True
-//! per-tenant fairness/quotas is tracked as WP-3e ([#201]) and is an explicit
-//! seam here — this module bounds aggregate load and per-IP rate; it does not
-//! partition capacity per tenant.
+//! is bounded. It does **not** by itself provide per-tenant *fairness*: it
+//! counts requests, not tenants.
+//!
+//! That gap is now closed one layer down. WP-3e ([#201]) replaced the single
+//! `Arc<Mutex<SyncStore>>` this module originally called out with a WAL database
+//! behind one writer connection and a bounded reader pool
+//! ([`crate::pool`]), and added a per-`account_id` in-flight cap
+//! ([`crate::fairness`]) so one heavy tenant cannot hold every pooled
+//! connection. The division of labour is: **this** module bounds aggregate load
+//! and per-IP rate; [`crate::fairness`] bounds per-tenant concurrency;
+//! [`crate::quota`] bounds per-tenant storage. None of them makes `SQLite` accept
+//! more than one writer at a time — see ADR-031 for that ceiling.
+
 //!
 //! ## Reusable strict tier
 //! [`apply_strict_rate_limit`] is a public, composable hook intended for
@@ -128,7 +135,7 @@ impl Default for AbuseConfig {
             max_body_bytes: 16 * MIB,
             // Opaque blobs (article snapshots, PDFs) are the largest legit body.
             upload_max_bytes: 64 * MIB,
-            // Fast, mutex-guarded SQLite ops; ample headroom for a self-host.
+            // Pooled, WAL-backed SQLite ops; ample headroom for a self-host.
             max_concurrency: 256,
             // Secure default: key on the socket peer IP (no header spoofing).
             trust_proxy_headers: false,

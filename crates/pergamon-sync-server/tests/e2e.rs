@@ -42,6 +42,33 @@ impl TempDb {
             std::env::temp_dir().join(format!("pergamon-sync-test-{}.db", uuid::Uuid::new_v4()));
         Self { path }
     }
+
+    /// Every byte the server has persisted: the main database **plus** the WAL
+    /// sidecar.
+    ///
+    /// Since WP-3e (#201) the store runs in WAL mode, so a just-committed row
+    /// lives in `<db>-wal` until a checkpoint folds it into the main file.
+    /// Reading only the main file would silently weaken the content-blindness
+    /// assertions this suite exists for (#124) — the "no plaintext" checks would
+    /// pass against bytes the server had not written there yet.
+    fn all_bytes(&self) -> Vec<u8> {
+        let mut bytes = std::fs::read(&self.path).unwrap();
+        // DO NOT "simplify" this back to reading only the main file. Since
+        // WP-3e (#201) the store runs in WAL mode, so a just-committed row lives
+        // in `<db>-wal` until a checkpoint folds it into the main file. Reading
+        // only the main file would make the "no plaintext" assertions pass
+        // against bytes the server had not written there yet — i.e. it would
+        // silently gut the content-blindness guarantee this suite exists for.
+        // Both the negative assertions (no plaintext anywhere) and the positive
+        // one (ciphertext present) must run against ALL persisted bytes.
+        for suffix in ["-wal", "-shm"] {
+            let sidecar = format!("{}{suffix}", self.path.display());
+            if let Ok(mut extra) = std::fs::read(sidecar) {
+                bytes.append(&mut extra);
+            }
+        }
+        bytes
+    }
 }
 
 impl Drop for TempDb {
@@ -129,7 +156,7 @@ async fn server_stores_ciphertext_only_and_round_trips() {
     assert_eq!(push_resp["results"][0]["deduplicated"], false);
 
     // 3. The plaintext must not exist anywhere in the server's database file.
-    let db_bytes = std::fs::read(&tmp.path).unwrap();
+    let db_bytes = tmp.all_bytes();
     assert!(
         !contains(&db_bytes, blob_plain.as_bytes()),
         "blob plaintext leaked into the server database"
