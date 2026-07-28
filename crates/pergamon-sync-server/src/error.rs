@@ -124,6 +124,19 @@ impl ApiError {
         }
     }
 
+    /// 507 Insufficient Storage — the caller's write would exceed the account's
+    /// configured storage quota (WP-3d, #198). The message names which limit
+    /// (bytes or object count) was hit; the code is a stable `QUOTA_EXCEEDED`.
+    /// Reads stay allowed while over quota so a tenant can export/delete to
+    /// recover.
+    pub fn insufficient_storage(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::INSUFFICIENT_STORAGE,
+            message: message.into(),
+            code: "QUOTA_EXCEEDED",
+        }
+    }
+
     /// 500 Internal Server Error.
     pub fn internal(message: impl Into<String>) -> Self {
         Self {
@@ -139,6 +152,7 @@ impl From<StoreError> for ApiError {
         match err {
             StoreError::BlobHashMismatch { .. } => Self::bad_request(err.to_string()),
             StoreError::MissingBlob { .. } => Self::conflict(err.to_string()),
+            StoreError::QuotaExceeded { .. } => Self::insufficient_storage(err.to_string()),
             StoreError::Db(e) => {
                 tracing::error!(error = %e, "store database error");
                 Self::internal("internal storage error")

@@ -12,7 +12,7 @@ use pergamon_sync_server::auth::store::AuthStore;
 use pergamon_sync_server::auth::throttle::ThrottleConfig;
 use pergamon_sync_server::auth::{AuthState, PergamonCipherSuite, ServerMode};
 use pergamon_sync_server::{
-    AbuseConfig, AppState, SyncStore, apply_abuse_controls, build_router_hardened,
+    AbuseConfig, AppState, QuotaConfig, SyncStore, apply_abuse_controls, build_router_hardened,
     build_router_multitenant_hardened,
 };
 use rand::rngs::OsRng;
@@ -108,6 +108,23 @@ struct Args {
     /// behind a trusted proxy (ADR-026) — otherwise callers can spoof their IP.
     #[arg(long, default_value_t = false, env = "PERGAMON_TRUST_PROXY_HEADERS")]
     trust_proxy_headers: bool,
+
+    // --- Per-tenant storage quotas (WP-3d, #198) ------------------------------
+    // Opt-in: `0` means unlimited, so the default is byte-for-byte unchanged for
+    // blind self-hosts and existing multi-tenant deployments. Measured on
+    // ciphertext size + object counts only (content-blind). See
+    // `pergamon_sync_server::quota`.
+    /// Maximum total ciphertext bytes (blobs + event payloads) a single account
+    /// may store before writes are refused with `507 QUOTA_EXCEEDED`. `0` =
+    /// unlimited (the default).
+    #[arg(long, default_value_t = 0, env = "PERGAMON_MAX_ACCOUNT_BYTES")]
+    max_account_bytes: u64,
+
+    /// Maximum total stored objects (blobs + events) a single account may hold
+    /// before writes are refused with `507 QUOTA_EXCEEDED`. `0` = unlimited (the
+    /// default).
+    #[arg(long, default_value_t = 0, env = "PERGAMON_MAX_ACCOUNT_OBJECTS")]
+    max_account_objects: u64,
 
     /// Optional subcommand. When present, it runs and the server does not start.
     #[command(subcommand)]
@@ -264,8 +281,23 @@ async fn main() -> Result<()> {
     let db_path = args.db_path.unwrap_or_else(default_db_path);
     tracing::info!(path = %db_path.display(), "opening sync store");
 
+    // WP-3d (#198) per-tenant storage quota. `0` = unlimited (the default), so a
+    // store built without an explicit cap is behavior-identical to before.
+    let quota = QuotaConfig {
+        max_account_bytes: args.max_account_bytes,
+        max_account_objects: args.max_account_objects,
+    };
+    if !quota.is_unlimited() {
+        tracing::info!(
+            max_account_bytes = quota.max_account_bytes,
+            max_account_objects = quota.max_account_objects,
+            "per-tenant storage quota enabled (0 = unlimited)"
+        );
+    }
+
     let store = SyncStore::open(&db_path)
-        .with_context(|| format!("failed to open sync store at {}", db_path.display()))?;
+        .with_context(|| format!("failed to open sync store at {}", db_path.display()))?
+        .with_quota(quota);
     let state = AppState::new(store);
 
     let mode = ServerMode::from_env_value(&args.mode).unwrap_or_else(|| {
