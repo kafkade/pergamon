@@ -37,6 +37,32 @@ impl TempDb {
         ));
         Self { path }
     }
+
+    /// Every byte the server has persisted: the main database **plus** the WAL
+    /// sidecar.
+    ///
+    /// Since WP-3e (#201) the store runs in WAL mode, so a just-committed row
+    /// lives in `<db>-wal` until a checkpoint folds it into the main file.
+    /// Reading only the main file would silently weaken the content-blindness
+    /// assertion below.
+    fn all_bytes(&self) -> Vec<u8> {
+        let mut bytes = std::fs::read(&self.path).unwrap();
+        // DO NOT "simplify" this back to reading only the main file. Since
+        // WP-3e (#201) the store runs in WAL mode, so a just-committed row lives
+        // in `<db>-wal` until a checkpoint folds it into the main file. Reading
+        // only the main file would make the "no plaintext" assertions pass
+        // against bytes the server had not written there yet — i.e. it would
+        // silently gut the content-blindness guarantee this suite exists for.
+        // Both the negative assertions (no plaintext anywhere) and the positive
+        // one (ciphertext present) must run against ALL persisted bytes.
+        for suffix in ["-wal", "-shm"] {
+            let sidecar = format!("{}{suffix}", self.path.display());
+            if let Ok(mut extra) = std::fs::read(sidecar) {
+                bytes.append(&mut extra);
+            }
+        }
+        bytes
+    }
 }
 
 impl Drop for TempDb {
@@ -149,7 +175,7 @@ async fn new_device_onboards_over_http() {
 
     // The server relayed only ciphertext: the ARK never hit its database.
     server.abort();
-    let db_bytes = std::fs::read(&tmp.path).unwrap();
+    let db_bytes = tmp.all_bytes();
     assert!(
         !contains(&db_bytes, ark.expose_bytes()),
         "the Account Root Key must never appear in the server database"

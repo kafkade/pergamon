@@ -43,6 +43,32 @@ const BACKOFF_MAX: Duration = Duration::from_secs(300);
 /// Backoff growth factor per consecutive failure.
 const BACKOFF_MULTIPLIER: f64 = 2.0;
 
+/// Read the sync transport credential from the environment (issue #183).
+///
+/// Mirrors the CLI's precedence so a server whose background worker syncs
+/// through an authenticating reverse proxy can supply the same credential:
+/// 1. `PERGAMON_SYNC_BEARER_TOKEN` (non-empty) → bearer token.
+/// 2. `PERGAMON_SYNC_BASIC_USER` + `PERGAMON_SYNC_BASIC_PASSWORD` → HTTP Basic.
+/// 3. otherwise `None` (unauthenticated).
+///
+/// The credential is read only from the environment and is never logged.
+fn sync_credential_from_env() -> Option<pergamon_sync::TransportCredential> {
+    if let Ok(token) = std::env::var("PERGAMON_SYNC_BEARER_TOKEN")
+        && !token.is_empty()
+    {
+        return Some(pergamon_sync::TransportCredential::Bearer { token });
+    }
+    match (
+        std::env::var("PERGAMON_SYNC_BASIC_USER"),
+        std::env::var("PERGAMON_SYNC_BASIC_PASSWORD"),
+    ) {
+        (Ok(username), Ok(password)) if !username.is_empty() => {
+            Some(pergamon_sync::TransportCredential::Basic { username, password })
+        }
+        _ => None,
+    }
+}
+
 /// Start the background sync worker, returning a control handle.
 ///
 /// # Errors
@@ -84,12 +110,29 @@ pub fn spawn(config: SyncWorkerConfig) -> Result<pergamon_sync::SyncControl> {
     let ark = store
         .load_ark(&account)?
         .ok_or_else(|| anyhow!("no account root key for '{account}' in the key file"))?;
+    let keys = store
+        .load_device_keys(&account)?
+        .ok_or_else(|| anyhow!("no device key for '{account}' in the key file"))?;
+    let signing_key = *keys.ed25519_signing();
 
-    let crypto = pergamon_sync::CryptoContext::new(ark, account_hex, device_id, state.key_epoch)
-        .context("building crypto context")?;
-    let transport = pergamon_sync::http::HttpTransport::new(server.clone())
-        .context("building HTTP transport")?;
-    let engine = pergamon_sync::SyncEngine::new(transport, crypto);
+    let crypto = pergamon_sync::CryptoContext::new(
+        ark,
+        account_hex,
+        device_id,
+        signing_key,
+        state.key_epoch,
+    )
+    .context("building crypto context")?;
+    let transport = pergamon_sync::http::HttpTransport::with_credential(
+        server.clone(),
+        sync_credential_from_env(),
+    )
+    .context("building HTTP transport")?;
+    // Verify pulled events against the account roster (ADR-030). Best-effort:
+    // an empty directory still lets push and single-device pull proceed, while
+    // an unknown multi-device signer surfaces as a retryable `UnknownSigner`.
+    let directory = load_device_directory(&store, &account, &server);
+    let engine = pergamon_sync::SyncEngine::new(transport, crypto, directory);
     let blobs = pergamon_sync::MemoryBlobStore::new();
 
     let interval = Duration::from_secs(interval_secs.max(1));
@@ -120,6 +163,34 @@ pub fn spawn(config: SyncWorkerConfig) -> Result<pergamon_sync::SyncControl> {
         "background sync worker started"
     );
     Ok(control)
+}
+
+/// Fetch the account roster over the relay and project it into a
+/// [`pergamon_sync::DeviceKeyDirectory`] for pulled-event signature verification
+/// (ADR-030). Returns an empty directory (logging a warning) on any failure, so
+/// push and single-device pull still run.
+fn load_device_directory(
+    store: &pergamon_keystore::DeviceKeyStore,
+    account: &str,
+    server: &str,
+) -> pergamon_sync::DeviceKeyDirectory {
+    let build = || -> Result<pergamon_sync::DeviceKeyDirectory> {
+        let account_id = store
+            .load_account_id(account)?
+            .ok_or_else(|| anyhow!("no account id for '{account}' in the key file"))?;
+        let relay = pergamon_sync::HttpRelay::with_credential(
+            server.to_owned(),
+            sync_credential_from_env(),
+        )
+        .context("building relay client")?;
+        let roster = pergamon_sync::onboarding::roster(&relay, &account_id)
+            .context("listing device roster")?;
+        Ok(pergamon_sync::DeviceKeyDirectory::from_roster(&roster))
+    };
+    build().unwrap_or_else(|e| {
+        tracing::warn!("could not load device roster for signature verification: {e:#}");
+        pergamon_sync::DeviceKeyDirectory::new()
+    })
 }
 
 /// Log the result of one background sync round.

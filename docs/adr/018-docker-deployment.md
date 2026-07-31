@@ -72,7 +72,7 @@ WAL mode creates two sidecar files (`pergamon.db-wal` and `pergamon.db-shm`) alo
 
 Backup implications:
 
-- **Application-level backup** (`export backup`) uses the SQLite backup API and produces a self-contained ZIP file. This is the recommended backup method while the container is running.
+- **Application-level backup** (`export backup`) reads a consistent snapshot of the library and produces a self-contained ZIP. This is the recommended backup method while the container is running. The archive is a **plaintext ZIP of JSON that excludes all key material** (account root key, device keys), so store it securely; pass `--encrypt` (`PERGAMON_BACKUP_PASSPHRASE`) for an at-rest-encrypted archive, and use `device-key export-package` to wrap the account root key for full recovery.
 - **Volume-level backup** (copying `/data`) requires stopping the container first to ensure WAL is checkpointed and sidecar files are consistent.
 - **Copying only `pergamon.db` while the container is running is unsafe.** The WAL file may contain uncommitted data.
 
@@ -174,11 +174,11 @@ Two backup strategies are supported:
 
 **Application-level backup (recommended while running):**
 
-The `pergamon` CLI binary is included in the Docker image alongside `pergamon-web`. This avoids duplicating backup/restore logic in the web binary.
+The `pergamon` CLI binary is included in the Docker image alongside `pergamon-web`. This avoids duplicating backup/restore logic in the web binary. The archive is a plaintext ZIP of JSON that excludes key material (see the WAL note above); use `export backup --encrypt` for an at-rest-encrypted archive and `device-key export-package` to wrap the account root key for full recovery.
 
 ```sh
-# Create a backup
-docker exec pergamon pergamon export backup /data/exports/backup.zip
+# Create a backup (use -o/--output for the destination)
+docker exec pergamon pergamon export backup --output /data/exports/backup.zip
 
 # Restore from backup (stop the web server first)
 docker compose stop

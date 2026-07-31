@@ -110,6 +110,10 @@ defaults: it binds `0.0.0.0:8787` and stores its database in `/data`.
 | `PERGAMON_SYNC_DATA_DIR` | — | current dir | `/data` | Directory for the database. |
 | `PERGAMON_SYNC_DB` | `--db-path` | `$PERGAMON_SYNC_DATA_DIR/pergamon-sync.db` | `/data/pergamon-sync.db` | Explicit database file path. Overrides `PERGAMON_SYNC_DATA_DIR` for the DB location. |
 | `RUST_LOG` | — | `info` | `info` | Log filter. Accepts `error`, `warn`, `info`, `debug`, `trace`, or per-target filters (e.g. `pergamon_sync_server=debug,info`). |
+| `PERGAMON_READ_POOL_SIZE` | `--read-pool-size` | `8` | `8` | Number of pooled SQLite **reader** connections. Sizes read concurrency only; writes always serialize (see [Concurrency and scaling](#concurrency-and-scaling)). |
+| `PERGAMON_STORE_CHECKOUT_TIMEOUT_MS` | `--store-checkout-timeout-ms` | `5000` | `5000` | How long a request waits for a free reader connection (or a per-tenant slot) before being shed with `503`. |
+| `PERGAMON_MAX_TENANT_CONCURRENCY` | `--max-tenant-concurrency` | `0` (derive) | `0` (derive) | Maximum store operations one account may have in flight. `0` derives it from the pool (`read-pool-size - 1`), so no single account can take the last connection. |
+| `PERGAMON_NO_TENANT_CONCURRENCY_LIMIT` | `--no-tenant-concurrency-limit` | `false` | `false` | Disable the per-account concurrency cap entirely. Reasonable for a single-account self-host; unwise for multi-tenant hosting. |
 
 Notes on defaults:
 
@@ -192,9 +196,9 @@ sync.example.com {
 
 Bring it up with
 `docker compose -f docker-compose.sync-server.yml up -d`; the certificate is
-issued on first request. Clients then use
-`--server https://youruser:your-password@sync.example.com` (or configure the
-credential however your client supports Basic auth).
+issued on first request. Clients then point at
+`https://sync.example.com` and supply the reverse-proxy credential through the
+environment (see [Connecting a client](#connecting-a-client) below).
 
 ### nginx (manual certificate)
 
@@ -243,11 +247,28 @@ internal Compose network only (no host `ports:` mapping) and set
 
 ## Connecting a client
 
-Once the server is reachable over HTTPS, point pergamon at it. On the **first**
-device for an account, bootstrap the account, then sync:
+Once the server is reachable over HTTPS, point pergamon at it. Sync is opt-in and
+client-initiated — a fresh, local-only install needs **no account and no key
+ceremony**; you only create an account when you decide to sync. Onboarding is
+split into **three explicit flows** so a device with existing data can't
+silently make a duplicate account (ADR-029):
+
+- **Create a new account** (first device) — `sync-device bootstrap`. Mints the
+  account key, publishes this device, binds it to the server, and surfaces a
+  **recovery code you must save**.
+- **Attach an existing local account to a server** — `sync-remote enable`. Binds
+  a local account you already have to a server. No new account key is created;
+  it is a transport change only.
+- **Join an existing account on a new device** — `sync-device enroll` +
+  `accept` (SAS from a trusted device), or `sync-device recover` (recovery
+  code). The new device receives the *existing* account key and never invents
+  its own.
+
+On the **first** device, create the account, then sync:
 
 ```sh
-# First device: create the account and publish this device's identity.
+# First device: CREATE a new account and publish this device's identity.
+# Prints a recovery code — write it down and store it offline.
 pergamon sync-device bootstrap --server https://sync.example.com --account default
 
 # Link the local database to that account + server and do the first round.
@@ -255,14 +276,59 @@ pergamon sync-remote enable --server https://sync.example.com --account default
 pergamon sync-remote sync
 ```
 
+If this device already has a local library (you used pergamon offline first),
+`bootstrap` refuses unless you confirm with `--create-new-account`, so you don't
+accidentally fork your data into a second account instead of joining the one you
+already have elsewhere. A device that already belongs to an account is refused
+outright — join with `enroll`/`recover` instead.
+
+> **Save your recovery code.** `bootstrap` prints a high-entropy recovery code by
+> default. It is the **only** way back into the account if you lose every
+> device: **kafkade and the sync server cannot recover it for you** — the server
+> only ever holds ciphertext. Store it offline. To create an account *without* a
+> recovery code, pass `--no-recovery-code` (recovery stays off until you run
+> `sync-device recovery-enable`); if you then lose every device, the account is
+> unrecoverable. Set `PERGAMON_RECOVERY_PASSPHRASE` before `bootstrap` to wrap
+> recovery under your own passphrase instead of a generated code.
+
 Additional devices join through the onboarding flow (`sync-device invite` /
 `enroll` / `approve` / `accept`, or `recovery-enable` / `recover`). See the
-`pergamon sync-device --help` output and
-[ADR-024](adr/024-device-onboarding-and-key-lifecycle.md). The account key never
+`pergamon sync-device --help` output,
+[ADR-024](adr/024-device-onboarding-and-key-lifecycle.md), and
+[ADR-029](adr/029-server-auth-identity-and-join-flows.md). The account key never
 leaves your devices — the server only relays sealed artifacts.
 
-If your reverse proxy enforces Basic auth, embed the credentials in the server
-URL (`https://user:pass@sync.example.com`).
+### Authenticating through a reverse proxy
+
+If your reverse proxy enforces authentication (as the Caddy and nginx
+examples above do), give the client the credential through the **environment**
+rather than embedding it in the server URL. The client sends it as an
+`Authorization` header on every request, marks that header sensitive so it is
+never logged, and — unlike a URL-embedded credential — never writes it to the
+local sync state.
+
+For HTTP Basic auth, export the username and password before running any
+`pergamon sync-remote` or `pergamon sync-device` command:
+
+```sh
+export PERGAMON_SYNC_BASIC_USER=youruser
+export PERGAMON_SYNC_BASIC_PASSWORD=your-password
+pergamon sync-remote sync
+```
+
+For a bearer token instead, set `PERGAMON_SYNC_BEARER_TOKEN` (it takes
+precedence over the Basic-auth variables when both are set):
+
+```sh
+export PERGAMON_SYNC_BEARER_TOKEN=your-token
+pergamon sync-remote sync
+```
+
+The same variables also configure the `pergamon-server` background sync worker
+when it syncs through the proxy.
+
+Embedding the credential in the server URL still works as a last resort, but
+is discouraged: it can leak into shell history, process listings, and logs.
 
 ## Data persistence
 
@@ -270,13 +336,18 @@ All persistent state lives under `/data` inside the container:
 
 ```text
 /data/
-└── pergamon-sync.db     SQLite database (encrypted envelopes + opaque blobs)
+├── pergamon-sync.db        SQLite database (encrypted envelopes + opaque blobs)
+├── pergamon-sync.db-wal    write-ahead log  — part of the database
+└── pergamon-sync.db-shm    shared-memory index — part of the database
 ```
 
-The server holds a single connection to this database, so under normal operation
-there are no `-wal`/`-shm` sidecar files. The contents are **ciphertext and
-blinded identifiers only** — the database is useless to anyone without your
-account key.
+The server runs the database in **WAL mode** behind one writer connection and a
+pool of reader connections, so concurrent clients do not serialize behind a
+single lock (see [Concurrency and scaling](#concurrency-and-scaling)). The `-wal`
+and `-shm` files appear while the server is running and are removed on a clean
+shutdown — **all three files are part of the database**, so back them up
+together. The contents are **ciphertext and blinded identifiers only** — the
+database is useless to anyone without your account key.
 
 The Compose file mounts a named volume (`pergamon-sync-data`) at `/data`, so data
 survives `down`/`up`. The image deliberately does **not** declare a `VOLUME`
@@ -306,8 +377,15 @@ local copy — so a lost server database is recoverable by re-syncing from a
 device. Backing it up is still worthwhile to avoid a full re-upload.
 
 Because the store is ciphertext-only and there is no CLI in this image, backup is
-**volume-level** and requires stopping the container so the database file is
+**volume-level** and requires stopping the container so the database files are
 consistent:
+
+> **Back up the whole `/data` directory, not just `pergamon-sync.db`.** The
+> database runs in WAL mode, so recently committed data can live in the `-wal`
+> sidecar. Copying `pergamon-sync.db` on its own **while the server is running**
+> produces an incomplete and possibly unusable backup. The commands below are
+> safe because they stop the container first — a clean shutdown checkpoints the
+> WAL and removes the sidecars.
 
 ```sh
 docker compose -f docker-compose.sync-server.yml stop
@@ -331,6 +409,59 @@ docker run --rm \
   sh -c 'rm -f /data/* && tar xzf /backup/pergamon-sync-YYYY-MM-DD.tar.gz -C /data'
 docker compose -f docker-compose.sync-server.yml start
 ```
+
+## Concurrency and scaling
+
+The server runs its SQLite database in **WAL mode** behind **one writer
+connection and a pool of reader connections**. Concurrent clients — and, on a
+multi-tenant deployment, concurrent tenants — no longer serialize behind a single
+process-wide lock.
+
+**The honest ceiling: SQLite allows exactly one writer at a time, even in WAL
+mode.** Pooling makes *reads* concurrent (and lets reads proceed while a write is
+in flight). It does not give you concurrent writes, and no pool size will. If
+your workload is write-bound, raising `PERGAMON_READ_POOL_SIZE` will not help.
+
+Measured on a 14-core host with 8 concurrent tenants pulling event pages, versus
+the same code restricted to a single connection:
+
+| Path | Before | After | Ratio |
+|---|---|---|---|
+| Reads, measured at the store | 4,175 pulls/s | 14,096 pulls/s | **3.38×** |
+| Reads, end to end over HTTP | 4,224 req/s | 8,164 req/s | **1.93×** |
+| Writes, end to end over HTTP | 16,915 req/s | 17,100 req/s | 1.01× (flat, as expected) |
+
+Reproduce the numbers on your own hardware with:
+
+```sh
+cargo test -p pergamon-sync-server --release --test load_concurrency \
+  -- --ignored --nocapture
+```
+
+### Tuning
+
+- **`PERGAMON_READ_POOL_SIZE`** (default `8`). Raise it if you serve many
+  concurrent readers on a host with plenty of cores and page cache. Each
+  connection is an open file handle with its own page cache, so more is not free.
+- **`PERGAMON_STORE_CHECKOUT_TIMEOUT_MS`** (default `5000`). How long a request
+  waits for a connection before being shed with `503`. Lower it to fail fast
+  under overload; raise it to absorb longer bursts.
+- **`PERGAMON_MAX_TENANT_CONCURRENCY`** (default: derived as
+  `read-pool-size - 1`). Caps how many operations one account may have in flight,
+  so a single heavy tenant cannot hold every connection and stall everyone else.
+  This guarantees that another tenant always finds capacity; it is **not**
+  proportional fairness across many busy tenants, and it is not a rate limit
+  (that is what the per-IP limits do). A single-account self-host is effectively
+  unaffected by the default. Set `PERGAMON_NO_TENANT_CONCURRENCY_LIMIT=true` to
+  switch it off.
+
+### When you have outgrown this
+
+In rough order of cost: raise the pool size and the host spec; then shard tenants
+across separate databases or processes (the data model is strictly per-account,
+so this is clean, and unlike pooling it *does* multiply the write ceiling); then
+consider a database without the single-writer limit. See
+[ADR-031](adr/031-sync-server-concurrency-and-scaling.md) for the full analysis.
 
 ## Upgrading
 
@@ -405,8 +536,10 @@ same endpoint; no `curl`/`wget` is installed in the image.
 
 - Confirm the server is reachable from the client host over HTTPS (through your
   reverse proxy), not just on `localhost`.
-- If the proxy enforces Basic auth, make sure the client URL includes valid
-  credentials.
+- If the proxy enforces authentication, make sure the client has valid
+  credentials configured via `PERGAMON_SYNC_BASIC_USER` /
+  `PERGAMON_SYNC_BASIC_PASSWORD` (or `PERGAMON_SYNC_BEARER_TOKEN`); see
+  [Authenticating through a reverse proxy](#authenticating-through-a-reverse-proxy).
 - Check the proxy's `client_max_body_size` / upload limits if large blob pushes
   fail.
 

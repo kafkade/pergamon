@@ -14,6 +14,7 @@
 /// Version string of the pergamon-core library, matching the crate version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub mod account_flow;
 pub mod content_type;
 pub mod diagnostics;
 pub mod error;

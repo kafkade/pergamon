@@ -13,7 +13,7 @@ pub mod db;
 pub mod error;
 pub mod sync;
 
-pub use backup::{BackupManifest, BackupStats};
+pub use backup::{BackupManifest, BackupStats, is_encrypted_backup};
 pub use db::ContentItemFilter;
 pub use db::ContentItemSort;
 pub use db::Database;

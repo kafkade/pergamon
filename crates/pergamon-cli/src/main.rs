@@ -13,6 +13,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, Parser, Subcommand};
+use pergamon_core::account_flow::{CreateAccountBlock, LocalAccountState, guard_create_new};
 use pergamon_core::content_type::ContentType;
 use pergamon_core::diagnostics::{ExtractionEvent, ExtractionSource, ImportLogEntry, ImportSource};
 use pergamon_core::model::{
@@ -255,12 +256,45 @@ enum DeviceKeyAction {
         #[arg(long)]
         key_file: Option<PathBuf>,
     },
+    /// Export a passphrase-protected key package (wraps the Account Root Key).
+    ///
+    /// The package plus its passphrase (`PERGAMON_KEY_PACKAGE_PASSPHRASE`) is
+    /// enough to recover the account from a client alone. A `export backup`
+    /// archive does not contain this material.
+    ExportPackage {
+        /// Account handle whose ARK to wrap.
+        #[arg(long, default_value = "default")]
+        account: String,
+        /// Read keys from an encrypted key file instead of the OS keychain.
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+        /// Output file path for the key package.
+        #[arg(long, short)]
+        output: PathBuf,
+    },
+    /// Import a key package, restoring the Account Root Key into this device.
+    ///
+    /// Reads the passphrase from `PERGAMON_KEY_PACKAGE_PASSPHRASE`.
+    ImportPackage {
+        /// Account handle to store the recovered keys under.
+        #[arg(long, default_value = "default")]
+        account: String,
+        /// Write keys to an encrypted key file instead of the OS keychain.
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+        /// Path to the key package to import.
+        input: PathBuf,
+    },
 }
 
 /// Remote-sync subcommands (ADR-022/023/024, #126).
 #[derive(Debug, Subcommand)]
 enum SyncRemoteAction {
-    /// Enable remote sync: bind the local database to an account and server.
+    /// ATTACH this existing local account to a server: bind the local database
+    /// to its account and a sync server. This is a transport change — it does
+    /// not create or change the account key. To create a new account use
+    /// `sync-device bootstrap`; to join one on a fresh device use
+    /// `sync-device enroll`/`recover`.
     Enable {
         /// Base URL of the sync server (e.g. `https://sync.example.com`).
         #[arg(long)]
@@ -335,9 +369,15 @@ enum SyncRemoteAction {
 /// opaque ciphertext.
 #[derive(Debug, Subcommand)]
 enum SyncDeviceAction {
-    /// First device on a new account: create keys + account root key, publish
-    /// this device's record and a self-trust attestation, and bind sync
-    /// identity to the server.
+    /// CREATE a new account (first device): mint the account key, publish this
+    /// device's record and self-trust attestation, bind sync identity to the
+    /// server, and surface a recovery code you must save.
+    ///
+    /// This is the *create* flow (ADR-029). To use an existing account on this
+    /// device instead, JOIN it with `enroll`/`accept`/`recover`. Refuses to run
+    /// if this device already belongs to an account, so you can't silently make
+    /// a duplicate; if it has local data but no account yet, pass
+    /// `--create-new-account` to confirm you want a brand-new account.
     Bootstrap {
         /// Base URL of the sync server (e.g. `https://sync.example.com`).
         #[arg(long)]
@@ -348,6 +388,16 @@ enum SyncDeviceAction {
         /// Use an encrypted key file instead of the OS keychain.
         #[arg(long)]
         key_file: Option<PathBuf>,
+        /// Confirm creating a brand-new account when this device already has
+        /// local data. Does not override the refusal when the device already
+        /// belongs to an account.
+        #[arg(long)]
+        create_new_account: bool,
+        /// Do not mint or upload a recovery code. Recovery stays OFF until you
+        /// run `sync-device recovery-enable`; if you lose every device the
+        /// account is unrecoverable.
+        #[arg(long)]
+        no_recovery_code: bool,
     },
     /// Existing device: print an invite blob to hand to a new device so it can
     /// enroll onto this account.
@@ -359,8 +409,11 @@ enum SyncDeviceAction {
         #[arg(long)]
         key_file: Option<PathBuf>,
     },
-    /// New device: publish this device's record under an invited account and
-    /// print its Short Authentication String for out-of-band comparison.
+    /// JOIN an existing account on this new device: publish this device's
+    /// record under an invited account and print its Short Authentication
+    /// String for out-of-band comparison. Pairs with `approve` on a trusted
+    /// device, then `accept` here. This device receives the existing account
+    /// key — it never creates a new one.
     Enroll {
         /// Invite blob produced by `sync-device invite` on a trusted device.
         #[arg(long)]
@@ -397,8 +450,9 @@ enum SyncDeviceAction {
         #[arg(long)]
         key_file: Option<PathBuf>,
     },
-    /// New device: fetch the sealed bundle a trusted device published, store the
-    /// account key, and bind sync identity. Then pull to restore the library.
+    /// JOIN (finish): fetch the sealed bundle a trusted device published, store
+    /// the existing account key, and bind sync identity. Then pull to restore
+    /// the library. No new account is created.
     Accept {
         /// Sync server URL (when not already bound from `enroll`).
         #[arg(long)]
@@ -444,9 +498,11 @@ enum SyncDeviceAction {
         #[arg(long)]
         key_file: Option<PathBuf>,
     },
-    /// Recover on a fresh device with no trusted peer: unwrap the account key
-    /// from the recovery secret (`PERGAMON_RECOVERY_PASSPHRASE`), publish a
-    /// device record + self-trust, bind identity, and pull.
+    /// JOIN via recovery: on a fresh device with no trusted peer, unwrap the
+    /// existing account key from the recovery secret
+    /// (`PERGAMON_RECOVERY_PASSPHRASE`), publish a device record + self-trust,
+    /// bind identity, and pull. This obtains the existing account key — it never
+    /// creates a new account.
     Recover {
         /// Base URL of the sync server.
         #[arg(long)]
@@ -541,10 +597,18 @@ enum ExportAction {
         output: Option<PathBuf>,
     },
     /// Create a full backup archive.
+    ///
+    /// The archive is a plaintext ZIP of JSON and contains no key material.
+    /// Pass `--encrypt` (with `PERGAMON_BACKUP_PASSPHRASE`) to protect it at
+    /// rest.
     Backup {
         /// Output file path.
         #[arg(long, short)]
         output: PathBuf,
+        /// Encrypt the archive with a passphrase from
+        /// `PERGAMON_BACKUP_PASSPHRASE` (Argon2id + XChaCha20-Poly1305).
+        #[arg(long)]
+        encrypt: bool,
     },
     /// Export highlights and bookmarks to an Obsidian vault.
     Obsidian {
@@ -1511,7 +1575,7 @@ fn handle_import(db: &Database, action: ImportAction) -> Result<()> {
 fn handle_export(db: &Database, action: ExportAction) -> Result<()> {
     match action {
         ExportAction::Opml { output } => export_opml(db, output.as_deref()),
-        ExportAction::Backup { output } => export_backup(db, &output),
+        ExportAction::Backup { output, encrypt } => export_backup(db, &output, encrypt),
         ExportAction::Obsidian {
             vault,
             folder,
@@ -5755,13 +5819,44 @@ fn apply_rules_to_item(db: &Database, item: &ContentItem, feed_title: Option<&st
 // (#118) — round-trips the exact same bytes. These handlers only add CLI
 // concerns: file I/O, user-facing summaries, and import-history logging.
 
+/// Environment variable holding the passphrase for encrypted backup archives.
+const BACKUP_PASSPHRASE_ENV: &str = "PERGAMON_BACKUP_PASSPHRASE";
+
 /// Create a full backup archive (ZIP with JSON files).
-fn export_backup(db: &Database, output: &std::path::Path) -> Result<()> {
+///
+/// When `encrypt` is set the archive is wrapped in a passphrase-protected
+/// container (passphrase from `PERGAMON_BACKUP_PASSPHRASE`); otherwise it is a
+/// plaintext ZIP. Either way the archive contains **no key material**.
+fn export_backup(db: &Database, output: &std::path::Path, encrypt: bool) -> Result<()> {
     let file = std::fs::File::create(output)
         .with_context(|| format!("failed to create backup file: {}", output.display()))?;
-    let stats = pergamon_storage::backup::export(db, file).context("writing backup archive")?;
+
+    let stats = if encrypt {
+        let passphrase = std::env::var(BACKUP_PASSPHRASE_ENV).with_context(|| {
+            format!("set {BACKUP_PASSPHRASE_ENV} to a passphrase to encrypt the backup archive")
+        })?;
+        if passphrase.is_empty() {
+            bail!("{BACKUP_PASSPHRASE_ENV} is set but empty");
+        }
+        pergamon_storage::backup::export_encrypted(db, file, passphrase.as_bytes())
+            .context("writing encrypted backup archive")?
+    } else {
+        pergamon_storage::backup::export(db, file).context("writing backup archive")?
+    };
 
     println!("Backup written to {}", output.display());
+    if encrypt {
+        println!("  Archive is ENCRYPTED (passphrase-protected).");
+    } else {
+        println!("  Archive is PLAINTEXT — store it securely.");
+    }
+    println!(
+        "  Note: backups exclude key material (account root key, device keys). A plaintext or"
+    );
+    println!(
+        "  encrypted archive alone cannot recover an encrypted/sync-enabled account — export a"
+    );
+    println!("  key package with `pergamon device-key export-package` for that.");
     println!(
         "  {} feeds, {} items, {} tags, {} collections, {} notes, {} review cards, {} rules ({} records total)",
         stats.feeds,
@@ -5777,12 +5872,28 @@ fn export_backup(db: &Database, output: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-/// Restore from a full backup archive.
+/// Restore from a full backup archive, auto-detecting the encrypted container.
 fn restore_backup(db: &Database, path: &std::path::Path) -> Result<()> {
-    let file = std::fs::File::open(path)
+    let bytes = std::fs::read(path)
         .with_context(|| format!("failed to open backup file: {}", path.display()))?;
-    let stats = pergamon_storage::backup::restore(db, file)
-        .context("failed to restore backup into database")?;
+
+    let stats = if pergamon_storage::is_encrypted_backup(&bytes) {
+        let passphrase = std::env::var(BACKUP_PASSPHRASE_ENV).with_context(|| {
+            format!(
+                "{} is an encrypted backup — set {BACKUP_PASSPHRASE_ENV} to its passphrase",
+                path.display()
+            )
+        })?;
+        pergamon_storage::backup::restore_encrypted(
+            db,
+            std::io::Cursor::new(bytes),
+            passphrase.as_bytes(),
+        )
+        .context("failed to restore encrypted backup into database")?
+    } else {
+        pergamon_storage::backup::restore(db, std::io::Cursor::new(bytes))
+            .context("failed to restore backup into database")?
+    };
 
     println!("Backup restored from {}", path.display());
     println!(
@@ -5950,6 +6061,16 @@ fn handle_device_key(action: &DeviceKeyAction) -> Result<()> {
                     "Initialized device keys and a new account root key for '{account}' (device {}).",
                     keys.device_id()
                 );
+                println!(
+                    "Note: this created keys and an account key locally WITHOUT a recovery code."
+                );
+                println!(
+                    "To create + publish an account with a saved recovery code, use \
+                     `pergamon sync-device bootstrap`;"
+                );
+                println!(
+                    "or add recovery to this account later with `pergamon sync-device recovery-enable`."
+                );
             } else {
                 println!(
                     "Initialized device keys for account '{account}' (device {}).",
@@ -5975,7 +6096,91 @@ fn handle_device_key(action: &DeviceKeyAction) -> Result<()> {
             }
             Ok(())
         }
+        DeviceKeyAction::ExportPackage {
+            account,
+            key_file,
+            output,
+        } => export_key_package_cmd(account, key_file.as_ref(), output),
+        DeviceKeyAction::ImportPackage {
+            account,
+            key_file,
+            input,
+        } => import_key_package_cmd(account, key_file.as_ref(), input),
     }
+}
+
+/// Environment variable holding the passphrase for a device key package.
+const KEY_PACKAGE_PASSPHRASE_ENV: &str = "PERGAMON_KEY_PACKAGE_PASSPHRASE";
+
+/// Read and validate the key-package passphrase from the environment.
+fn key_package_passphrase() -> Result<String> {
+    let passphrase = std::env::var(KEY_PACKAGE_PASSPHRASE_ENV).with_context(|| {
+        format!("set {KEY_PACKAGE_PASSPHRASE_ENV} to the passphrase protecting the key package")
+    })?;
+    if passphrase.is_empty() {
+        bail!("{KEY_PACKAGE_PASSPHRASE_ENV} is set but empty");
+    }
+    Ok(passphrase)
+}
+
+/// Export a passphrase-protected key package wrapping the account's ARK.
+fn export_key_package_cmd(
+    account: &str,
+    key_file: Option<&PathBuf>,
+    output: &std::path::Path,
+) -> Result<()> {
+    let passphrase = key_package_passphrase()?;
+    let mut store = open_key_store(key_file)?;
+
+    let ark = store.load_ark(account)?.with_context(|| {
+        format!("no account root key stored for '{account}' — run `pergamon device-key init` first")
+    })?;
+    // Load or bootstrap the account handle so the package is self-contained.
+    let account_id = if let Some(id) = store.load_account_id(account)? {
+        id
+    } else {
+        let id =
+            pergamon_crypto::hierarchy::AccountId::generate().context("generating account id")?;
+        store.save_account_id(account, &id)?;
+        id
+    };
+
+    let package = pergamon_crypto::export_key_package(&ark, &account_id, passphrase.as_bytes())
+        .context("wrapping account root key into a key package")?;
+    std::fs::write(output, package.to_bytes())
+        .with_context(|| format!("failed to write key package: {}", output.display()))?;
+
+    println!("Key package written to {}", output.display());
+    println!("  account: {account} ({})", account_id.to_hex());
+    println!("  WARNING: this file plus its passphrase grants FULL access to the account.");
+    println!("  It is the only thing (besides another enrolled device) that can recover the");
+    println!("  account root key, so store it securely and keep the passphrase separate.");
+    Ok(())
+}
+
+/// Import a key package, restoring the account's ARK onto this device.
+fn import_key_package_cmd(
+    account: &str,
+    key_file: Option<&PathBuf>,
+    input: &std::path::Path,
+) -> Result<()> {
+    let passphrase = key_package_passphrase()?;
+    let bytes = std::fs::read(input)
+        .with_context(|| format!("failed to read key package: {}", input.display()))?;
+
+    let package = pergamon_crypto::KeyPackage::from_bytes(&bytes)
+        .map_err(|e| anyhow::anyhow!("not a valid pergamon key package: {e}"))?;
+    let ark = pergamon_crypto::import_key_package(&package, passphrase.as_bytes())
+        .map_err(|e| anyhow::anyhow!("failed to open key package (wrong passphrase?): {e}"))?;
+
+    let mut store = open_key_store(key_file)?;
+    store.save_ark(account, &ark)?;
+    store.save_account_id(account, &package.account_id)?;
+
+    println!("Key package imported into account '{account}'.");
+    println!("  account: {}", package.account_id.to_hex());
+    println!("  account_root_key: restored");
+    Ok(())
 }
 
 // ------------------------------------------------------------------
@@ -6030,19 +6235,63 @@ fn track_document_upsert(db: &Database, item: &ContentItem) {
     }
 }
 
-/// A remote-sync session: an HTTP-backed engine plus a local blob store.
+/// A remote-sync session: an HTTP-backed engine plus a durable blob store.
 type SyncSession = (
     pergamon_sync::SyncEngine<pergamon_sync::http::HttpTransport>,
-    pergamon_sync::MemoryBlobStore,
+    pergamon_sync::FsBlobStore,
 );
+
+/// The durable blob-plaintext store directory.
+///
+/// Mirrors [`default_db_path`]'s resolution so blobs sit beside the library:
+/// `$PERGAMON_DATA_DIR/blobs` when set, else the platform data dir, else the
+/// current directory. The store is content-addressed, so sharing one directory
+/// across libraries is safe.
+fn blob_store_dir() -> PathBuf {
+    std::env::var_os("PERGAMON_DATA_DIR")
+        .map(PathBuf::from)
+        .or_else(|| dirs::data_dir().map(|d| d.join("pergamon")))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("blobs")
+}
+
+/// Read the sync transport credential from the environment (issue #183).
+///
+/// Lets the client authenticate to a sync server that sits behind a reverse
+/// proxy enforcing auth, *without* embedding credentials in the server URL
+/// (which would leak into logs, process lists, and the persisted `server_url`).
+/// The credential is read only from the environment — never from `config.toml`
+/// or the database — and is never logged.
+///
+/// Precedence:
+/// 1. `PERGAMON_SYNC_BEARER_TOKEN` (non-empty) → bearer token.
+/// 2. `PERGAMON_SYNC_BASIC_USER` + `PERGAMON_SYNC_BASIC_PASSWORD` (both set) →
+///    HTTP Basic.
+/// 3. otherwise `None` (unauthenticated).
+fn sync_credential_from_env() -> Option<pergamon_sync::TransportCredential> {
+    if let Ok(token) = std::env::var("PERGAMON_SYNC_BEARER_TOKEN")
+        && !token.is_empty()
+    {
+        return Some(pergamon_sync::TransportCredential::Bearer { token });
+    }
+    match (
+        std::env::var("PERGAMON_SYNC_BASIC_USER"),
+        std::env::var("PERGAMON_SYNC_BASIC_PASSWORD"),
+    ) {
+        (Ok(username), Ok(password)) if !username.is_empty() => {
+            Some(pergamon_sync::TransportCredential::Basic { username, password })
+        }
+        _ => None,
+    }
+}
 
 /// Build the crypto context and HTTP transport for an enabled sync session.
 ///
 /// Loads the account keys from the keystore and the server URL and identity
 /// from the local sync state, failing with actionable guidance when either is
-/// missing. The blob store is ephemeral for now: current CLI mutations do not
-/// emit blob-referencing events, so no blob plaintext needs to persist between
-/// invocations (a durable store lands with full change-tracking).
+/// missing. Blob plaintext is kept in a durable filesystem store (issue #184)
+/// under [`blob_store_dir`], so any blob a change references persists between
+/// invocations rather than being lost with an ephemeral in-memory store.
 fn open_sync_session(
     db: &Database,
     account: &str,
@@ -6067,13 +6316,64 @@ fn open_sync_session(
     let ark = store.load_ark(account)?.with_context(|| {
         format!("no account root key for '{account}'; run `pergamon device-key init` first")
     })?;
+    let keys = store.load_device_keys(account)?.with_context(|| {
+        format!("no device key for '{account}'; run `pergamon device-key init` first")
+    })?;
+    let signing_key = *keys.ed25519_signing();
 
-    let crypto = pergamon_sync::CryptoContext::new(ark, account_hex, device_id, state.key_epoch)
-        .context("building crypto context")?;
-    let transport =
-        pergamon_sync::http::HttpTransport::new(server).context("building HTTP transport")?;
-    let engine = pergamon_sync::SyncEngine::new(transport, crypto);
-    Ok((engine, pergamon_sync::MemoryBlobStore::new()))
+    let crypto = pergamon_sync::CryptoContext::new(
+        ark,
+        account_hex.clone(),
+        device_id,
+        signing_key,
+        state.key_epoch,
+    )
+    .context("building crypto context")?;
+    let transport = pergamon_sync::http::HttpTransport::with_credential(
+        server.clone(),
+        sync_credential_from_env(),
+    )
+    .context("building HTTP transport")?;
+    // Build the device-key directory from the account roster so pulled events'
+    // signatures can be verified against their signing device (ADR-030). This is
+    // best-effort: a failure (e.g. offline) leaves it empty, which still allows
+    // push (never consults it) and single-device pull (own echoes are
+    // suppressed before verification); a genuinely unknown multi-device signer
+    // surfaces a retryable `UnknownSigner` so a later refresh resolves it.
+    let directory = load_device_directory(&store, account, &account_hex, &server);
+    let engine = pergamon_sync::SyncEngine::new(transport, crypto, directory);
+    let blobs = pergamon_sync::FsBlobStore::new(blob_store_dir())
+        .map_err(|e| anyhow::anyhow!("opening durable blob store: {e}"))?;
+    Ok((engine, blobs))
+}
+
+/// Fetch the account's device roster and project it into a
+/// [`pergamon_sync::DeviceKeyDirectory`] (`device_id -> ed25519_pub`) for event
+/// signature verification (ADR-030). Returns an empty directory on any failure,
+/// warning to stderr, so sync operations that do not require it still proceed.
+fn load_device_directory(
+    store: &keystore::DeviceKeyStore,
+    account: &str,
+    account_hex: &str,
+    server: &str,
+) -> pergamon_sync::DeviceKeyDirectory {
+    let build = || -> Result<pergamon_sync::DeviceKeyDirectory> {
+        let account_id = match store.load_account_id(account)? {
+            Some(id) => id,
+            None => parse_account_id(account_hex)?,
+        };
+        let relay = open_relay(server)?;
+        let roster = pergamon_sync::onboarding::roster(&relay, &account_id)
+            .context("listing device roster")?;
+        Ok(pergamon_sync::DeviceKeyDirectory::from_roster(&roster))
+    };
+    match build() {
+        Ok(dir) => dir,
+        Err(e) => {
+            eprintln!("warning: could not load device roster for signature verification: {e:#}");
+            pergamon_sync::DeviceKeyDirectory::new()
+        }
+    }
 }
 
 /// Handle `sync-remote` subcommands.
@@ -6087,6 +6387,9 @@ fn handle_sync_remote(db: &Database, action: SyncRemoteAction) -> Result<()> {
         SyncRemoteAction::Push { account, key_file } => {
             let (engine, blobs) = open_sync_session(db, &account, key_file.as_ref())?;
             let pushed = engine.push(db, &blobs).context("pushing changes")?;
+            engine
+                .verify_upload_complete(db)
+                .context("verifying upload completeness")?;
             println!("Pushed {pushed} change(s).");
             Ok(())
         }
@@ -6099,6 +6402,9 @@ fn handle_sync_remote(db: &Database, action: SyncRemoteAction) -> Result<()> {
         SyncRemoteAction::Sync { account, key_file } => {
             let (engine, blobs) = open_sync_session(db, &account, key_file.as_ref())?;
             let stats = engine.sync(db, &blobs).context("syncing")?;
+            engine
+                .verify_upload_complete(db)
+                .context("verifying upload completeness")?;
             println!(
                 "Pushed {} change(s), applied {} change(s).",
                 stats.pushed, stats.applied
@@ -6148,10 +6454,20 @@ fn sync_remote_enable(
     db.set_sync_identity(&account_hex, &device_id, epoch, Some(server))
         .context("writing sync identity")?;
 
+    // Enqueue a complete baseline of the existing library so the first push
+    // uploads everything, not just post-enable mutations (issue #184). Run-once
+    // and idempotent: a persistent guard makes re-enabling a no-op.
+    let baseline = db
+        .enqueue_sync_baseline(now_millis())
+        .context("enqueuing sync baseline")?;
+
     println!("Remote sync enabled for account '{account}'.");
     println!("  server:  {server}");
     println!("  account: {account_hex}");
     println!("  device:  {device_id}");
+    if baseline > 0 {
+        println!("  baseline: {baseline} change(s) enqueued from existing library");
+    }
     println!("Run `pergamon sync-remote sync` to exchange changes.");
     Ok(())
 }
@@ -6288,7 +6604,8 @@ fn now_millis_i64() -> i64 {
 
 /// Build an HTTP relay client for the onboarding flows.
 fn open_relay(server: &str) -> Result<pergamon_sync::HttpRelay> {
-    pergamon_sync::HttpRelay::new(server.to_owned()).context("building relay client")
+    pergamon_sync::HttpRelay::with_credential(server.to_owned(), sync_credential_from_env())
+        .context("building relay client")
 }
 
 /// Parse an account handle from its hex wire form.
@@ -6304,7 +6621,16 @@ fn handle_sync_device(db: &Database, action: SyncDeviceAction) -> Result<()> {
             server,
             account,
             key_file,
-        } => sync_device_bootstrap(db, &server, &account, key_file.as_ref()),
+            create_new_account,
+            no_recovery_code,
+        } => sync_device_bootstrap(
+            db,
+            &server,
+            &account,
+            key_file.as_ref(),
+            create_new_account,
+            no_recovery_code,
+        ),
         SyncDeviceAction::Invite { account, key_file } => {
             sync_device_invite(db, &account, key_file.as_ref())
         }
@@ -6396,13 +6722,40 @@ fn ensure_device_keys(
 
 /// First device on a new account: create keys + ARK + account id, publish the
 /// device record and self-trust attestation, and bind sync identity.
+///
+/// This is the canonical **create-a-new-account** flow (ADR-029, Decision 3).
+/// Before minting anything it checks the local state so a device that already
+/// belongs to an account cannot silently create a duplicate, and a device with
+/// existing local data must confirm with `--create-new-account`. On success it
+/// surfaces a recovery code by default (opt out with `--no-recovery-code`).
 fn sync_device_bootstrap(
     db: &Database,
     server: &str,
     account: &str,
     key_file: Option<&PathBuf>,
+    create_new_account: bool,
+    no_recovery_code: bool,
 ) -> Result<()> {
     let mut store = open_key_store(key_file)?;
+
+    // Gather the pre-creation local state (local reads only) and let the pure
+    // core guard decide whether creating a new account is safe.
+    let sync_state = db.sync_state()?;
+    let state = LocalAccountState {
+        has_device_keys: store.load_device_keys(account)?.is_some(),
+        has_ark: store.load_ark(account)?.is_some(),
+        has_account_id: store.load_account_id(account)?.is_some(),
+        is_sync_bound: sync_state.server_url.is_some() || sync_state.account_id.is_some(),
+        has_local_content: db.count_content_items(None)? > 0,
+    };
+    if let Err(block) = guard_create_new(&state, create_new_account) {
+        if block == CreateAccountBlock::AlreadyHasAccount
+            && let Some(id) = store.load_account_id(account)?
+        {
+            eprintln!("This device already belongs to account {}.", id.to_hex());
+        }
+        bail!("{block}");
+    }
 
     let keys = ensure_device_keys(&mut store, account)?;
     if store.load_ark(account)?.is_none() {
@@ -6429,13 +6782,91 @@ fn sync_device_bootstrap(
     db.set_sync_identity(&account_hex, &device_id, epoch, Some(server))
         .context("writing sync identity")?;
 
-    println!("Bootstrapped account '{account}' on {server}.");
+    println!("Created account '{account}' on {server}.");
     println!("  account: {account_hex}");
     println!("  device:  {device_id}");
     println!("  epoch:   {epoch}");
+
+    // Surface a recovery secret by default so a lost-all-devices account is
+    // still recoverable. The ARK is still held above; reload it to wrap.
+    let ark = store
+        .load_ark(account)?
+        .context("account root key missing after bootstrap")?;
+    match publish_bootstrap_recovery(&relay, &account_id, &ark, no_recovery_code)? {
+        RecoveryOutcome::Code(code) => {
+            println!();
+            print_recovery_code(&code);
+            print_recovery_warning();
+        }
+        RecoveryOutcome::Passphrase => {
+            println!();
+            println!("Recovery enabled with PERGAMON_RECOVERY_PASSPHRASE.");
+            print_recovery_warning();
+        }
+        RecoveryOutcome::Disabled => {
+            println!();
+            println!("Recovery is OFF (--no-recovery-code). If you lose every device this");
+            println!("account cannot be recovered. Enable it later with:");
+            println!("  pergamon sync-device recovery-enable --generate-code");
+        }
+    }
+
+    println!();
     println!("Add another device with `pergamon sync-device invite` on this device,");
     println!("then `pergamon sync-device enroll` on the new one.");
     Ok(())
+}
+
+/// Which recovery secret [`publish_bootstrap_recovery`] wrapped the ARK under.
+enum RecoveryOutcome {
+    /// A freshly generated high-entropy recovery code (return it to print once).
+    Code(String),
+    /// The user-supplied `PERGAMON_RECOVERY_PASSPHRASE`.
+    Passphrase,
+    /// Recovery was skipped (`--no-recovery-code`).
+    Disabled,
+}
+
+/// Wrap and upload a recovery copy of the ARK during bootstrap, choosing the
+/// secret by policy: skip when `no_recovery_code`, otherwise use
+/// `PERGAMON_RECOVERY_PASSPHRASE` when set, else mint a strong recovery code.
+fn publish_bootstrap_recovery(
+    relay: &pergamon_sync::HttpRelay,
+    account_id: &pergamon_crypto::hierarchy::AccountId,
+    ark: &pergamon_crypto::hierarchy::AccountRootKey,
+    no_recovery_code: bool,
+) -> Result<RecoveryOutcome> {
+    if no_recovery_code {
+        return Ok(RecoveryOutcome::Disabled);
+    }
+    if let Ok(pass) = std::env::var("PERGAMON_RECOVERY_PASSPHRASE")
+        && !pass.is_empty()
+    {
+        pergamon_sync::onboarding::recovery_publish(relay, account_id, ark, pass.as_bytes())
+            .context("uploading recovery blob")?;
+        return Ok(RecoveryOutcome::Passphrase);
+    }
+    let code =
+        pergamon_crypto::recovery::generate_recovery_code().context("generating recovery code")?;
+    pergamon_sync::onboarding::recovery_publish(relay, account_id, ark, code.as_bytes())
+        .context("uploading recovery blob")?;
+    Ok(RecoveryOutcome::Code(code))
+}
+
+/// Print a freshly minted recovery code in a copyable block.
+fn print_recovery_code(code: &str) {
+    println!("Recovery code (write this down and store it safely):");
+    println!();
+    println!("    {code}");
+    println!();
+}
+
+/// Print the blunt, 1Password-style warning shown with every recovery secret.
+fn print_recovery_warning() {
+    println!("This recovery secret is the ONLY way to get back into this account if");
+    println!("you lose every device. kafkade and the sync server CANNOT recover it for");
+    println!("you — the server only ever holds ciphertext. Store it offline, somewhere");
+    println!("safe. Anyone who has it can decrypt everything in this account.");
 }
 
 /// Existing device: print an invite blob for a new device to enroll with.
@@ -6733,10 +7164,7 @@ fn sync_device_recovery_enable(
     let secret = if generate_code {
         let code = pergamon_crypto::recovery::generate_recovery_code()
             .context("generating recovery code")?;
-        println!("Recovery code (write this down and store it safely):");
-        println!();
-        println!("    {code}");
-        println!();
+        print_recovery_code(&code);
         code
     } else {
         std::env::var("PERGAMON_RECOVERY_PASSPHRASE").map_err(|_| {
@@ -6752,9 +7180,7 @@ fn sync_device_recovery_enable(
 
     println!("Recovery enabled for account {}.", account_id.to_hex());
     println!();
-    println!("Warning: anyone who learns this secret can recover the account key and");
-    println!("decrypt everything. It is only as strong as the secret you chose — treat");
-    println!("it like a master password.");
+    print_recovery_warning();
     Ok(())
 }
 

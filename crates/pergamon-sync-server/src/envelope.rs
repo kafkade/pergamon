@@ -40,6 +40,12 @@ pub struct EventInput {
     /// Opaque AEAD ciphertext body, standard-base64 encoded. Never decoded by
     /// the server.
     pub ciphertext_b64: String,
+    /// The origin device's opaque Ed25519 event signature (ADR-030),
+    /// standard-base64 encoded. The server stores and echoes it verbatim and
+    /// never inspects it — authenticity is enforced entirely client-side.
+    /// Defaults to empty for deserialization tolerance.
+    #[serde(default)]
+    pub sig_b64: String,
 }
 
 /// A batch of event envelopes to append to one account's log.
@@ -99,6 +105,11 @@ pub struct StoredEvent {
     pub server_committed_at: i64,
     /// Opaque AEAD ciphertext body, standard-base64 encoded.
     pub ciphertext_b64: String,
+    /// The origin device's opaque Ed25519 event signature (ADR-030),
+    /// standard-base64 encoded. Echoed verbatim, never inspected by the server.
+    /// Defaults to empty for deserialization tolerance.
+    #[serde(default)]
+    pub sig_b64: String,
 }
 
 /// Response body for a pull.
@@ -142,6 +153,35 @@ pub struct BlobProbeResponse {
     pub present: Vec<String>,
     /// Hashes the server is missing (upload these before referencing them).
     pub missing: Vec<String>,
+}
+
+/// Response body for the per-tenant usage/metrics endpoint (WP-3d, #198).
+///
+/// Reports an account's metered ciphertext usage — **sizes and counts only**,
+/// never any decoded content (design §2.5) — alongside the configured caps
+/// (`0` = unlimited) and whether the account currently sits over quota. This is
+/// the billing/metrics surface (`GET /v1/usage/{account_id}`); it is tenant
+/// isolated in multi-tenant mode by the WP-3c `{account_id}` path-param gate.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageResponse {
+    /// Total bytes of opaque blob ciphertext stored for the account.
+    pub blob_bytes: u64,
+    /// Number of distinct blobs stored for the account.
+    pub blob_count: u64,
+    /// Total bytes of event ciphertext (`payload_bytes`) stored for the account.
+    pub event_bytes: u64,
+    /// Number of events stored for the account.
+    pub event_count: u64,
+    /// Combined metered ciphertext bytes (`blob_bytes + event_bytes`).
+    pub total_bytes: u64,
+    /// Combined metered object count (`blob_count + event_count`).
+    pub total_objects: u64,
+    /// Configured per-account byte cap (`0` = unlimited).
+    pub max_account_bytes: u64,
+    /// Configured per-account object-count cap (`0` = unlimited).
+    pub max_account_objects: u64,
+    /// `true` when current usage already exceeds a configured cap.
+    pub over_quota: bool,
 }
 
 // --- Opaque onboarding-artifact relay wire types (ADR-024, #125) -------------

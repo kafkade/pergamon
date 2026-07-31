@@ -22,7 +22,9 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
+use pergamon_core::content_type::ContentType;
 use pergamon_core::fsrs::{Rating, Scheduler};
+use pergamon_core::model::Collection;
 use pergamon_core::sync::event::{BlobManifestEntry, ChangeBody, EntityType, Op};
 use pergamon_core::sync::hlc::Hlc;
 use pergamon_core::sync::merge::{ConflictStrategy, SetMember, strategy_for};
@@ -52,6 +54,9 @@ pub struct SyncState {
     pub hlc_counter: u32,
     /// Configured sync server base URL, if any.
     pub server_url: Option<String>,
+    /// Whether the one-time baseline backfill has already been enqueued for this
+    /// device (issue #184). Guards `enqueue_sync_baseline` so it runs once.
+    pub baseline_done: bool,
 }
 
 /// A pending outbox row awaiting push.
@@ -104,7 +109,7 @@ impl Database {
     pub fn sync_state(&self) -> Result<SyncState, StorageError> {
         let state = self.connection().query_row(
             "SELECT account_id, device_id, key_epoch, cursor_seq,
-                    hlc_wall_millis, hlc_counter, server_url
+                    hlc_wall_millis, hlc_counter, server_url, baseline_done
              FROM sync_state WHERE id = 1",
             [],
             |row| {
@@ -116,6 +121,7 @@ impl Database {
                     hlc_wall_millis: u64::try_from(row.get::<_, i64>(4)?).unwrap_or(0),
                     hlc_counter: u32::try_from(row.get::<_, i64>(5)?).unwrap_or(0),
                     server_url: row.get(6)?,
+                    baseline_done: row.get::<_, i64>(7)? != 0,
                 })
             },
         )?;
@@ -297,6 +303,25 @@ impl Database {
             params![change_id, i64::try_from(server_seq).unwrap_or(i64::MAX)],
         )?;
         Ok(())
+    }
+
+    /// The distinct ciphertext hashes of every blob referenced by *any* outbox
+    /// row (acknowledged or not).
+    ///
+    /// Used by the upload-completeness check (issue #184): after a push drains
+    /// the outbox, these are the blobs the pushed events depend on, so the engine
+    /// can probe the server that none is still missing.
+    pub fn outbox_blob_refs(&self) -> Result<Vec<String>, StorageError> {
+        let conn = self.connection();
+        let mut stmt = conn.prepare("SELECT blob_refs FROM sync_outbox")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut seen = std::collections::BTreeSet::new();
+        for row in rows {
+            let refs: Vec<String> = serde_json::from_str(&row?)
+                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            seen.extend(refs);
+        }
+        Ok(seen.into_iter().collect())
     }
 
     // ==================================================================
@@ -1139,6 +1164,208 @@ impl Database {
         })
     }
 
+    // ==================================================================
+    // Baseline backfill (issue #184)
+    // ==================================================================
+
+    /// Enqueue a **complete baseline** of the existing library into the outbox so
+    /// the next push uploads everything, not just post-enable mutations.
+    ///
+    /// This is the event-log backfill ADR-022 calls the baseline: for every
+    /// pre-existing entity of every synced type (plus membership edges and any
+    /// referenced blobs) it enqueues an `Upsert` change built from the entity's
+    /// canonical fields — reusing the same outbox/apply machinery a normal
+    /// mutation does, so a fresh device reconstructs the whole library by pulling.
+    /// (The ADR-022 encrypted-snapshot manifest bootstrap is a separate, later
+    /// optimization and is intentionally out of scope here.)
+    ///
+    /// It runs in a single transaction and is **run-once**: a persistent
+    /// `baseline_done` flag on `sync_state` guards it, so re-running is a no-op
+    /// (returns `0`). Enabling on an empty library enqueues `0` and does not err.
+    ///
+    /// Changes are enqueued in foreign-key-safe order (feeds, tags, collections
+    /// parent-first, documents, highlights, notes, review cards, review logs,
+    /// then tag/collection edges, then settings) so a peer applies them without
+    /// violating referential integrity on the way in.
+    ///
+    /// # Errors
+    /// Returns [`StorageError`] if sync is not enabled (no device identity), or
+    /// if any read/enqueue fails. Requiring identity is deliberate: a baseline is
+    /// only meaningful once the account/device handles exist.
+    pub fn enqueue_sync_baseline(&self, now_millis: u64) -> Result<usize, StorageError> {
+        self.in_transaction(|db| {
+            let state = db.sync_state()?;
+            if state.device_id.is_none() {
+                return Err(StorageError::Generic(
+                    "cannot enqueue sync baseline before sync is enabled (no device identity)"
+                        .to_owned(),
+                ));
+            }
+            if state.baseline_done {
+                return Ok(0);
+            }
+
+            let mut n = 0usize;
+
+            // Feeds (subscriptions) — no synced dependencies.
+            for feed in db.list_feeds()? {
+                n += db.baseline_upsert(
+                    EntityType::FeedSubscription,
+                    &feed.id.to_string(),
+                    now_millis,
+                )?;
+            }
+            // Tags — no dependencies.
+            for tag in db.list_tags()? {
+                n += db.baseline_upsert(EntityType::Tag, &tag.id.to_string(), now_millis)?;
+            }
+            // Collections — parent before child (self-referential parent_id FK).
+            for id in order_collections_parent_first(&db.list_collections()?) {
+                n += db.baseline_upsert(EntityType::Collection, &id, now_millis)?;
+            }
+            // Documents — every content item except highlight shells, which are
+            // carried by their `Highlight` change (below) so the highlight_meta
+            // is reconstructed too.
+            for item in db.list_all_content_items()? {
+                if item.content_type == ContentType::Highlight {
+                    continue;
+                }
+                n += db.baseline_upsert(EntityType::Document, &item.id.to_string(), now_millis)?;
+            }
+            // Highlights — reconstruct the content_items shell + highlight_meta.
+            // (After documents so a highlight's `source_item_id` FK resolves.)
+            for meta in db.list_all_highlight_meta()? {
+                n += db.baseline_upsert(
+                    EntityType::Highlight,
+                    &meta.content_item_id.to_string(),
+                    now_millis,
+                )?;
+            }
+            // Notes — reference their content item.
+            for note in db.list_all_notes()? {
+                n += db.baseline_upsert(EntityType::Note, &note.id.to_string(), now_millis)?;
+            }
+            // Review cards — reference a highlight (FK to highlight_meta).
+            for card in db.list_all_review_cards()? {
+                n +=
+                    db.baseline_upsert(EntityType::ReviewCard, &card.id.to_string(), now_millis)?;
+            }
+            // Review logs — append-only, reference their card.
+            for log in db.list_all_review_logs()? {
+                n += db.baseline_upsert(EntityType::ReviewLog, &log.id.to_string(), now_millis)?;
+            }
+            // Tag membership edges (content_item_id:tag_id).
+            for (content_item_id, tag_id) in db.list_all_content_item_tags()? {
+                n += db.baseline_edge(
+                    EntityType::TagEdge,
+                    &content_item_id.to_string(),
+                    &tag_id.to_string(),
+                    now_millis,
+                )?;
+            }
+            // Collection membership edges (content_item_id:collection_id).
+            for (content_item_id, collection_id, _sort_order) in db.list_all_collection_items()? {
+                n += db.baseline_edge(
+                    EntityType::CollectionEdge,
+                    &content_item_id.to_string(),
+                    &collection_id.to_string(),
+                    now_millis,
+                )?;
+            }
+            // Settings — one entity per key. No enumeration API exists yet (the
+            // table is unused by current mutations), so read the keys directly to
+            // stay complete and future-proof.
+            for key in db.settings_keys()? {
+                n += db.baseline_upsert(EntityType::Settings, &key, now_millis)?;
+            }
+
+            db.set_baseline_done(true)?;
+            Ok(n)
+        })
+    }
+
+    /// Enqueue one baseline `Upsert` for a single-entity type, built from the
+    /// entity's canonical fields, stamping each field's clock. Returns `1` when a
+    /// row was enqueued, `0` if the entity no longer exists.
+    fn baseline_upsert(
+        &self,
+        entity_type: EntityType,
+        entity_id: &str,
+        now_millis: u64,
+    ) -> Result<usize, StorageError> {
+        let Some(fields) = self.read_entity_fields(entity_type, entity_id)? else {
+            return Ok(0);
+        };
+        let clock = self.tick_local_hlc(now_millis)?;
+        for field in fields.keys() {
+            self.set_entity_clock(entity_type, entity_id, field, &clock)?;
+        }
+        // Blobs: no current entity references blobs (content_text is inline), so
+        // the manifest is empty. When blob-backed fields land, populate it here.
+        let body = ChangeBody {
+            entity_type,
+            entity_id: entity_id.to_owned(),
+            op: Op::Upsert,
+            clock,
+            base_version: None,
+            fields,
+            blob_manifest: Vec::new(),
+        };
+        self.enqueue_outbox(&body)?;
+        Ok(1)
+    }
+
+    /// Enqueue one baseline membership edge (`present = true`), recording the
+    /// observed-remove add clock so future LWW membership merges are correct.
+    fn baseline_edge(
+        &self,
+        entity_type: EntityType,
+        left: &str,
+        right: &str,
+        now_millis: u64,
+    ) -> Result<usize, StorageError> {
+        let edge_id = format!("{left}:{right}");
+        let clock = self.tick_local_hlc(now_millis)?;
+        let member = self.set_edge(entity_type, &edge_id)?;
+        let outcome = pergamon_core::sync::merge::merge_set_member(&member, true, &clock);
+        self.save_set_edge(entity_type, &edge_id, &outcome.member)?;
+        let mut fields = FieldMap::new();
+        fields.insert("present".to_owned(), Value::Bool(true));
+        let body = ChangeBody {
+            entity_type,
+            entity_id: edge_id,
+            op: Op::Upsert,
+            clock,
+            base_version: None,
+            fields,
+            blob_manifest: Vec::new(),
+        };
+        self.enqueue_outbox(&body)?;
+        Ok(1)
+    }
+
+    /// Persist the run-once baseline guard.
+    pub fn set_baseline_done(&self, done: bool) -> Result<(), StorageError> {
+        self.connection().execute(
+            "UPDATE sync_state SET baseline_done = ?1 WHERE id = 1",
+            params![i64::from(done)],
+        )?;
+        Ok(())
+    }
+
+    /// The keys of every `settings` row (there is no higher-level settings API
+    /// yet; used by the baseline backfill to include settings entities).
+    fn settings_keys(&self) -> Result<Vec<String>, StorageError> {
+        let conn = self.connection();
+        let mut stmt = conn.prepare("SELECT key FROM settings")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut keys = Vec::new();
+        for row in rows {
+            keys.push(row?);
+        }
+        Ok(keys)
+    }
+
     /// Write a local mutation's canonical rows (no clocks / outbox). Shared by
     /// emit whether or not sync is enabled.
     fn apply_local_canonical(
@@ -1309,6 +1536,48 @@ fn reject_unknown_columns(entity_type: EntityType, fields: &FieldMap) -> Result<
         }
     }
     Ok(())
+}
+
+/// Order collections so that every collection appears after its parent, making
+/// a fresh device's apply satisfy the self-referential `parent_id` foreign key.
+///
+/// Roots (and any collection whose `parent_id` points outside this set) are
+/// emitted first; children follow once their parent has been placed. Any node
+/// left over (e.g. a cycle, which the schema does not create) is appended so the
+/// baseline never silently drops a collection.
+fn order_collections_parent_first(collections: &[Collection]) -> Vec<String> {
+    use std::collections::HashSet;
+    let ids: HashSet<String> = collections.iter().map(|c| c.id.to_string()).collect();
+    let mut emitted: HashSet<String> = HashSet::new();
+    let mut order: Vec<String> = Vec::with_capacity(collections.len());
+    loop {
+        let mut progressed = false;
+        for c in collections {
+            let id = c.id.to_string();
+            if emitted.contains(&id) {
+                continue;
+            }
+            let parent_ready = c.parent_id.as_ref().is_none_or(|p| {
+                let ps = p.to_string();
+                !ids.contains(&ps) || emitted.contains(&ps)
+            });
+            if parent_ready {
+                emitted.insert(id.clone());
+                order.push(id);
+                progressed = true;
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+    for c in collections {
+        let id = c.id.to_string();
+        if !emitted.contains(&id) {
+            order.push(id);
+        }
+    }
+    order
 }
 
 /// Split a composite edge id (`left:right`) into its two entity ids.

@@ -115,8 +115,10 @@ fn header() -> EventHeader {
     EventHeader {
         protocol_version: 1,
         account_id: "0123456789abcdef0123456789abcdef".to_owned(),
+        device_id: "device-kat".to_owned(),
         change_id: "chg-1".to_owned(),
         key_epoch: 0,
+        entity_ref: Some("blinded-kat".to_owned()),
         blob_refs: vec!["hashA".to_owned(), "hashB".to_owned()],
     }
 }

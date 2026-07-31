@@ -23,7 +23,8 @@ pergamon import opml ~/subscriptions.opml        # Bring your feeds
 pergamon import raindrop ~/export.csv            # Bring your bookmarks
 pergamon import kindle ~/My\ Clippings.txt       # Bring your Kindle highlights
 pergamon import readwise ~/readwise-export.csv   # Bring your Readwise highlights
-pergamon export backup -o library.zip            # Full backup
+pergamon export backup -o library.zip            # Full backup (plaintext ZIP, excludes keys)
+pergamon export backup -o library.pgbak --encrypt  # Encrypted backup (PERGAMON_BACKUP_PASSPHRASE)
 ```
 
 > **Status**: Active development — Phase 3 complete. Core reading, bookmarking, organization, highlights, spaced repetition, Kindle/Readwise import, Obsidian integration, and stable export contracts are implemented.
@@ -62,7 +63,8 @@ The name captures what this project is about:
 ## Principles
 
 - **Your data, your machine.** Everything lives in a local SQLite database. No accounts,
-  no servers, no cloud required. Export everything at any time.
+  no servers, no cloud required — a fresh install needs no sign-up and no key ceremony.
+  Export everything at any time.
 - **No social features.** No sharing, following, or collaborative collections. This is a
   personal tool for a personal library.
 - **One library, not five apps.** Feeds, articles, bookmarks, highlights, and PDFs flow
@@ -89,7 +91,9 @@ The name captures what this project is about:
 - 📚 Kindle My Clippings.txt import with highlight and note extraction
 - 📥 Readwise CSV import with tags, source grouping, and provenance tracking
 - 📥 Import from OPML, Raindrop.io (CSV), and Pocket (HTML) with dry-run and idempotent re-import
-- 📤 Export: OPML feeds, full backup (ZIP with JSON), highlight export (Markdown/JSON)
+- 📤 Export: OPML feeds, full backup (plaintext ZIP-of-JSON, excludes key material; optional passphrase-encrypted archive), highlight export (Markdown/JSON)
+- 🔑 Key package export/import (`device-key export-package`): passphrase-wraps the account root key so a full recovery is possible from a client alone
+- 🔄 Optional end-to-end-encrypted multi-device sync (opt-in, off by default): explicit **create / join / attach** account flows so a second device never silently duplicates your account, with a **recovery code surfaced at account creation** (`sync-device bootstrap`) that only you can keep — the server cannot recover it for you
 - 📝 Stable export contracts: general-purpose Markdown (frontmatter, backlinks, slug templates) and versioned JSON
 - 🔌 Obsidian plugin for syncing highlights and notes to your vault
 - 🔗 URL canonicalization, duplicate detection, and link health checking

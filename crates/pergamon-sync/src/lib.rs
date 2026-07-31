@@ -37,7 +37,10 @@
 #![forbid(unsafe_code)]
 
 pub mod apply;
+#[cfg(feature = "auth")]
+pub mod auth;
 pub mod blob;
+pub mod credential;
 pub mod crypto;
 pub mod daemon;
 pub mod engine;
@@ -53,8 +56,9 @@ pub mod http;
 #[cfg(feature = "http")]
 pub mod http_relay;
 
-pub use blob::{BlobStore, MemoryBlobStore};
-pub use crypto::CryptoContext;
+pub use blob::{BlobStore, FsBlobStore, MemoryBlobStore};
+pub use credential::TransportCredential;
+pub use crypto::{CryptoContext, DeviceKeyDirectory};
 pub use daemon::{
     Jitter, RoundOutcome, RoundReport, Sleeper, SyncControl, Wake, control, run_forever,
 };

@@ -9,10 +9,34 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use reqwest::StatusCode;
 use reqwest::blocking::Client;
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 
+use crate::credential::TransportCredential;
 use crate::error::{Result, SyncError};
 use crate::transport::Transport;
 use crate::wire::{BlobProbeRequest, BlobProbeResponse, PullResponse, PushRequest, PushResponse};
+
+/// Build a blocking [`Client`] that attaches `credential` (if any) as a
+/// sensitive `Authorization` default header on every request.
+///
+/// The header is marked sensitive (`HeaderValue::set_sensitive(true)`) so
+/// `reqwest` and its logging never record the secret. A credential that cannot
+/// be encoded into a valid header value surfaces as a [`SyncError::Transport`]
+/// whose message never includes the credential text.
+pub(crate) fn build_client(credential: Option<TransportCredential>) -> Result<Client> {
+    let mut builder = Client::builder();
+    if let Some(credential) = credential {
+        let mut value = HeaderValue::from_str(&credential.authorization_header_value())
+            .map_err(|_| SyncError::Transport("invalid authorization credential".to_owned()))?;
+        value.set_sensitive(true);
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, value);
+        builder = builder.default_headers(headers);
+    }
+    builder
+        .build()
+        .map_err(|e| SyncError::Transport(e.to_string()))
+}
 
 /// A blocking HTTP transport to a pergamon sync server.
 pub struct HttpTransport {
@@ -26,9 +50,22 @@ impl HttpTransport {
     /// # Errors
     /// Returns a [`SyncError::Transport`] if the HTTP client cannot be built.
     pub fn new(base_url: impl Into<String>) -> Result<Self> {
-        let client = Client::builder()
-            .build()
-            .map_err(|e| SyncError::Transport(e.to_string()))?;
+        Self::with_credential(base_url, None)
+    }
+
+    /// Build a transport for `base_url` that authenticates every request with
+    /// `credential` (e.g. HTTP Basic when the server sits behind a reverse proxy
+    /// that enforces auth). Pass `None` for an unauthenticated transport.
+    ///
+    /// # Errors
+    /// Returns a [`SyncError::Transport`] if the HTTP client cannot be built or
+    /// the credential cannot be encoded as a header value. The error message
+    /// never contains the credential.
+    pub fn with_credential(
+        base_url: impl Into<String>,
+        credential: Option<TransportCredential>,
+    ) -> Result<Self> {
+        let client = build_client(credential)?;
         Ok(Self {
             client,
             base_url: base_url.into().trim_end_matches('/').to_owned(),

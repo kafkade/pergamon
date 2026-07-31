@@ -18,6 +18,10 @@ default = []
 # The reqwest-backed HTTP transport. Off by default so the engine and its
 # in-memory test double stay dependency-light.
 http = ["dep:reqwest"]
+# OPAQUE client helpers for hosted-sync server auth (WP-3a, ADR-029). Off by
+# default so the core engine stays crypto-light; `opaque-ke` is dual
+# MIT/Apache-2.0. `sha2-opaque` is `sha2 0.10` for the cipher suite.
+auth = ["dep:opaque-ke", "dep:rand", "dep:sha2-opaque", "dep:argon2"]
 
 [dependencies]
 pergamon-core = { workspace = true }
@@ -29,6 +33,10 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 base64 = { workspace = true }
 reqwest = { workspace = true, optional = true, features = ["json"] }
+opaque-ke = { workspace = true, optional = true }
+rand = { workspace = true, optional = true }
+sha2-opaque = { workspace = true, optional = true }
+argon2 = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3"

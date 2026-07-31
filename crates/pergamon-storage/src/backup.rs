@@ -7,6 +7,30 @@
 //! server, and the iOS app all round-trip the exact same bytes, so a backup
 //! produced on one restores on another (issue #118, ADR-020 §4).
 //!
+//! # Security: the base archive is plaintext and excludes key material
+//!
+//! The archive produced by [`export`] is an **unencrypted** ZIP of JSON. Anyone
+//! who can read the file can read your entire library, so store it somewhere you
+//! trust (full-disk encryption, an encrypted volume, a private location).
+//!
+//! It also deliberately contains **no key material** — not the Account Root Key
+//! (ARK), not any device key, not the recovery blob. Those secrets live only in
+//! the OS keychain / encrypted key file (see `pergamon-keystore`), never in a
+//! backup. As a result a plaintext archive **cannot on its own restore an
+//! encrypted / sync-enabled account**: it round-trips content, but the keys that
+//! decrypt synced history must be recovered separately.
+//!
+//! Two optional, opt-in mechanisms close that gap:
+//!
+//! - [`export_encrypted`] / [`restore_encrypted`] wrap the same canonical ZIP in
+//!   a passphrase-protected container (Argon2id + XChaCha20-Poly1305), so the
+//!   archive itself is safe at rest. [`is_encrypted_backup`] lets a restorer
+//!   auto-detect which form a file is.
+//! - A **key package** (`pergamon_crypto::KeyPackage`, exported by the CLI's
+//!   `device-key export-package`) wraps the ARK so a full recovery is possible
+//!   from a client alone. That, not the content archive, is what carries the
+//!   keys.
+//!
 //! The archive layout is:
 //!
 //! ```text
@@ -26,14 +50,35 @@
 //! content_item_tags.json      [(content_item_id, tag_id)]
 //! collection_items.json       [(content_item_id, collection_id, sort_order)]
 //! ```
+//!
+//! # Encrypted container format
+//!
+//! [`export_encrypted`] first builds the canonical ZIP above in memory, then
+//! wraps it in a self-describing container:
+//!
+//! ```text
+//! MAGIC(8) = b"PGMBAK\x01\x00"
+//! version:u8 = 1
+//! salt:[u8;16]                                    Argon2id salt
+//! aead_seal(argon2id_kek(passphrase, salt), AAD, zip_bytes)
+//!   where AAD = b"pergamon/v1/backup-archive"
+//!   and aead_seal output = nonce(24) ‖ ciphertext ‖ tag(16)
+//! ```
+//!
+//! The magic is a fixed identifier (its trailing `\x01\x00` are part of the
+//! identifier, not the version); the `version` byte governs the container
+//! layout so it can evolve. Because the ZIP inside is the *same* canonical
+//! archive, the encrypted form stays shareable across the CLI, web, and iOS.
 
-use std::io::{Read, Seek, Write};
+use std::io::{Cursor, Read, Seek, Write};
 
 use pergamon_core::model::{
     BookmarkMeta, Collection, ContentItem, Feed, FeedFolder, FeedItemMeta, HighlightMeta, Note,
     ReviewCard, ReviewLog, Tag,
 };
 use pergamon_core::rule::ContentRule;
+use pergamon_crypto::CryptoError;
+use pergamon_crypto::primitives;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -277,6 +322,143 @@ pub fn restore<R: Read + Seek>(db: &Database, reader: R) -> Result<BackupStats, 
         rules: rules.len(),
         total,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Optional encrypted container (issue #182, WP-8)
+// ---------------------------------------------------------------------------
+
+/// Magic identifying an encrypted backup container (8 bytes).
+///
+/// The trailing `\x01\x00` are a fixed part of the identifier, not the version
+/// — see [`ENCRYPTED_VERSION`]. A plaintext ZIP starts with `PK\x03\x04`, so the
+/// two forms are unambiguous.
+pub const ENCRYPTED_MAGIC: [u8; 8] = *b"PGMBAK\x01\x00";
+
+/// Container-layout version written by [`export_encrypted`]. Bump when the byte
+/// layout after the magic changes (a new KDF/AEAD, extra fields, …).
+const ENCRYPTED_VERSION: u8 = 1;
+
+/// Length of the per-archive Argon2id salt.
+const ENCRYPTED_SALT_LEN: usize = 16;
+
+/// AEAD associated-data label binding the container's purpose.
+const ENCRYPTED_AAD: &[u8] = b"pergamon/v1/backup-archive";
+
+/// Byte offset of the salt within an encrypted container.
+const ENCRYPTED_SALT_OFFSET: usize = ENCRYPTED_MAGIC.len() + 1;
+
+/// Byte offset of the sealed payload within an encrypted container.
+const ENCRYPTED_BODY_OFFSET: usize = ENCRYPTED_SALT_OFFSET + ENCRYPTED_SALT_LEN;
+
+/// Return `true` if `prefix` begins with the [`ENCRYPTED_MAGIC`] header, i.e.
+/// the bytes are an encrypted backup rather than a plaintext ZIP.
+///
+/// A restorer can read just the first few bytes (the length of the magic) of a
+/// file and branch between [`restore`] and [`restore_encrypted`].
+#[must_use]
+pub fn is_encrypted_backup(prefix: &[u8]) -> bool {
+    prefix.len() >= ENCRYPTED_MAGIC.len() && prefix[..ENCRYPTED_MAGIC.len()] == ENCRYPTED_MAGIC
+}
+
+/// Write a full backup of `db` to `writer` as a passphrase-encrypted container.
+///
+/// The canonical ZIP archive (identical to [`export`]) is built in memory, then
+/// wrapped as `MAGIC ‖ version ‖ salt ‖ aead_seal(argon2id_kek(passphrase, salt),
+/// AAD, zip)`. Unlike [`export`], `writer` need not be seekable. Returns the same
+/// [`BackupStats`] a plaintext export would.
+///
+/// # Errors
+///
+/// Returns [`StorageError`] if the library cannot be read, key derivation or
+/// encryption fails, or the container cannot be written.
+pub fn export_encrypted<W: Write>(
+    db: &Database,
+    mut writer: W,
+    passphrase: &[u8],
+) -> Result<BackupStats, StorageError> {
+    let mut buf = Cursor::new(Vec::new());
+    let stats = export(db, &mut buf)?;
+    let zip_bytes = buf.into_inner();
+
+    let salt = primitives::random_array::<ENCRYPTED_SALT_LEN>().map_err(|e| encrypt_error(&e))?;
+    let kek = primitives::argon2id_kek(passphrase, &salt).map_err(|e| encrypt_error(&e))?;
+    let sealed =
+        primitives::aead_seal(&kek, ENCRYPTED_AAD, &zip_bytes).map_err(|e| encrypt_error(&e))?;
+
+    let mut container = Vec::with_capacity(ENCRYPTED_BODY_OFFSET + sealed.len());
+    container.extend_from_slice(&ENCRYPTED_MAGIC);
+    container.push(ENCRYPTED_VERSION);
+    container.extend_from_slice(&salt);
+    container.extend_from_slice(&sealed);
+    writer
+        .write_all(&container)
+        .map_err(|e| StorageError::Generic(format!("failed to write encrypted backup: {e}")))?;
+
+    Ok(stats)
+}
+
+/// Restore a passphrase-encrypted backup container from `reader` into `db`.
+///
+/// Parses the [`export_encrypted`] container, decrypts the inner canonical ZIP,
+/// and delegates to [`restore`]. `db` must be empty (see [`restore`]).
+///
+/// # Errors
+///
+/// Returns [`StorageError`] if the input is not an encrypted pergamon backup,
+/// its version is unsupported, the passphrase is wrong or the archive is
+/// corrupt, or the inner archive cannot be restored.
+pub fn restore_encrypted<R: Read>(
+    db: &Database,
+    mut reader: R,
+    passphrase: &[u8],
+) -> Result<BackupStats, StorageError> {
+    let mut data = Vec::new();
+    reader
+        .read_to_end(&mut data)
+        .map_err(|e| StorageError::Generic(format!("failed to read encrypted backup: {e}")))?;
+
+    if !is_encrypted_backup(&data) {
+        return Err(StorageError::Generic(
+            "not an encrypted pergamon backup (missing container header)".to_owned(),
+        ));
+    }
+    if data.len() < ENCRYPTED_BODY_OFFSET {
+        return Err(StorageError::Generic(
+            "encrypted backup is truncated".to_owned(),
+        ));
+    }
+    let version = data[ENCRYPTED_MAGIC.len()];
+    if version != ENCRYPTED_VERSION {
+        return Err(StorageError::Generic(format!(
+            "unsupported encrypted backup version {version} — upgrade pergamon first"
+        )));
+    }
+
+    let mut salt = [0u8; ENCRYPTED_SALT_LEN];
+    salt.copy_from_slice(&data[ENCRYPTED_SALT_OFFSET..ENCRYPTED_BODY_OFFSET]);
+    let sealed = &data[ENCRYPTED_BODY_OFFSET..];
+
+    let kek = primitives::argon2id_kek(passphrase, &salt).map_err(decrypt_error)?;
+    let zip_bytes = primitives::aead_open(&kek, ENCRYPTED_AAD, sealed).map_err(decrypt_error)?;
+
+    restore(db, Cursor::new(zip_bytes))
+}
+
+/// Map a crypto error raised while *encrypting* a backup to a storage error.
+fn encrypt_error(err: &CryptoError) -> StorageError {
+    StorageError::Generic(format!("failed to encrypt backup archive: {err}"))
+}
+
+/// Map a crypto error raised while *decrypting* a backup to a storage error,
+/// giving wrong-passphrase / tampering a clear user-facing message.
+fn decrypt_error(err: CryptoError) -> StorageError {
+    match err {
+        CryptoError::Decryption => StorageError::Generic(
+            "failed to decrypt backup: wrong passphrase or corrupt archive".to_owned(),
+        ),
+        other => StorageError::Generic(format!("failed to decrypt backup archive: {other}")),
+    }
 }
 
 /// Write one pretty-printed JSON entry to the archive.

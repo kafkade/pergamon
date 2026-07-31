@@ -1,24 +1,34 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Authenticated encryption of ADR-022 **event bodies**, plus `entity_ref`
-//! blinding.
+//! blinding and per-device event signing (ADR-030).
 //!
-//! The server-visible header (`protocol_version, account_id, change_id,
-//! key_epoch, blob_refs`) is bound into the AEAD as associated data (AAD), so a
-//! server cannot re-target, re-epoch, or replay a body under a different header
-//! without the authentication failing. The body itself — entity type/id, op,
-//! clock, fields — lives only inside the ciphertext and is never seen here or by
-//! the server.
+//! The server-visible header (`protocol_version, account_id, device_id,
+//! change_id, key_epoch, entity_ref, blob_refs`) is bound into the AEAD as
+//! associated data (AAD), so a server cannot re-target, re-epoch, re-attribute,
+//! or replay a body under a different header without the authentication failing.
+//! The body itself — entity type/id, op, clock, fields — lives only inside the
+//! ciphertext and is never seen here or by the server.
+//!
+//! ADR-030 additionally has each device **sign** its events with its Ed25519
+//! identity key over [`event_signing_bytes`], so authenticity (which device
+//! authored a change) is provable and independent of who holds the account-wide
+//! content key. Signature verification against the account device roster happens
+//! in the sync engine; this module provides the pure [`sign_event`] /
+//! [`verify_event`] primitives.
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::{CryptoError, Result};
 use crate::hierarchy::AccountContentKey;
-use crate::primitives;
+use crate::primitives::{self, KEY_LEN, SIG_LEN};
 
 /// Domain tag prefixed to the event AAD so it can never collide with any other
 /// authenticated context.
 const EVENT_AAD_TAG: &[u8] = b"pergamon/v1/event-aad";
+/// Domain tag prefixed to the per-device event **signature** digest so a
+/// signature can never be confused with the AEAD AAD or any other context.
+const EVENT_SIG_TAG: &[u8] = b"pergamon/v1/event-sig";
 /// Domain tag prefixed to the `entity_ref` HMAC input.
 const ENTITY_REF_TAG: &[u8] = b"pergamon/v1/entity-ref-input";
 
@@ -34,10 +44,17 @@ pub struct EventHeader {
     pub protocol_version: u32,
     /// Opaque account handle (ADR-022 `account_id`, hex).
     pub account_id: String,
+    /// Opaque origin-device handle (ADR-022 `device_id`). Bound into the AAD
+    /// (ADR-030) so a server cannot re-attribute a body to a different device.
+    pub device_id: String,
     /// Client-generated globally unique idempotency key.
     pub change_id: String,
     /// Account key epoch that encrypts this body (must match the `ACK_e` used).
     pub key_epoch: u32,
+    /// Blinded per-entity grouping token (ADR-022 `entity_ref`), or `None` when
+    /// the event is not tied to a single entity. Bound into the AAD (ADR-030) so
+    /// a server cannot re-route a body under a different (or absent) token.
+    pub entity_ref: Option<String>,
     /// Ciphertext hashes of blobs this event depends on.
     pub blob_refs: Vec<String>,
 }
@@ -46,21 +63,80 @@ impl EventHeader {
     /// Serialize the header into canonical, unambiguous AAD bytes.
     ///
     /// Every variable-length field is length-prefixed (big-endian `u32`) so no
-    /// two distinct headers can ever produce the same byte string.
+    /// two distinct headers can ever produce the same byte string. `entity_ref`
+    /// is presence-tagged (a leading `0` for `None`, `1` for `Some`) so an
+    /// absent token can never encode identically to `Some("")`.
     #[must_use]
     pub fn aad_bytes(&self) -> Vec<u8> {
         let mut aad = Vec::new();
         aad.extend_from_slice(EVENT_AAD_TAG);
         aad.extend_from_slice(&self.protocol_version.to_be_bytes());
         push_lp(&mut aad, self.account_id.as_bytes());
+        push_lp(&mut aad, self.device_id.as_bytes());
         push_lp(&mut aad, self.change_id.as_bytes());
         aad.extend_from_slice(&self.key_epoch.to_be_bytes());
+        match &self.entity_ref {
+            None => aad.push(0),
+            Some(r) => {
+                aad.push(1);
+                push_lp(&mut aad, r.as_bytes());
+            }
+        }
         aad.extend_from_slice(&u32_len(self.blob_refs.len()).to_be_bytes());
         for r in &self.blob_refs {
             push_lp(&mut aad, r.as_bytes());
         }
         aad
     }
+}
+
+/// The canonical, domain-tagged bytes a device **signs** to authenticate an
+/// event (ADR-030): `EVENT_SIG_TAG ‖ header.aad_bytes() ‖ u32(len(ciphertext))
+/// ‖ ciphertext`.
+///
+/// Signing over `aad_bytes()` means the signature transitively covers every
+/// routing field the AAD binds (account, device, change, epoch, `entity_ref`,
+/// `blob_refs`); appending the length-prefixed ciphertext binds the body too. The
+/// distinct [`EVENT_SIG_TAG`] domain-separates this digest from the AEAD's use
+/// of the same AAD.
+#[must_use]
+pub fn event_signing_bytes(header: &EventHeader, ciphertext: &[u8]) -> Vec<u8> {
+    let aad = header.aad_bytes();
+    let mut msg = Vec::with_capacity(EVENT_SIG_TAG.len() + aad.len() + 4 + ciphertext.len());
+    msg.extend_from_slice(EVENT_SIG_TAG);
+    msg.extend_from_slice(&aad);
+    msg.extend_from_slice(&u32_len(ciphertext.len()).to_be_bytes());
+    msg.extend_from_slice(ciphertext);
+    msg
+}
+
+/// Sign an event with a device's Ed25519 signing-key seed (ADR-030).
+///
+/// The signature authenticates authorship over [`event_signing_bytes`]; verify
+/// it with [`verify_event`] against the signer's public key from the account
+/// device roster.
+#[must_use]
+pub fn sign_event(
+    signing_key: &[u8; KEY_LEN],
+    header: &EventHeader,
+    ciphertext: &[u8],
+) -> [u8; SIG_LEN] {
+    primitives::ed25519_sign(signing_key, &event_signing_bytes(header, ciphertext))
+}
+
+/// Verify an event's Ed25519 signature against a device's public key (ADR-030).
+///
+/// # Errors
+/// Returns [`CryptoError::Malformed`] if `ed25519_pub` is not a valid point, or
+/// [`CryptoError::BadSignature`] if the signature does not authenticate the
+/// exact `header` + `ciphertext`.
+pub fn verify_event(
+    ed25519_pub: &[u8; KEY_LEN],
+    header: &EventHeader,
+    ciphertext: &[u8],
+    sig: &[u8; SIG_LEN],
+) -> Result<()> {
+    primitives::ed25519_verify(ed25519_pub, &event_signing_bytes(header, ciphertext), sig)
 }
 
 /// Encrypt an ADR-022 event body under the account content key for its epoch.
@@ -162,8 +238,10 @@ mod tests {
         EventHeader {
             protocol_version: 1,
             account_id: "abababababababababababababababab".to_owned(),
+            device_id: "device-aaaa".to_owned(),
             change_id: "change-0001".to_owned(),
             key_epoch: 0,
+            entity_ref: Some("blinded-entity-ref".to_owned()),
             blob_refs: vec!["hashA".to_owned(), "hashB".to_owned()],
         }
     }
@@ -192,6 +270,101 @@ mod tests {
         assert!(matches!(
             decrypt_event(&ack, &wrong, &ct),
             Err(CryptoError::Decryption)
+        ));
+    }
+
+    #[test]
+    fn tampered_device_id_fails_decryption() {
+        // ADR-030: `device_id` is bound into the AAD, so a server re-attributing
+        // a body to another device breaks authentication.
+        let ark = AccountRootKey::from_bytes([9u8; 32]);
+        let ack = ark.content_key(0).unwrap();
+        let h = header();
+        let ct = encrypt_event(&ack, &h, b"body").unwrap();
+
+        let mut wrong = header();
+        wrong.device_id = "device-evil".to_owned();
+        assert!(matches!(
+            decrypt_event(&ack, &wrong, &ct),
+            Err(CryptoError::Decryption)
+        ));
+    }
+
+    #[test]
+    fn tampered_entity_ref_fails_decryption() {
+        // ADR-030: `entity_ref` is bound into the AAD, so a server re-routing a
+        // body under a different (or absent) grouping token breaks it.
+        let ark = AccountRootKey::from_bytes([9u8; 32]);
+        let ack = ark.content_key(0).unwrap();
+        let h = header();
+        let ct = encrypt_event(&ack, &h, b"body").unwrap();
+
+        let mut retagged = header();
+        retagged.entity_ref = Some("other-entity".to_owned());
+        assert!(matches!(
+            decrypt_event(&ack, &retagged, &ct),
+            Err(CryptoError::Decryption)
+        ));
+
+        let mut cleared = header();
+        cleared.entity_ref = None;
+        assert!(matches!(
+            decrypt_event(&ack, &cleared, &ct),
+            Err(CryptoError::Decryption)
+        ));
+    }
+
+    #[test]
+    fn aad_disambiguates_none_from_empty_entity_ref() {
+        // `None` must never encode identically to `Some("")`.
+        let mut none = header();
+        none.entity_ref = None;
+        let mut empty = header();
+        empty.entity_ref = Some(String::new());
+        assert_ne!(none.aad_bytes(), empty.aad_bytes());
+    }
+
+    #[test]
+    fn event_signature_verifies() {
+        let (signing, verifying) = crate::primitives::ed25519_generate().unwrap();
+        let ark = AccountRootKey::from_bytes([9u8; 32]);
+        let ack = ark.content_key(0).unwrap();
+        let h = header();
+        let ct = encrypt_event(&ack, &h, b"body").unwrap();
+        let sig = sign_event(&signing, &h, &ct);
+        assert!(verify_event(&verifying, &h, &ct, &sig).is_ok());
+    }
+
+    #[test]
+    fn event_signature_rejects_tampering() {
+        let (signing, verifying) = crate::primitives::ed25519_generate().unwrap();
+        let (_, other_pub) = crate::primitives::ed25519_generate().unwrap();
+        let ark = AccountRootKey::from_bytes([9u8; 32]);
+        let ack = ark.content_key(0).unwrap();
+        let h = header();
+        let ct = encrypt_event(&ack, &h, b"body").unwrap();
+        let sig = sign_event(&signing, &h, &ct);
+
+        // Tampered header (re-attributed device) fails.
+        let mut forged = header();
+        forged.device_id = "device-evil".to_owned();
+        assert!(matches!(
+            verify_event(&verifying, &forged, &ct, &sig),
+            Err(CryptoError::BadSignature)
+        ));
+
+        // Tampered ciphertext fails.
+        let mut bad_ct = ct.clone();
+        bad_ct[0] ^= 0xff;
+        assert!(matches!(
+            verify_event(&verifying, &h, &bad_ct, &sig),
+            Err(CryptoError::BadSignature)
+        ));
+
+        // Wrong signer key fails.
+        assert!(matches!(
+            verify_event(&other_pub, &h, &ct, &sig),
+            Err(CryptoError::BadSignature)
         ));
     }
 

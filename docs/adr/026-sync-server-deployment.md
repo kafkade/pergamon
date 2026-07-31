@@ -1,6 +1,7 @@
 # ADR-026: Sync Server Deployment
 
-**Status**: Accepted  
+**Status**: Accepted (amended 2026-07-27 for WAL — see [Amendment: WAL and
+sidecar files](#amendment-wal-and-sidecar-files))
 **Date**: 2026-07-09  
 **Deciders**: kafkade
 
@@ -62,9 +63,16 @@ bind-mounted host directories, the directory must be writable by UID 1000.
 
 ### Data persistence: single volume at /data
 
-All persistent state is the single SQLite database at
-`/data/pergamon-sync.db`. The server holds one `Mutex`-guarded connection with a
-`busy_timeout`, so under normal operation there are no WAL sidecar files.
+All persistent state is the single SQLite database at `/data/pergamon-sync.db`.
+
+> **Amended (WP-3e, #201).** This section originally read: "The server holds one
+> `Mutex`-guarded connection with a `busy_timeout`, so under normal operation
+> there are no WAL sidecar files." That is **no longer true.** The server now
+> runs the database in **WAL mode** behind one writer connection and a bounded
+> pool of reader connections (ADR-031), so `/data` normally contains
+> `pergamon-sync.db`, `pergamon-sync.db-wal` and `pergamon-sync.db-shm`. All
+> three belong to the database. See [Amendment: WAL and sidecar
+> files](#amendment-wal-and-sidecar-files).
 
 The database contains only ciphertext and blinded identifiers; it is useless
 without the account key held by the client devices. The Dockerfile does not
@@ -106,8 +114,12 @@ for a personal deployment.
 ### Health check endpoint and subcommand
 
 `GET /health` returns HTTP 200 with `{ "status": "ok", "version": "..." }`, or
-503 if the store lock is poisoned. It requires no authentication and exposes no
-user data.
+503 if the store's writer lock has been poisoned by a panic. It requires no
+authentication and exposes no user data.
+
+Since WP-3e (#201) it deliberately does **not** probe the reader pool: a
+saturated pool is transient load, not a fault, and failing the container health
+check under load would make the orchestrator restart a perfectly healthy server.
 
 The binary includes a `health-check` subcommand that performs an HTTP GET to the
 endpoint, backing the container `HEALTHCHECK` so the minimal runtime image needs
@@ -128,10 +140,28 @@ draining in-flight requests before exiting cleanly. Docker sends `SIGTERM` on
 
 Clients keep a full local copy and remain the source of truth, so a lost server
 database is recoverable by re-syncing from a device. Backup is therefore
-**volume-level only** and requires stopping the container so the file is
-consistent (copy `/data`). The image intentionally omits the `pergamon` CLI:
-the store is opaque ciphertext, so an application-level `export backup` would add
-no value here (unlike the web image, where it exports readable content).
+**volume-level only** and requires stopping the container so the files are
+consistent (copy all of `/data`). The image intentionally omits the `pergamon`
+CLI: the store is opaque ciphertext, so an application-level `export backup`
+would add no value here (unlike the web image, where it exports readable
+content).
+
+> **Amended (WP-3e, #201).** Since the database runs in WAL mode, a backup must
+> capture `pergamon-sync.db` **and** its `-wal` sidecar. The documented procedure
+> — stop the container, archive the whole `/data` directory, start it again —
+> stays correct, because a clean shutdown closes the last connection, which
+> checkpoints the WAL and removes the sidecars; and the documented restore's
+> `rm -f /data/*` correctly clears any stale ones. What is **no longer safe** is
+> a *hot* copy of `pergamon-sync.db` alone: it omits recently committed data and
+> may be unusable. Either stop the container, or snapshot all three files
+> atomically.
+
+Note that the web image's `export backup` produces a **plaintext ZIP of JSON
+that excludes all key material** (account root key, device keys), so it must be
+stored securely and cannot on its own recover an encrypted/sync-enabled account.
+That image offers `export backup --encrypt` for an at-rest-encrypted archive and
+`device-key export-package` to wrap the account root key for full recovery; this
+blind-relay image, holding only ciphertext, needs neither.
 
 ### AGPL image obligations
 
@@ -204,3 +234,30 @@ every PR — so adding the sync-server image requires no branch-protection chang
 - **Alpine runtime image.** Rejected for the same reason as ADR-018: musl libc
   can cause subtle issues with native Rust crates; `debian:bookworm-slim` is
   more compatible at a modest size cost.
+
+## Amendment: WAL and sidecar files
+
+**Date**: 2026-07-27 — **Driver**: WP-3e (#201), see ADR-031.
+
+This ADR was written when the server held one `Mutex`-guarded SQLite connection
+with a `busy_timeout` and the database's default rollback journal. WP-3e replaced
+that with **WAL mode** behind one writer connection and a bounded reader pool, so
+that concurrent tenants no longer serialize behind a single lock. Two statements
+in this ADR were invalidated and have been corrected inline above:
+
+1. **"Under normal operation there are no WAL sidecar files"** — no longer true.
+   `/data` now normally holds `pergamon-sync.db`, `pergamon-sync.db-wal` and
+   `pergamon-sync.db-shm`. All three are part of the database.
+2. **The backup story.** Still volume-level only, and the documented
+   stop → archive `/data` → start procedure is still correct: a clean shutdown
+   checkpoints the WAL and removes the sidecars, and the documented restore's
+   `rm -f /data/*` clears stale ones. The new hazard is a **hot** copy of
+   `pergamon-sync.db` alone, which now silently omits recently committed data.
+   Operators with a hand-rolled hot-copy script written against the old text must
+   update it.
+
+Nothing else in this ADR changes. The image, its configuration surface, the
+blind-relay security model, the AGPL obligations, and the CI story are all
+unaffected. `synchronous = NORMAL` (the standard WAL pairing) is compatible with
+this ADR's premise that clients are the source of truth and a lost server
+database is recoverable by re-syncing from a device.

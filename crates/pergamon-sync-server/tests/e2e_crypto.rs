@@ -42,6 +42,32 @@ impl TempDb {
             std::env::temp_dir().join(format!("pergamon-sync-crypto-{}.db", uuid::Uuid::new_v4()));
         Self { path }
     }
+
+    /// Every byte the server has persisted: the main database **plus** the WAL
+    /// sidecar.
+    ///
+    /// Since WP-3e (#201) the store runs in WAL mode, so a just-committed row
+    /// lives in `<db>-wal` until a checkpoint folds it into the main file.
+    /// Reading only the main file would silently weaken the content-blindness
+    /// assertions this suite exists for.
+    fn all_bytes(&self) -> Vec<u8> {
+        let mut bytes = std::fs::read(&self.path).unwrap();
+        // DO NOT "simplify" this back to reading only the main file. Since
+        // WP-3e (#201) the store runs in WAL mode, so a just-committed row lives
+        // in `<db>-wal` until a checkpoint folds it into the main file. Reading
+        // only the main file would make the "no plaintext" assertions pass
+        // against bytes the server had not written there yet — i.e. it would
+        // silently gut the content-blindness guarantee this suite exists for.
+        // Both the negative assertions (no plaintext anywhere) and the positive
+        // one (ciphertext present) must run against ALL persisted bytes.
+        for suffix in ["-wal", "-shm"] {
+            let sidecar = format!("{}{suffix}", self.path.display());
+            if let Ok(mut extra) = std::fs::read(sidecar) {
+                bytes.append(&mut extra);
+            }
+        }
+        bytes
+    }
 }
 
 impl Drop for TempDb {
@@ -131,8 +157,10 @@ async fn real_crypto_event_and_blob_round_trip() {
     let header = EventHeader {
         protocol_version: 1,
         account_id: account_hex.clone(),
+        device_id: "device-A".to_owned(),
         change_id: change_id.clone(),
         key_epoch: epoch,
+        entity_ref: None,
         blob_refs: vec![blob.ct_hash.clone()],
     };
     let event_ct = encrypt_event(
@@ -167,7 +195,7 @@ async fn real_crypto_event_and_blob_round_trip() {
     assert_eq!(status, StatusCode::OK);
 
     // --- The server database holds ciphertext only ---------------------------
-    let db_bytes = std::fs::read(&tmp.path).unwrap();
+    let db_bytes = tmp.all_bytes();
     assert!(
         !contains(&db_bytes, blob_marker.as_bytes()),
         "blob plaintext leaked into the server database"
@@ -202,8 +230,10 @@ async fn real_crypto_event_and_blob_round_trip() {
     let pulled_header = EventHeader {
         protocol_version: u32::try_from(ev["protocol_version"].as_u64().unwrap()).unwrap(),
         account_id: ev["account_id"].as_str().unwrap().to_owned(),
+        device_id: ev["device_id"].as_str().unwrap().to_owned(),
         change_id: ev["change_id"].as_str().unwrap().to_owned(),
         key_epoch: u32::try_from(ev["key_epoch"].as_u64().unwrap()).unwrap(),
+        entity_ref: ev["entity_ref"].as_str().map(ToOwned::to_owned),
         blob_refs: ev["blob_refs"]
             .as_array()
             .unwrap()
@@ -315,7 +345,7 @@ async fn enrollment_bundle_relayed_and_opened_only_by_target() {
     assert_eq!(status, StatusCode::OK);
 
     // The raw ARK bytes never appear in the server database.
-    let db_bytes = std::fs::read(&tmp.path).unwrap();
+    let db_bytes = tmp.all_bytes();
     assert!(!contains(&db_bytes, ark.expose_bytes()));
 
     // The new device lists and opens its bundle.
@@ -449,7 +479,7 @@ async fn recovery_blob_relayed_and_recovered() {
     assert_eq!(status, StatusCode::CREATED);
 
     // The ARK never appears in the server database.
-    let db_bytes = std::fs::read(&tmp.path).unwrap();
+    let db_bytes = tmp.all_bytes();
     assert!(!contains(&db_bytes, ark.expose_bytes()));
 
     let (status, body) = send(
