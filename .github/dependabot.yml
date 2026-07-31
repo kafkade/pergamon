@@ -16,6 +16,14 @@ updates:
       cargo:
         patterns:
           - "*"
+    ignore:
+      # `rand` is pinned to 0.8 because `opaque-ke 4.x` is built on
+      # `rand_core 0.6`: the `OsRng` we pass into its OPAQUE APIs must
+      # implement that generation's traits. Bumping the major breaks the
+      # whole workspace build. Revisit when `opaque-ke` moves to a newer
+      # `rand_core`.
+      - dependency-name: "rand"
+        update-types: ["version-update:semver-major"]
 
   # GitHub Actions
   - package-ecosystem: "github-actions"
