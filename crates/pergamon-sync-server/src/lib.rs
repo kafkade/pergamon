@@ -25,6 +25,8 @@
 //! - `GET  /v1/blobs/{account_id}/{ct_hash}` — download an opaque blob.
 //! - `POST /v1/events` — push a batch of encrypted event envelopes.
 //! - `GET  /v1/events` — pull events with `server_seq > cursor`, ascending.
+//! - `GET  /v1/usage/{account_id}` — per-tenant ciphertext usage + quota status
+//!   for billing/metrics (WP-3d, #198); tenant isolated in multi-tenant mode.
 //!
 //! ## Onboarding-artifact relay (ADR-024)
 //! Opaque stores for the E2EE onboarding artifacts; the server relays these
@@ -36,20 +38,35 @@
 //! - `POST/GET /v1/attestations/{account_id}` — signed trust/revocation
 //!   attestations, cursored.
 //! - `PUT/GET /v1/recovery/{account_id}` — the optional recovery blob.
+//!
+//! ## Concurrency (WP-3e, #201)
+//! The store is a WAL `SQLite` database behind **one writer connection and a
+//! bounded pool of reader connections** ([`pool`]), not a single process-wide
+//! mutex. Handlers run blocking store work on `tokio::task::spawn_blocking` via
+//! [`AppState`], and a per-`account_id` in-flight cap ([`fairness`]) keeps one
+//! heavy tenant from holding every pooled connection. `SQLite` still allows
+//! exactly one writer at a time; see ADR-031 for the full scaling story.
 
 pub mod abuse;
 pub mod auth;
 pub mod envelope;
 pub mod error;
+pub mod fairness;
+pub mod pool;
+pub mod quota;
 pub mod routes;
 pub mod state;
 pub mod store;
 
 use axum::Router;
+use axum::middleware::from_fn_with_state;
 use tower_http::compression::CompressionLayer;
 use tower_http::trace::TraceLayer;
 
 pub use abuse::{AbuseConfig, apply_abuse_controls};
+pub use fairness::{FairnessConfig, TenantLimiter};
+pub use pool::{DEFAULT_CHECKOUT_TIMEOUT, DEFAULT_READ_POOL_SIZE, PoolConfig};
+pub use quota::{QuotaConfig, QuotaLimit};
 pub use state::AppState;
 pub use store::{SyncStore, ct_hash};
 
@@ -69,17 +86,23 @@ pub fn build_router(state: AppState) -> Router {
 /// Used in [`auth::ServerMode::Multitenant`]. The content store stays blind; the
 /// auth routes live in a separate module with a separate store.
 ///
-/// **WP-3c enforcement seam (#197):** the blind content routes below are merged
-/// **without** a per-request authorization layer. WP-3c will wrap every
-/// `{account_id}` content route with a middleware that calls
-/// [`auth::store::AuthStore::validate_token`] (surfaced as
-/// [`auth::AuthState::validate_token`]) and asserts the token's `account_id`
-/// equals the route's `{account_id}`. WP-3b (#192) provides that primitive and
-/// the mint/refresh/revoke endpoints but deliberately does not gate content here.
+/// **WP-3c enforcement (#197):** every account-scoped content/relay route is
+/// wrapped with [`auth::require_account_auth`], a per-request authorization layer
+/// that calls [`auth::AuthState::validate_token`] and asserts the token's
+/// `account_id` equals the route's target `account_id` (in the path, body, or
+/// query — see [`auth::authz`]). The layer is applied to the content routes
+/// **before** [`auth::auth_router`] is merged, so `/v1/auth/*` (which establish
+/// identity and precede any bearer) stay open; `/health` is allowlisted inside
+/// the layer. The blind builders ([`build_router`], [`build_router_hardened`])
+/// are unaffected and remain byte-for-byte behavior-identical (ADR-026).
 ///
 /// **NOT YET EXTERNALLY SECURITY-REVIEWED — do not deploy** (see [`auth`]).
 pub fn build_router_multitenant(state: AppState, auth_state: auth::AuthState) -> Router {
     routes::router(state)
+        .layer(from_fn_with_state(
+            auth_state.clone(),
+            auth::require_account_auth,
+        ))
         .merge(auth::auth_router(auth_state))
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
@@ -109,7 +132,12 @@ pub fn build_router_hardened(state: AppState, abuse: &AbuseConfig) -> Router {
 ///
 /// The token refresh/revoke endpoints (WP-3b, #192) are part of the auth router
 /// and get the same strict per-IP tier + body cap here. The WP-3c content-route
-/// authorization seam is as documented on [`build_router_multitenant`].
+/// authorization ([`auth::require_account_auth`]) is applied to the hardened
+/// content routes exactly as in [`build_router_multitenant`]: the layer wraps the
+/// content routes **before** the auth router is merged, so `/v1/auth/*` and
+/// `/health` stay reachable without a bearer. The auth layer is the outer wrap on
+/// the content routes (the per-IP/body abuse controls remain inside); global
+/// abuse controls are layered on top at the serve site.
 ///
 /// **NOT YET EXTERNALLY SECURITY-REVIEWED — do not deploy** (see [`auth`]).
 pub fn build_router_multitenant_hardened(
@@ -118,10 +146,11 @@ pub fn build_router_multitenant_hardened(
     abuse: &AbuseConfig,
 ) -> Router {
     let auth = abuse::apply_strict_rate_limit(
-        auth::auth_router(auth_state).layer(abuse::body_limit_layer(abuse.max_body_bytes)),
+        auth::auth_router(auth_state.clone()).layer(abuse::body_limit_layer(abuse.max_body_bytes)),
         abuse,
     );
     routes::hardened_router(state, abuse)
+        .layer(from_fn_with_state(auth_state, auth::require_account_auth))
         .merge(auth)
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())

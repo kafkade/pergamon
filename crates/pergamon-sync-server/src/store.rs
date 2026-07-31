@@ -12,17 +12,89 @@
 //!
 //! Everything stored here is ciphertext or a server-visible header field. The
 //! store never sees plaintext, entity ids, or entity types.
+//!
+//! ## Concurrency model (WP-3e, [#201])
+//! The store is **not** a single mutexed connection. It keeps:
+//!
+//! - one **writer** connection behind a `Mutex`, and
+//! - a bounded [`pool`](crate::pool) of **reader** connections.
+//!
+//! `SQLite` permits exactly one writer at a time even in WAL mode, so making the
+//! writer explicit costs nothing and makes that ceiling structural instead of
+//! hiding it behind connections that would race and collide on `SQLITE_BUSY`.
+//! Reads run concurrently on pooled connections; WAL is what lets them proceed
+//! without blocking (or being blocked by) the writer. See ADR-031.
+//!
+//! Every method takes `&self` and acquires exactly what it needs. All calls are
+//! blocking, so HTTP handlers run them on `tokio::task::spawn_blocking` via
+//! [`crate::state::AppState`].
+//!
+//! [#201]: https://github.com/kafkade/pergamon/issues/201
+
+// Every method here holds a connection guard (a pooled reader or the writer
+// lock) for essentially its whole body, because that is exactly the window the
+// query needs. `significant_drop_tightening` fires on the final `Ok(..)` in each
+// one, where dropping a statement earlier buys nothing. Matches the idiom in
+// `pergamon-server`'s route modules.
+#![allow(clippy::significant_drop_tightening)]
 
 use std::fmt::Write as _;
+use std::ops::Deref;
 use std::path::Path;
+use std::sync::{Mutex, MutexGuard};
+use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 
+use crate::pool::{
+    ConnectionPool, DEFAULT_CHECKOUT_TIMEOUT, PoolConfig, PoolError, PooledConnection,
+};
+use crate::quota::{QuotaConfig, QuotaLimit};
+
+/// Pragmas applied to the single writer connection.
+///
+/// - `journal_mode = WAL` is set separately (it returns a row) but is the reason
+///   the reader pool is worth anything: without it readers block the writer.
+/// - `synchronous = NORMAL` is the standard WAL pairing — durable across a
+///   process crash, and at worst loses the last transaction on power loss. That
+///   is an acceptable trade here because ADR-026 already establishes that
+///   clients are the source of truth and a lost server database is recoverable
+///   by re-syncing from a device.
+/// - `busy_timeout` is kept as the cross-process backstop. Within this process
+///   writes cannot collide, because they all serialize on the writer `Mutex`.
+const WRITER_PRAGMAS: &str = "PRAGMA synchronous = NORMAL;
+     PRAGMA busy_timeout = 5000;";
+
+/// Pragmas applied to every pooled reader connection.
+///
+/// `query_only = ON` is defence in depth for the read/write split: if a method
+/// is ever mis-classified as a read, it fails loudly instead of quietly writing
+/// through a connection the design assumes is read-only.
+const READER_PRAGMAS: &str = "PRAGMA busy_timeout = 5000;
+     PRAGMA query_only = ON;";
+
 /// Errors returned by the [`SyncStore`].
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
+    /// The store could not hand out a connection in time (WP-3e, #201).
+    ///
+    /// A **transient capacity** condition — the reader pool was saturated or the
+    /// writer lock was poisoned — not a corrupted-data fault. The HTTP layer
+    /// renders it as a retryable `503`, never a `500`.
+    #[error("store temporarily unavailable: {0}")]
+    Unavailable(String),
+
+    /// A write was refused because it would exceed the account's configured
+    /// storage quota (WP-3d, #198). Carries which limit was hit so the HTTP
+    /// layer can render a `507` naming the dimension.
+    #[error("account storage quota exceeded ({limit})")]
+    QuotaExceeded {
+        /// Which configured cap (bytes or object count) the write would exceed.
+        limit: QuotaLimit,
+    },
+
     /// A blob's supplied `ct_hash` did not match the SHA-256 of its bytes.
     #[error("blob hash mismatch: expected {expected}, computed {actual}")]
     BlobHashMismatch {
@@ -46,6 +118,12 @@ pub enum StoreError {
     /// A JSON (de)serialization error for the stored `blob_refs` list.
     #[error("blob_refs encoding error: {0}")]
     Json(#[from] serde_json::Error),
+}
+
+impl From<PoolError> for StoreError {
+    fn from(err: PoolError) -> Self {
+        Self::Unavailable(err.to_string())
+    }
 }
 
 /// One event envelope to append, with the ciphertext body already base64-decoded.
@@ -160,6 +238,42 @@ pub struct AppendResult {
     pub deduplicated: bool,
 }
 
+/// A snapshot of an account's metered ciphertext usage (WP-3d, #198).
+///
+/// Measured on **ciphertext size and counts only** — the opaque blob bytes
+/// (`blobs.byte_len`) and event payload bytes (`events.payload_bytes`). This is
+/// metadata the operator necessarily learns by storing the bytes; computing it
+/// never inspects or decodes ciphertext (design §2.5, content-blindness).
+///
+/// The onboarding-artifact relay tables (device records, wrapped bundles,
+/// attestations, recovery blobs) are intentionally **not** metered: they are
+/// bounded, operationally negligible, and out of scope for storage quotas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct UsageRecord {
+    /// Total bytes of opaque blob ciphertext stored for the account.
+    pub blob_bytes: u64,
+    /// Number of distinct blobs stored for the account.
+    pub blob_count: u64,
+    /// Total bytes of event ciphertext (`payload_bytes`) stored for the account.
+    pub event_bytes: u64,
+    /// Number of events stored for the account.
+    pub event_count: u64,
+}
+
+impl UsageRecord {
+    /// Combined metered ciphertext bytes (blobs + events).
+    #[must_use]
+    pub const fn total_bytes(&self) -> u64 {
+        self.blob_bytes.saturating_add(self.event_bytes)
+    }
+
+    /// Combined metered object count (blobs + events).
+    #[must_use]
+    pub const fn total_objects(&self) -> u64 {
+        self.blob_count.saturating_add(self.event_count)
+    }
+}
+
 /// Compute the content address (`ct_hash`) of some bytes: lowercase-hex SHA-256.
 ///
 /// Blobs are addressed by the hash of their *ciphertext*, so this is the same
@@ -181,38 +295,240 @@ fn now_millis() -> i64 {
     now.unix_timestamp() * 1000 + i64::from(now.millisecond())
 }
 
+/// A borrowed read connection: either one checked out of the reader pool, or —
+/// for an in-memory store, which has no pool — the writer connection itself.
+///
+/// Dereferences to [`Connection`], so read code is identical either way.
+enum ReadHandle<'a> {
+    /// A connection checked out of the reader pool (file-backed stores).
+    Pooled(PooledConnection<'a>),
+    /// The single connection of an in-memory store.
+    Single(MutexGuard<'a, Connection>),
+}
+
+impl Deref for ReadHandle<'_> {
+    type Target = Connection;
+
+    fn deref(&self) -> &Connection {
+        match self {
+            Self::Pooled(conn) => conn,
+            Self::Single(conn) => conn,
+        }
+    }
+}
+
 /// `SQLite`-backed persistence for the encrypted event log and blob store.
+///
+/// See the module docs for the writer/reader-pool concurrency model.
 pub struct SyncStore {
-    conn: Connection,
+    /// The single writer connection. `SQLite` allows one writer at a time, so
+    /// serializing here means writes never collide on `SQLITE_BUSY` in-process.
+    writer: Mutex<Connection>,
+    /// Bounded pool of read-only connections.
+    ///
+    /// `None` for an in-memory store: each `:memory:` connection would be its
+    /// own empty database, so an in-memory store deliberately degenerates to a
+    /// single connection that serves both reads and writes — byte-for-byte the
+    /// pre-WP-3e behavior the test suites depend on.
+    readers: Option<ConnectionPool>,
+    /// Per-tenant storage quota policy (WP-3d, #198). Defaults to
+    /// [`QuotaConfig::unlimited`] so blind / existing deployments are unchanged;
+    /// set an explicit cap with [`SyncStore::with_quota`].
+    quota: QuotaConfig,
 }
 
 impl SyncStore {
     /// Open (creating if needed) a file-backed store and initialize its schema.
     ///
+    /// Uses the default [`PoolConfig`]; see [`SyncStore::open_with_pool`] to
+    /// size the reader pool explicitly.
+    ///
     /// # Errors
     /// Returns [`StoreError::Db`] if the database cannot be opened or migrated.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
-        let conn = Connection::open(path)?;
-        conn.execute_batch("PRAGMA busy_timeout = 5000;")?;
-        let store = Self { conn };
+        Self::open_with_pool(path, PoolConfig::default())
+    }
+
+    /// Open a file-backed store with an explicit reader-pool configuration
+    /// (WP-3e, #201).
+    ///
+    /// The writer connection is opened, put into WAL mode, and migrated *first*,
+    /// so the reader connections attach to an already-initialized database.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Db`] if the database cannot be opened, configured,
+    /// or migrated.
+    pub fn open_with_pool(path: impl AsRef<Path>, pool: PoolConfig) -> Result<Self, StoreError> {
+        let path = path.as_ref();
+        let writer = Connection::open(path)?;
+        let journal_mode = Self::configure_writer(&writer)?;
+        if !journal_mode.eq_ignore_ascii_case("wal") {
+            tracing::warn!(
+                journal_mode = %journal_mode,
+                path = %path.display(),
+                "database did not enter WAL mode; concurrent reads will be limited"
+            );
+        }
+
+        let store = Self {
+            writer: Mutex::new(writer),
+            readers: None,
+            quota: QuotaConfig::default(),
+        };
         store.init_schema()?;
-        Ok(store)
+
+        let owned = path.to_path_buf();
+        let readers = ConnectionPool::new(pool, || {
+            let conn = Connection::open(&owned)?;
+            conn.execute_batch(READER_PRAGMAS)?;
+            Ok(conn)
+        })?;
+        tracing::debug!(
+            read_pool_size = readers.size(),
+            checkout_timeout_ms = readers.checkout_timeout().as_millis(),
+            "opened sync store reader pool"
+        );
+        Ok(Self {
+            readers: Some(readers),
+            ..store
+        })
     }
 
     /// Open an in-memory store (used by tests).
+    ///
+    /// Deliberately **not** pooled: every `:memory:` connection is a distinct,
+    /// empty database, so a pool would silently give each caller a different
+    /// store. The single connection serves both reads and writes, exactly as the
+    /// store behaved before WP-3e. Real concurrency is exercised against a
+    /// file-backed store (see `tests/e2e_concurrency.rs`).
     ///
     /// # Errors
     /// Returns [`StoreError::Db`] if the schema cannot be created.
     pub fn open_in_memory() -> Result<Self, StoreError> {
         let conn = Connection::open_in_memory()?;
-        let store = Self { conn };
+        // WAL is not available for `:memory:`; the rest still applies.
+        conn.execute_batch(WRITER_PRAGMAS)?;
+        let store = Self {
+            writer: Mutex::new(conn),
+            readers: None,
+            quota: QuotaConfig::default(),
+        };
         store.init_schema()?;
         Ok(store)
     }
 
+    /// Apply the writer pragmas, returning the journal mode actually in effect.
+    fn configure_writer(conn: &Connection) -> Result<String, StoreError> {
+        // `PRAGMA journal_mode = WAL` returns a row, so it is run as a query
+        // (which also reports the mode the database actually ended up in).
+        let mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
+        conn.execute_batch(WRITER_PRAGMAS)?;
+        Ok(mode)
+    }
+
+    /// Lock the writer connection.
+    ///
+    /// **Never call [`Self::reader`] while holding this.** For an in-memory
+    /// store `reader()` returns the *same* lock, and `std::sync::Mutex` is not
+    /// reentrant, so a method that acquired both would self-deadlock. Every
+    /// write method here takes the writer once and passes `&Connection` (or
+    /// `&Transaction`) to its helpers instead.
+    fn writer(&self) -> Result<MutexGuard<'_, Connection>, StoreError> {
+        self.writer
+            .lock()
+            .map_err(|_| StoreError::Unavailable("writer lock poisoned".to_owned()))
+    }
+
+    /// Check out a read connection (or the single connection, in-memory).
+    ///
+    /// See [`Self::writer`] for why the two must never be held together.
+    fn reader(&self) -> Result<ReadHandle<'_>, StoreError> {
+        match self.readers.as_ref() {
+            Some(pool) => Ok(ReadHandle::Pooled(pool.get()?)),
+            None => Ok(ReadHandle::Single(self.writer()?)),
+        }
+    }
+
+    /// `true` if the writer lock is healthy (not poisoned).
+    ///
+    /// Backs `GET /health`, which reports `503` only for a genuine fault. It
+    /// deliberately does **not** probe the reader pool: a saturated pool is
+    /// transient load, and failing the container health check under load would
+    /// make an orchestrator restart a working server.
+    #[must_use]
+    pub fn is_healthy(&self) -> bool {
+        !self.writer.is_poisoned()
+    }
+
+    /// The journal mode the database is running in (`"wal"` for a file-backed
+    /// store, `"memory"` for an in-memory one).
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Db`] on a database failure.
+    pub fn journal_mode(&self) -> Result<String, StoreError> {
+        let conn = self.reader()?;
+        let mode: String = conn.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+        Ok(mode)
+    }
+
+    /// Check out a read connection and hold it for the duration of `f`.
+    ///
+    /// The store-level counterpart of [`ConnectionPool::get`]: it lets a caller
+    /// observe that the store really does hand out several *simultaneous*
+    /// readers rather than serializing them behind one connection as it did
+    /// before WP-3e (#201). `tests/e2e_concurrency.rs` uses it for the
+    /// rendezvous-based overlap proof, which needs no wall-clock threshold.
+    ///
+    /// **`f` must not call back into this store.** A connection is held for its
+    /// whole duration, and on an in-memory store that connection is the writer
+    /// lock — which `std::sync::Mutex` will not let the same thread re-enter.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Unavailable`] if no connection becomes free within
+    /// the pool's checkout timeout.
+    pub fn with_read_connection<T>(&self, f: impl FnOnce() -> T) -> Result<T, StoreError> {
+        let conn = self.reader()?;
+        let out = f();
+        drop(conn);
+        Ok(out)
+    }
+
+    /// Number of pooled reader connections (`1` for an in-memory store).
+    #[must_use]
+    pub fn read_pool_size(&self) -> usize {
+        self.readers.as_ref().map_or(1, ConnectionPool::size)
+    }
+
+    /// How long a caller waits for a free reader connection before the store
+    /// reports itself transiently unavailable.
+    #[must_use]
+    pub fn checkout_timeout(&self) -> Duration {
+        self.readers
+            .as_ref()
+            .map_or(DEFAULT_CHECKOUT_TIMEOUT, ConnectionPool::checkout_timeout)
+    }
+
+    /// Apply a per-tenant storage [`QuotaConfig`] to this store (WP-3d, #198).
+    ///
+    /// A builder-style setter so existing call sites (`SyncStore::open(..)?`)
+    /// keep the unlimited default and stay behavior-identical; the server binary
+    /// calls this once at startup when the operator configures a cap.
+    #[must_use]
+    pub const fn with_quota(mut self, quota: QuotaConfig) -> Self {
+        self.quota = quota;
+        self
+    }
+
+    /// The store's configured per-tenant storage quota.
+    #[must_use]
+    pub const fn quota(&self) -> QuotaConfig {
+        self.quota
+    }
+
     /// Create the two per-account stores if they do not yet exist.
     fn init_schema(&self) -> Result<(), StoreError> {
-        self.conn.execute_batch(
+        let conn = self.writer()?;
+        conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS events (
                 account_id          TEXT    NOT NULL,
                 server_seq          INTEGER NOT NULL,
@@ -231,6 +547,19 @@ impl SyncStore {
             CREATE UNIQUE INDEX IF NOT EXISTS idx_events_change_id
                 ON events (account_id, change_id);
 
+            -- WP-3d (#198) covering indexes for the per-tenant usage aggregates.
+            -- `events.ciphertext` / `blobs.bytes` are large inline BLOBs, so a
+            -- bare `SUM(payload_bytes)/COUNT(*) WHERE account_id=?` would scan the
+            -- full rows (pulling ciphertext + overflow pages off disk) just to
+            -- total an integer — and that runs on every quota-checked write and
+            -- every /v1/usage read. These `(account_id, <size>)` indexes let SQLite
+            -- answer the aggregate index-only (covering), never touching the
+            -- ciphertext, which is what makes the A1 compute-on-the-fly
+            -- accounting cheap enough to defer materialized counters (A2).
+            -- `IF NOT EXISTS` makes this a safe no-op on an existing database.
+            CREATE INDEX IF NOT EXISTS idx_events_usage
+                ON events (account_id, payload_bytes);
+
             CREATE TABLE IF NOT EXISTS blobs (
                 account_id  TEXT    NOT NULL,
                 ct_hash     TEXT    NOT NULL,
@@ -239,6 +568,8 @@ impl SyncStore {
                 created_at  INTEGER NOT NULL,
                 PRIMARY KEY (account_id, ct_hash)
             );
+            CREATE INDEX IF NOT EXISTS idx_blobs_usage
+                ON blobs (account_id, byte_len);
 
             -- Opaque onboarding-artifact relay stores (ADR-024, #125). The
             -- server stores and serves these bytes verbatim and never decodes
@@ -309,15 +640,78 @@ impl SyncStore {
         Ok(found.is_some())
     }
 
+    /// Compute an account's metered ciphertext usage from the live content tables
+    /// (WP-3d, #198).
+    ///
+    /// This is the **A1 "compute on-the-fly"** accounting strategy: usage is
+    /// summed directly from `blobs.byte_len` + `events.payload_bytes` on every
+    /// read/enforcement, so it is always exactly the true stored size and can
+    /// never drift from the content. Because it reads live rows it is inherently
+    /// dedup-correct (a re-uploaded blob or a deduped event contributes nothing)
+    /// and — a documented seam — will **auto-correct on deletion** once a delete
+    /// path exists (WP-10 GDPR deletion), needing no separate counter decrement.
+    ///
+    /// Takes a `&Connection` so it can run either standalone or inside the
+    /// `push_events` write transaction (a `&Transaction` derefs to `&Connection`).
+    fn account_usage_conn(conn: &Connection, account_id: &str) -> Result<UsageRecord, StoreError> {
+        let (blob_bytes, blob_count): (i64, i64) = conn.query_row(
+            "SELECT COALESCE(SUM(byte_len), 0), COUNT(*) FROM blobs WHERE account_id = ?1",
+            params![account_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let (event_bytes, event_count): (i64, i64) = conn.query_row(
+            "SELECT COALESCE(SUM(payload_bytes), 0), COUNT(*) FROM events WHERE account_id = ?1",
+            params![account_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        Ok(UsageRecord {
+            blob_bytes: u64::try_from(blob_bytes).unwrap_or(0),
+            blob_count: u64::try_from(blob_count).unwrap_or(0),
+            event_bytes: u64::try_from(event_bytes).unwrap_or(0),
+            event_count: u64::try_from(event_count).unwrap_or(0),
+        })
+    }
+
+    /// An account's current metered ciphertext usage (blobs + events).
+    ///
+    /// Backs the `GET /v1/usage/{account_id}` billing/metrics endpoint. See
+    /// [`Self::account_usage_conn`] for the accounting strategy and its
+    /// content-blindness guarantee.
+    ///
+    /// The two aggregates run inside one deferred read transaction, for the same
+    /// reason as [`Self::pull_page`]: before WP-3e (#201) the global store mutex
+    /// made them atomic as a side effect, so without an explicit transaction a
+    /// concurrent commit landing between them would return a reading that mixes
+    /// two snapshots (blob totals from one instant, event totals from another).
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Db`] on a database failure.
+    pub fn account_usage(&self, account_id: &str) -> Result<UsageRecord, StoreError> {
+        let conn = self.reader()?;
+        let tx = conn.unchecked_transaction()?;
+        let usage = Self::account_usage_conn(&tx, account_id)?;
+        tx.commit()?;
+        Ok(usage)
+    }
+
     /// Store an opaque blob, addressed by the SHA-256 of its (ciphertext) bytes.
     ///
     /// Idempotent: re-uploading an existing `ct_hash` is a no-op because the
     /// address *is* the content. Verifies the supplied `ct_hash` matches the
     /// bytes so the log can never gain a mislabeled reference.
     ///
+    /// **Quota (WP-3d, #198):** when a non-unlimited [`QuotaConfig`] is set, a
+    /// blob that is *new* to the account (not already present) is refused with
+    /// [`StoreError::QuotaExceeded`] if storing it would push the account's
+    /// combined ciphertext usage past a configured cap. An idempotent re-upload
+    /// of an already-present blob adds nothing and is always allowed, even while
+    /// the account is at/over quota. With the default unlimited quota this method
+    /// is byte-for-byte the original fast path.
+    ///
     /// # Errors
     /// Returns [`StoreError::BlobHashMismatch`] if `ct_hash` does not match the
-    /// bytes, or [`StoreError::Db`] on a database failure.
+    /// bytes, [`StoreError::QuotaExceeded`] if a configured quota would be
+    /// exceeded, or [`StoreError::Db`] on a database failure.
     pub fn blob_put(
         &self,
         account_id: &str,
@@ -331,8 +725,31 @@ impl SyncStore {
                 actual,
             });
         }
+
+        // Quota enforcement runs only when a cap is configured. The unlimited
+        // default takes the original fast path unchanged (no extra queries).
+        //
+        // The check-then-insert below is atomic with respect to other writes
+        // because it all happens under the single writer lock — exactly as it
+        // was under the pre-WP-3e global store mutex.
+        let conn = self.writer()?;
+        if !self.quota.is_unlimited() {
+            // A re-upload of an already-present blob adds 0 bytes/objects, so it
+            // is exempt from the cap (idempotent no-op writes stay allowed).
+            if !Self::blob_present(&conn, account_id, ct_hash)? {
+                let usage = Self::account_usage_conn(&conn, account_id)?;
+                let new_bytes = usage
+                    .total_bytes()
+                    .saturating_add(bytes.len().try_into().unwrap_or(u64::MAX));
+                let new_objects = usage.total_objects().saturating_add(1);
+                self.quota
+                    .check(new_bytes, new_objects)
+                    .map_err(|limit| StoreError::QuotaExceeded { limit })?;
+            }
+        }
+
         let byte_len = i64::try_from(bytes.len()).unwrap_or(i64::MAX);
-        self.conn.execute(
+        conn.execute(
             "INSERT OR IGNORE INTO blobs (account_id, ct_hash, bytes, byte_len, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![account_id, ct_hash, bytes, byte_len, now_millis()],
@@ -345,8 +762,8 @@ impl SyncStore {
     /// # Errors
     /// Returns [`StoreError::Db`] on a database failure.
     pub fn blob_get(&self, account_id: &str, ct_hash: &str) -> Result<Option<Vec<u8>>, StoreError> {
-        let bytes = self
-            .conn
+        let conn = self.reader()?;
+        let bytes = conn
             .query_row(
                 "SELECT bytes FROM blobs WHERE account_id = ?1 AND ct_hash = ?2",
                 params![account_id, ct_hash],
@@ -366,15 +783,22 @@ impl SyncStore {
         account_id: &str,
         hashes: &[String],
     ) -> Result<(Vec<String>, Vec<String>), StoreError> {
+        let conn = self.reader()?;
+        // One snapshot for the whole probe, as under the pre-WP-3e global mutex.
+        // Benign either way — blobs are never deleted, so a stale "missing" only
+        // costs an idempotent re-upload — but a single read transaction is both
+        // cheaper and one less thing to reason about.
+        let tx = conn.unchecked_transaction()?;
         let mut present = Vec::new();
         let mut missing = Vec::new();
         for hash in hashes {
-            if Self::blob_present(&self.conn, account_id, hash)? {
+            if Self::blob_present(&tx, account_id, hash)? {
                 present.push(hash.clone());
             } else {
                 missing.push(hash.clone());
             }
         }
+        tx.commit()?;
         Ok((present, missing))
     }
 
@@ -390,16 +814,28 @@ impl SyncStore {
     /// This makes push idempotent under retry: resending an accepted batch
     /// dedupes rather than duplicating.
     ///
+    /// **Quota (WP-3d, #198):** when a non-unlimited [`QuotaConfig`] is set, the
+    /// batch's newly-appended events are metered inside this transaction; if they
+    /// would push the account past a configured cap the call returns
+    /// [`StoreError::QuotaExceeded`] and the **whole batch rolls back** (no
+    /// partial commit). Deduped events add nothing.
+    ///
     /// # Errors
     /// Returns [`StoreError::MissingBlob`] if any new event references an
-    /// un-uploaded blob (the batch is rolled back), [`StoreError::Json`] on a
-    /// `blob_refs` encoding failure, or [`StoreError::Db`] on a database error.
+    /// un-uploaded blob (the batch is rolled back), [`StoreError::QuotaExceeded`]
+    /// if a configured quota would be exceeded (the batch is rolled back),
+    /// [`StoreError::Json`] on a `blob_refs` encoding failure, or
+    /// [`StoreError::Db`] on a database error.
     pub fn push_events(
-        &mut self,
+        &self,
         account_id: &str,
         events: &[EventRecord],
     ) -> Result<PushOutcome, StoreError> {
-        let tx = self.conn.transaction()?;
+        // Copy the (Copy) quota policy out before borrowing the connection for
+        // the transaction, so enforcement can read it without a borrow conflict.
+        let quota = self.quota;
+        let mut conn = self.writer()?;
+        let tx = conn.transaction()?;
         let committed_at = now_millis();
 
         let max_seq: i64 = tx.query_row(
@@ -408,6 +844,19 @@ impl SyncStore {
             |row| row.get(0),
         )?;
         let mut next_seq = u64::try_from(max_seq).unwrap_or(0);
+
+        // WP-3d (#198): when a cap is configured, meter this batch inside the same
+        // write transaction so an over-quota batch rolls back atomically — a
+        // partial batch never commits. Deduped events are not re-inserted and so
+        // add nothing, making enforcement inherently dedup-correct. The unlimited
+        // default skips all of this and is byte-for-byte the original path.
+        let enforce_quota = !quota.is_unlimited();
+        let (mut projected_bytes, mut projected_objects) = if enforce_quota {
+            let usage = Self::account_usage_conn(&tx, account_id)?;
+            (usage.total_bytes(), usage.total_objects())
+        } else {
+            (0, 0)
+        };
 
         let mut results = Vec::with_capacity(events.len());
         for ev in events {
@@ -434,6 +883,17 @@ impl SyncStore {
                         ct_hash: hash.clone(),
                     });
                 }
+            }
+
+            // Meter this newly-appended event against the account's cap before
+            // inserting it. Returning here drops `tx` and rolls the batch back.
+            if enforce_quota {
+                let payload_len = u64::try_from(ev.ciphertext.len()).unwrap_or(u64::MAX);
+                projected_bytes = projected_bytes.saturating_add(payload_len);
+                projected_objects = projected_objects.saturating_add(1);
+                quota
+                    .check(projected_bytes, projected_objects)
+                    .map_err(|limit| StoreError::QuotaExceeded { limit })?;
             }
 
             next_seq += 1;
@@ -488,10 +948,51 @@ impl SyncStore {
         after: u64,
         limit: u32,
     ) -> Result<Vec<StoredEventRecord>, StoreError> {
+        let conn = self.reader()?;
+        Self::pull_events_conn(&conn, account_id, after, limit)
+    }
+
+    /// Read a page of events **and** the account high-water mark from a single
+    /// consistent snapshot (WP-3e, #201).
+    ///
+    /// Before WP-3e the `GET /v1/events` handler took these as two statements
+    /// under the one global store mutex, which made them atomic as a side
+    /// effect. With a reader pool that guarantee has to be asked for explicitly:
+    /// both statements run inside one deferred read transaction, which in WAL
+    /// mode is a genuine MVCC snapshot. Without this a concurrent push could be
+    /// reflected in the high-water mark but not the page.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Json`] if a stored `blob_refs` value cannot be
+    /// decoded, or [`StoreError::Db`] on a database error.
+    pub fn pull_page(
+        &self,
+        account_id: &str,
+        after: u64,
+        limit: u32,
+    ) -> Result<(Vec<StoredEventRecord>, u64), StoreError> {
+        let conn = self.reader()?;
+        let tx = conn.unchecked_transaction()?;
+        let records = Self::pull_events_conn(&tx, account_id, after, limit)?;
+        let high_water = Self::high_water_conn(&tx, account_id)?;
+        tx.commit()?;
+        Ok((records, high_water))
+    }
+
+    /// Page implementation, shared by [`Self::pull_events`] and [`Self::pull_page`].
+    ///
+    /// Takes a `&Connection` so it can run standalone or inside a read
+    /// transaction (a `&Transaction` derefs to `&Connection`).
+    fn pull_events_conn(
+        conn: &Connection,
+        account_id: &str,
+        after: u64,
+        limit: u32,
+    ) -> Result<Vec<StoredEventRecord>, StoreError> {
         let after_i = i64::try_from(after).unwrap_or(i64::MAX);
         let limit_i = i64::from(limit);
 
-        let mut stmt = self.conn.prepare(
+        let mut stmt = conn.prepare(
             "SELECT protocol_version, account_id, device_id, change_id, entity_ref,
                     key_epoch, blob_refs, payload_bytes, server_seq, server_committed_at,
                     ciphertext, signature
@@ -558,7 +1059,14 @@ impl SyncStore {
     /// # Errors
     /// Returns [`StoreError::Db`] on a database failure.
     pub fn high_water(&self, account_id: &str) -> Result<u64, StoreError> {
-        let max: i64 = self.conn.query_row(
+        let conn = self.reader()?;
+        Self::high_water_conn(&conn, account_id)
+    }
+
+    /// High-water implementation, shared by [`Self::high_water`] and
+    /// [`Self::pull_page`].
+    fn high_water_conn(conn: &Connection, account_id: &str) -> Result<u64, StoreError> {
+        let max: i64 = conn.query_row(
             "SELECT COALESCE(MAX(server_seq), 0) FROM events WHERE account_id = ?1",
             params![account_id],
             |row| row.get(0),
@@ -586,7 +1094,8 @@ impl SyncStore {
         device_id: &str,
         bytes: &[u8],
     ) -> Result<(), StoreError> {
-        self.conn.execute(
+        let conn = self.writer()?;
+        conn.execute(
             "INSERT INTO device_records (account_id, device_id, bytes, updated_at)
              VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(account_id, device_id)
@@ -605,8 +1114,8 @@ impl SyncStore {
         account_id: &str,
         device_id: &str,
     ) -> Result<Option<Vec<u8>>, StoreError> {
-        let bytes = self
-            .conn
+        let conn = self.reader()?;
+        let bytes = conn
             .query_row(
                 "SELECT bytes FROM device_records WHERE account_id = ?1 AND device_id = ?2",
                 params![account_id, device_id],
@@ -624,7 +1133,8 @@ impl SyncStore {
         &self,
         account_id: &str,
     ) -> Result<Vec<DeviceRecordRow>, StoreError> {
-        let mut stmt = self.conn.prepare(
+        let conn = self.reader()?;
+        let mut stmt = conn.prepare(
             "SELECT device_id, bytes FROM device_records
              WHERE account_id = ?1 ORDER BY device_id ASC",
         )?;
@@ -649,13 +1159,14 @@ impl SyncStore {
     /// # Errors
     /// Returns [`StoreError::Db`] on a database failure.
     pub fn wrapped_bundle_put(
-        &mut self,
+        &self,
         account_id: &str,
         recipient_device_id: &str,
         bytes: &[u8],
     ) -> Result<AppendResult, StoreError> {
         let hash = ct_hash(bytes);
-        let tx = self.conn.transaction()?;
+        let mut conn = self.writer()?;
+        let tx = conn.transaction()?;
         let existing: Option<i64> = tx
             .query_row(
                 "SELECT seq FROM wrapped_bundles
@@ -712,7 +1223,8 @@ impl SyncStore {
     ) -> Result<Vec<WrappedBundleRow>, StoreError> {
         let after_i = i64::try_from(after).unwrap_or(i64::MAX);
         let limit_i = i64::from(limit);
-        let mut stmt = self.conn.prepare(
+        let conn = self.reader()?;
+        let mut stmt = conn.prepare(
             "SELECT seq, bytes FROM wrapped_bundles
              WHERE account_id = ?1 AND recipient_device_id = ?2 AND seq > ?3
              ORDER BY seq ASC LIMIT ?4",
@@ -741,12 +1253,13 @@ impl SyncStore {
     /// # Errors
     /// Returns [`StoreError::Db`] on a database failure.
     pub fn attestation_append(
-        &mut self,
+        &self,
         account_id: &str,
         bytes: &[u8],
     ) -> Result<AppendResult, StoreError> {
         let hash = ct_hash(bytes);
-        let tx = self.conn.transaction()?;
+        let mut conn = self.writer()?;
+        let tx = conn.transaction()?;
         let existing: Option<i64> = tx
             .query_row(
                 "SELECT seq FROM attestations WHERE account_id = ?1 AND content_hash = ?2",
@@ -791,7 +1304,8 @@ impl SyncStore {
     ) -> Result<Vec<AttestationRow>, StoreError> {
         let after_i = i64::try_from(after).unwrap_or(i64::MAX);
         let limit_i = i64::from(limit);
-        let mut stmt = self.conn.prepare(
+        let conn = self.reader()?;
+        let mut stmt = conn.prepare(
             "SELECT seq, bytes FROM attestations
              WHERE account_id = ?1 AND seq > ?2
              ORDER BY seq ASC LIMIT ?3",
@@ -814,7 +1328,8 @@ impl SyncStore {
     /// # Errors
     /// Returns [`StoreError::Db`] on a database failure.
     pub fn recovery_blob_put(&self, account_id: &str, bytes: &[u8]) -> Result<(), StoreError> {
-        self.conn.execute(
+        let conn = self.writer()?;
+        conn.execute(
             "INSERT INTO recovery_blobs (account_id, bytes, updated_at)
              VALUES (?1, ?2, ?3)
              ON CONFLICT(account_id)
@@ -829,8 +1344,8 @@ impl SyncStore {
     /// # Errors
     /// Returns [`StoreError::Db`] on a database failure.
     pub fn recovery_blob_get(&self, account_id: &str) -> Result<Option<Vec<u8>>, StoreError> {
-        let bytes = self
-            .conn
+        let conn = self.reader()?;
+        let bytes = conn
             .query_row(
                 "SELECT bytes FROM recovery_blobs WHERE account_id = ?1",
                 params![account_id],
@@ -838,5 +1353,200 @@ impl SyncStore {
             )
             .optional()?;
         Ok(bytes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    #![allow(clippy::expect_used)]
+
+    use super::*;
+
+    const ACCT: &str = "acct-1";
+
+    /// Build a minimal event record with the given `change_id` and ciphertext.
+    fn ev(change_id: &str, ciphertext: &[u8]) -> EventRecord {
+        EventRecord {
+            protocol_version: 1,
+            account_id: ACCT.to_string(),
+            device_id: "dev-1".to_string(),
+            change_id: change_id.to_string(),
+            entity_ref: None,
+            key_epoch: 1,
+            blob_refs: Vec::new(),
+            ciphertext: ciphertext.to_vec(),
+            signature: Vec::new(),
+        }
+    }
+
+    /// Put a blob whose `ct_hash` is derived from its bytes (the client contract).
+    fn put_blob(store: &SyncStore, account: &str, bytes: &[u8]) -> Result<(), StoreError> {
+        store.blob_put(account, &ct_hash(bytes), bytes)
+    }
+
+    #[test]
+    fn account_usage_sums_blobs_and_events() {
+        let store = SyncStore::open_in_memory().unwrap();
+        put_blob(&store, ACCT, b"blob-aaaa").unwrap(); // 9 bytes
+        put_blob(&store, ACCT, b"blob-bb").unwrap(); //   7 bytes
+        store
+            .push_events(ACCT, &[ev("c1", b"12345"), ev("c2", b"678")])
+            .unwrap(); // 5 + 3 = 8 bytes, 2 events
+
+        let usage = store.account_usage(ACCT).unwrap();
+        assert_eq!(usage.blob_bytes, 16);
+        assert_eq!(usage.blob_count, 2);
+        assert_eq!(usage.event_bytes, 8);
+        assert_eq!(usage.event_count, 2);
+        assert_eq!(usage.total_bytes(), 24);
+        assert_eq!(usage.total_objects(), 4);
+
+        // A different account is metered independently.
+        assert_eq!(
+            store.account_usage("other").unwrap(),
+            UsageRecord::default()
+        );
+    }
+
+    #[test]
+    fn reuploading_a_blob_does_not_inflate_usage() {
+        let store = SyncStore::open_in_memory().unwrap();
+        put_blob(&store, ACCT, b"same-bytes").unwrap();
+        let first = store.account_usage(ACCT).unwrap();
+        // Re-upload the identical blob twice more.
+        put_blob(&store, ACCT, b"same-bytes").unwrap();
+        put_blob(&store, ACCT, b"same-bytes").unwrap();
+        assert_eq!(store.account_usage(ACCT).unwrap(), first);
+        assert_eq!(first.blob_count, 1);
+    }
+
+    #[test]
+    fn deduped_push_does_not_inflate_usage() {
+        let store = SyncStore::open_in_memory().unwrap();
+        let batch = [ev("c1", b"aaaa"), ev("c2", b"bb")];
+        store.push_events(ACCT, &batch).unwrap();
+        let first = store.account_usage(ACCT).unwrap();
+        // Resend the exact same batch: every event dedupes on change_id.
+        store.push_events(ACCT, &batch).unwrap();
+        assert_eq!(store.account_usage(ACCT).unwrap(), first);
+        assert_eq!(first.event_count, 2);
+        assert_eq!(store.high_water(ACCT).unwrap(), 2);
+    }
+
+    #[test]
+    fn blob_put_rejects_over_byte_quota_and_leaves_store_unchanged() {
+        let store = SyncStore::open_in_memory()
+            .unwrap()
+            .with_quota(QuotaConfig {
+                max_account_bytes: 10,
+                max_account_objects: 0,
+            });
+        // A 10-byte blob is exactly at the cap: allowed.
+        put_blob(&store, ACCT, b"0123456789").unwrap();
+        let before = store.account_usage(ACCT).unwrap();
+
+        // A second, distinct blob would push total bytes to 20 > 10: rejected.
+        let err = put_blob(&store, ACCT, b"another").unwrap_err();
+        assert!(matches!(
+            err,
+            StoreError::QuotaExceeded {
+                limit: QuotaLimit::Bytes
+            }
+        ));
+        // The store is unchanged by the rejected write.
+        assert_eq!(store.account_usage(ACCT).unwrap(), before);
+
+        // An idempotent re-upload of the already-present blob is still allowed
+        // even though the account is at its cap.
+        put_blob(&store, ACCT, b"0123456789").unwrap();
+        assert_eq!(store.account_usage(ACCT).unwrap(), before);
+    }
+
+    #[test]
+    fn blob_put_rejects_over_object_quota() {
+        let store = SyncStore::open_in_memory()
+            .unwrap()
+            .with_quota(QuotaConfig {
+                max_account_bytes: 0,
+                max_account_objects: 1,
+            });
+        put_blob(&store, ACCT, b"one").unwrap();
+        let err = put_blob(&store, ACCT, b"two").unwrap_err();
+        assert!(matches!(
+            err,
+            StoreError::QuotaExceeded {
+                limit: QuotaLimit::Objects
+            }
+        ));
+        assert_eq!(store.account_usage(ACCT).unwrap().blob_count, 1);
+    }
+
+    #[test]
+    fn push_events_over_quota_rolls_back_the_whole_batch() {
+        let store = SyncStore::open_in_memory()
+            .unwrap()
+            .with_quota(QuotaConfig {
+                max_account_bytes: 12,
+                max_account_objects: 0,
+            });
+        // Two 10-byte events: the first fits (10 <= 12), the second would push
+        // the total to 20 > 12. The whole batch must roll back atomically.
+        let err = store
+            .push_events(ACCT, &[ev("c1", b"0123456789"), ev("c2", b"abcdefghij")])
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            StoreError::QuotaExceeded {
+                limit: QuotaLimit::Bytes
+            }
+        ));
+        // Nothing committed: no events, high-water still 0.
+        assert_eq!(store.account_usage(ACCT).unwrap(), UsageRecord::default());
+        assert_eq!(store.high_water(ACCT).unwrap(), 0);
+    }
+
+    #[test]
+    fn unlimited_quota_allows_large_writes() {
+        let store = SyncStore::open_in_memory().unwrap();
+        assert!(store.quota().is_unlimited());
+        let big = vec![0_u8; 1_000_000];
+        put_blob(&store, ACCT, &big).unwrap();
+        store.push_events(ACCT, &[ev("c1", &big)]).unwrap();
+        let usage = store.account_usage(ACCT).unwrap();
+        assert_eq!(usage.blob_bytes, 1_000_000);
+        assert_eq!(usage.event_bytes, 1_000_000);
+    }
+
+    /// The usage aggregates must be answerable from the WP-3d covering indexes
+    /// alone, so summing sizes never pulls the inline ciphertext BLOBs off disk.
+    #[test]
+    fn usage_aggregates_use_covering_indexes() {
+        let store = SyncStore::open_in_memory().unwrap();
+        let plan = |sql: &str| -> String {
+            let conn = store.reader().unwrap();
+            let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+            let rows: Vec<String> = stmt
+                .query_map([], |row| row.get::<_, String>(3))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            rows.join(" | ")
+        };
+
+        let blobs =
+            plan("SELECT COALESCE(SUM(byte_len), 0), COUNT(*) FROM blobs WHERE account_id = 'a'");
+        assert!(
+            blobs.contains("idx_blobs_usage"),
+            "blobs usage aggregate should use idx_blobs_usage, plan was: {blobs}"
+        );
+
+        let events = plan(
+            "SELECT COALESCE(SUM(payload_bytes), 0), COUNT(*) FROM events WHERE account_id = 'a'",
+        );
+        assert!(
+            events.contains("idx_events_usage"),
+            "events usage aggregate should use idx_events_usage, plan was: {events}"
+        );
     }
 }

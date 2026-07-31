@@ -80,6 +80,19 @@ impl ApiError {
         }
     }
 
+    /// 403 Forbidden — the caller authenticated successfully but is not
+    /// authorized for the target tenant (WP-3c, #197). Distinct from
+    /// [`Self::unauthorized`]: a 401 means "we could not authenticate you"
+    /// (uniform, no account-existence leak), a 403 means "you are authenticated
+    /// but this is not your account".
+    pub fn forbidden(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            message: message.into(),
+            code: "FORBIDDEN",
+        }
+    }
+
     /// 429 Too Many Requests — per-identity online-guess throttling (design
     /// §1.7). Keyed uniformly on the identity handle, so it does not leak
     /// account existence.
@@ -111,6 +124,19 @@ impl ApiError {
         }
     }
 
+    /// 507 Insufficient Storage — the caller's write would exceed the account's
+    /// configured storage quota (WP-3d, #198). The message names which limit
+    /// (bytes or object count) was hit; the code is a stable `QUOTA_EXCEEDED`.
+    /// Reads stay allowed while over quota so a tenant can export/delete to
+    /// recover.
+    pub fn insufficient_storage(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::INSUFFICIENT_STORAGE,
+            message: message.into(),
+            code: "QUOTA_EXCEEDED",
+        }
+    }
+
     /// 500 Internal Server Error.
     pub fn internal(message: impl Into<String>) -> Self {
         Self {
@@ -126,12 +152,50 @@ impl From<StoreError> for ApiError {
         match err {
             StoreError::BlobHashMismatch { .. } => Self::bad_request(err.to_string()),
             StoreError::MissingBlob { .. } => Self::conflict(err.to_string()),
+            StoreError::QuotaExceeded { .. } => Self::insufficient_storage(err.to_string()),
+            // WP-3e (#201): a saturated reader pool is transient capacity, not a
+            // fault. Surfacing it as a retryable 503 (rather than a confusing
+            // 500) is what lets a client back off and retry.
+            StoreError::Unavailable(ref message) => {
+                tracing::warn!(reason = %message, "store temporarily unavailable");
+                Self::unavailable("store temporarily unavailable; retry shortly")
+            }
             StoreError::Db(e) => {
+                // A blocked writer must also read as retryable. In-process writes
+                // serialize on the store's single writer lock so they cannot
+                // collide, but another process (a `sqlite3` shell, a backup tool)
+                // holding the database still surfaces here after `busy_timeout`.
+                if matches!(
+                    e.sqlite_error_code(),
+                    Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+                ) {
+                    tracing::warn!(error = %e, "database busy");
+                    return Self::unavailable("database busy; retry shortly");
+                }
                 tracing::error!(error = %e, "store database error");
                 Self::internal("internal storage error")
             }
             StoreError::Json(e) => {
                 tracing::error!(error = %e, "store blob_refs encoding error");
+                Self::internal("internal storage error")
+            }
+        }
+    }
+}
+
+impl From<crate::fairness::FairnessError> for ApiError {
+    fn from(err: crate::fairness::FairnessError) -> Self {
+        use crate::fairness::FairnessError;
+        match err {
+            // WP-3e (#201): the tenant is over its concurrency allowance. Shed
+            // with the same 503 semantics as the WP-4 global load-shed layer,
+            // rather than inventing a new status for the same condition.
+            FairnessError::Busy { .. } => {
+                tracing::warn!(error = %err, "tenant over its concurrency allowance");
+                Self::unavailable("account has too many concurrent requests; retry shortly")
+            }
+            FairnessError::Poisoned => {
+                tracing::error!("tenant limiter lock poisoned");
                 Self::internal("internal storage error")
             }
         }

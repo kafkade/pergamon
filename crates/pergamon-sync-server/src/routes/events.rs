@@ -2,11 +2,14 @@
 
 //! Event-log push and pull endpoints.
 
+use axum::Extension;
 use axum::Json;
 use axum::extract::{Query, State};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 
+use crate::auth::AuthAccount;
+use crate::auth::authorize_account;
 use crate::envelope::{
     PROTOCOL_VERSION, PullQuery, PullResponse, PushRequest, PushResponse, PushResult, StoredEvent,
 };
@@ -26,14 +29,26 @@ const MAX_LIMIT: u32 = 1000;
 /// atomically. Dedupe on `change_id` and upload-before-commit are enforced by
 /// the store, making the call idempotent under retry.
 ///
+/// **WP-3c tenant isolation (#197):** `account_id` is in the request **body**,
+/// not the path, so the shared authorization middleware cannot gate it. When the
+/// middleware injected an [`AuthAccount`] (multi-tenant mode), this handler
+/// asserts the token's `account_id` equals `req.account_id` **before** any other
+/// validation. In blind mode the extension is absent, so the check is skipped and
+/// behavior is byte-for-byte unchanged.
+///
 /// # Errors
-/// Returns 400 for a mismatched account, unsupported protocol version, or
-/// invalid base64; 409 if an event references an un-uploaded blob; 500 on a
-/// store failure.
+/// Returns 401/403 in multi-tenant mode when the caller is unauthenticated or
+/// targets another tenant; 400 for a mismatched account, unsupported protocol
+/// version, or invalid base64; 409 if an event references an un-uploaded blob;
+/// 500 on a store failure.
 pub async fn push(
     State(state): State<AppState>,
+    maybe_auth: Option<Extension<AuthAccount>>,
     Json(req): Json<PushRequest>,
 ) -> Result<Json<PushResponse>, ApiError> {
+    if let Some(Extension(auth)) = maybe_auth {
+        authorize_account(&auth, &req.account_id, "POST", "/v1/events")?;
+    }
     let mut records = Vec::with_capacity(req.events.len());
     for ev in &req.events {
         if ev.account_id != req.account_id {
@@ -76,8 +91,12 @@ pub async fn push(
     }
 
     let outcome = {
-        let mut store = state.lock_store()?;
-        store.push_events(&req.account_id, &records)?
+        let account_id = req.account_id.clone();
+        state
+            .with_tenant_store(&req.account_id, move |store| {
+                store.push_events(&account_id, &records)
+            })
+            .await?
     };
 
     let results = outcome
@@ -102,20 +121,36 @@ pub async fn push(
 /// each opaque ciphertext body for transport. The response also carries the
 /// account high-water mark and the cursor to persist after applying the page.
 ///
+/// **WP-3c tenant isolation (#197):** `account_id` is a **query** parameter, so
+/// (as with [`push`]) this handler completes the tenant compare against the
+/// injected [`AuthAccount`] when present (multi-tenant mode); blind mode is
+/// unchanged.
+///
 /// # Errors
-/// Returns 500 on a store failure.
+/// Returns 401/403 in multi-tenant mode when the caller is unauthenticated or
+/// targets another tenant; 500 on a store failure.
 pub async fn pull(
     State(state): State<AppState>,
+    maybe_auth: Option<Extension<AuthAccount>>,
     Query(query): Query<PullQuery>,
 ) -> Result<Json<PullResponse>, ApiError> {
+    if let Some(Extension(auth)) = maybe_auth {
+        authorize_account(&auth, &query.account_id, "GET", "/v1/events")?;
+    }
     let limit = query.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
 
     let (records, high_water_seq) = {
-        let store = state.lock_store()?;
-        let records = store.pull_events(&query.account_id, query.after, limit)?;
-        let high_water = store.high_water(&query.account_id)?;
-        drop(store);
-        (records, high_water)
+        let account_id = query.account_id.clone();
+        let after = query.after;
+        // One closure is one connection checkout, and `pull_page` runs both
+        // statements inside a single read transaction — so the page and the
+        // high-water mark come from one consistent snapshot, as they did under
+        // the pre-WP-3e global store mutex.
+        state
+            .with_tenant_store(&query.account_id, move |store| {
+                store.pull_page(&account_id, after, limit)
+            })
+            .await?
     };
 
     let mut next_cursor = query.after;
