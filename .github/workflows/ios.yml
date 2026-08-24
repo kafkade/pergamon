@@ -61,7 +61,7 @@ jobs:
           toolchain: "1.96.0"
           targets: aarch64-apple-ios, aarch64-apple-ios-sim, aarch64-apple-darwin
 
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           # Distinct cache: this job builds three Apple targets in release, unlike
           # the Linux debug builds in ci.yml.
