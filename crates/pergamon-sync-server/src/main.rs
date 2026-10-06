@@ -414,6 +414,9 @@ async fn main() -> Result<()> {
             let server_setup = load_or_create_server_setup(&setup_path)?;
             let auth_state =
                 AuthState::new(auth_store, server_setup, "v1", ThrottleConfig::default());
+            auth_state
+                .pair_content_store(&state.store)
+                .context("refusing to start with mismatched auth/content databases")?;
             build_router_multitenant_hardened(state, auth_state, &abuse)
         }
     };

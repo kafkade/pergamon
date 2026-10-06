@@ -305,6 +305,31 @@ enum SyncRemoteAction {
         /// Use an encrypted key file instead of the OS keychain.
         #[arg(long)]
         key_file: Option<PathBuf>,
+        /// Authenticate and bind without changing existing local content identity.
+        #[command(flatten)]
+        auth: RelayAuthArgs,
+    },
+    /// Authenticate an existing binding, or prepare an empty device to JOIN it.
+    Login {
+        #[arg(long)]
+        server: String,
+        #[arg(long)]
+        relay_identity: String,
+        #[arg(long, default_value = "default")]
+        account: String,
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+        #[arg(long)]
+        join: bool,
+    },
+    /// Revoke relay sessions only, including retry after an interrupted device offboarding.
+    RevokeSession {
+        #[arg(long)]
+        device: String,
+        #[arg(long, default_value = "default")]
+        account: String,
+        #[arg(long)]
+        key_file: Option<PathBuf>,
     },
     /// Push locally tracked changes to the server.
     Push {
@@ -359,6 +384,16 @@ enum SyncRemoteAction {
     },
 }
 
+#[derive(Debug, clap::Args, Default)]
+struct RelayAuthArgs {
+    /// Relay login identity; the OPAQUE password is read only from the environment.
+    #[arg(long)]
+    relay_identity: Option<String>,
+    /// Register relay auth before login; never replaces an existing verifier.
+    #[arg(long, requires = "relay_identity")]
+    register_relay_account: bool,
+}
+
 /// Device-onboarding subcommands (ADR-024, #128).
 ///
 /// These drive the end-to-end-encrypted device lifecycle across an account: a
@@ -398,6 +433,8 @@ enum SyncDeviceAction {
         /// account is unrecoverable.
         #[arg(long)]
         no_recovery_code: bool,
+        #[command(flatten)]
+        auth: RelayAuthArgs,
     },
     /// Existing device: print an invite blob to hand to a new device so it can
     /// enroll onto this account.
@@ -6298,6 +6335,12 @@ fn open_sync_session(
     key_file: Option<&PathBuf>,
 ) -> Result<SyncSession> {
     let state = db.sync_state().context("reading sync state")?;
+    if db
+        .remote_account_binding()?
+        .is_some_and(|b| b.state != "active")
+    {
+        bail!("authenticated relay adoption is pending; finish attach/create/join before syncing");
+    }
     let server = state.server_url.clone().ok_or_else(|| {
         anyhow::anyhow!(
             "remote sync is not enabled; run `pergamon sync-remote enable --server <url>` first"
@@ -6319,6 +6362,13 @@ fn open_sync_session(
     let keys = store.load_device_keys(account)?.with_context(|| {
         format!("no device key for '{account}'; run `pergamon device-key init` first")
     })?;
+    if store
+        .load_account_id(account)?
+        .is_some_and(|id| id.to_hex() != account_hex)
+        || keys.device_id() != device_id
+    {
+        bail!("database and keystore identities disagree; sync refused");
+    }
     let signing_key = *keys.ed25519_signing();
 
     let crypto = pergamon_sync::CryptoContext::new(
@@ -6329,18 +6379,24 @@ fn open_sync_session(
         state.key_epoch,
     )
     .context("building crypto context")?;
-    let transport = pergamon_sync::http::HttpTransport::with_credential(
-        server.clone(),
-        sync_credential_from_env(),
-    )
-    .context("building HTTP transport")?;
+    let provider = open_token_provider(db, &server, account, key_file)?;
+    let transport = match &provider {
+        Some(provider) => {
+            pergamon_sync::http::HttpTransport::new(&server)?.with_token_provider(provider.clone())
+        }
+        None => pergamon_sync::http::HttpTransport::with_credential(
+            &server,
+            sync_credential_from_env(),
+        )?,
+    };
     // Build the device-key directory from the account roster so pulled events'
     // signatures can be verified against their signing device (ADR-030). This is
     // best-effort: a failure (e.g. offline) leaves it empty, which still allows
     // push (never consults it) and single-device pull (own echoes are
     // suppressed before verification); a genuinely unknown multi-device signer
     // surfaces a retryable `UnknownSigner` so a later refresh resolves it.
-    let directory = load_device_directory(&store, account, &account_hex, &server);
+    let directory =
+        load_device_directory(&store, account, &account_hex, &server, provider.as_ref());
     let engine = pergamon_sync::SyncEngine::new(transport, crypto, directory);
     let blobs = pergamon_sync::FsBlobStore::new(blob_store_dir())
         .map_err(|e| anyhow::anyhow!("opening durable blob store: {e}"))?;
@@ -6356,13 +6412,19 @@ fn load_device_directory(
     account: &str,
     account_hex: &str,
     server: &str,
+    provider: Option<&std::sync::Arc<dyn pergamon_sync::credential::AccessTokenProvider>>,
 ) -> pergamon_sync::DeviceKeyDirectory {
     let build = || -> Result<pergamon_sync::DeviceKeyDirectory> {
         let account_id = match store.load_account_id(account)? {
             Some(id) => id,
             None => parse_account_id(account_hex)?,
         };
-        let relay = open_relay(server)?;
+        let relay = match provider {
+            Some(provider) => {
+                pergamon_sync::HttpRelay::new(server)?.with_token_provider(provider.clone())
+            }
+            None => open_relay(server)?,
+        };
         let roster = pergamon_sync::onboarding::roster(&relay, &account_id)
             .context("listing device roster")?;
         Ok(pergamon_sync::DeviceKeyDirectory::from_roster(&roster))
@@ -6383,7 +6445,45 @@ fn handle_sync_remote(db: &Database, action: SyncRemoteAction) -> Result<()> {
             server,
             account,
             key_file,
-        } => sync_remote_enable(db, &server, &account, key_file.as_ref()),
+            auth,
+        } => {
+            if auth.relay_identity.is_some() {
+                authenticated_attach(db, &server, &account, key_file.as_ref(), &auth, "attach")?;
+                println!("Remote sync enabled; canonical content identity preserved.");
+                Ok(())
+            } else {
+                sync_remote_enable(db, &server, &account, key_file.as_ref())
+            }
+        }
+        SyncRemoteAction::Login {
+            server,
+            relay_identity,
+            account,
+            key_file,
+            join,
+        } => authenticated_login(
+            db,
+            &server,
+            &relay_identity,
+            &account,
+            key_file.as_ref(),
+            join,
+        ),
+        SyncRemoteAction::RevokeSession {
+            device,
+            account,
+            key_file,
+        } => {
+            let server = db
+                .sync_state()?
+                .server_url
+                .context("no relay is configured")?;
+            let revoked = revoke_relay_sessions(db, &server, &account, key_file.as_ref(), &device)?
+                .context("no authenticated relay session; authenticate with sync-remote login")?;
+            println!("Revoked {revoked} relay session credential(s) for device {device}.");
+            Ok(())
+        }
+
         SyncRemoteAction::Push { account, key_file } => {
             let (engine, blobs) = open_sync_session(db, &account, key_file.as_ref())?;
             let pushed = engine.push(db, &blobs).context("pushing changes")?;
@@ -6424,12 +6524,470 @@ fn handle_sync_remote(db: &Database, action: SyncRemoteAction) -> Result<()> {
 }
 
 /// Bind the local database to an account and sync server.
+fn relay_password() -> Result<String> {
+    let password = std::env::var("PERGAMON_SYNC_AUTH_PASSWORD")
+        .context("set PERGAMON_SYNC_AUTH_PASSWORD for OPAQUE; it is never persisted")?;
+    if password.is_empty() {
+        bail!("PERGAMON_SYNC_AUTH_PASSWORD must not be empty");
+    }
+    Ok(password)
+}
+
+fn authenticated_attach(
+    db: &Database,
+    server: &str,
+    account: &str,
+    key_file: Option<&PathBuf>,
+    options: &RelayAuthArgs,
+    flow: &str,
+) -> Result<()> {
+    use pergamon_sync::account_binding as binding;
+    let identity = options
+        .relay_identity
+        .as_deref()
+        .context("missing relay identity")?;
+    let auth = pergamon_sync::http_auth::HttpAuth::new(server)?;
+    let mut store = open_key_store(key_file)?;
+    let keys = store
+        .load_device_keys(account)?
+        .context("attach requires existing device keys")?;
+    pergamon_core::account_flow::guard_attach_existing(&LocalAccountState {
+        has_device_keys: true,
+        has_ark: store.load_ark(account)?.is_some(),
+        has_account_id: store.load_account_id(account)?.is_some(),
+        ..LocalAccountState::empty()
+    })?;
+    let local = db.sync_state()?;
+    if store.load_account_id(account)?.is_none()
+        && local.account_id.is_none()
+        && (store.load_remote_session(account, server)?.is_some()
+            || db.remote_account_binding()?.is_some())
+    {
+        bail!(
+            "canonical content ID is missing despite existing relay metadata; restore it rather than generate a new identity"
+        );
+    }
+    let id = match store.load_account_id(account)? {
+        Some(id) => id,
+        None => match local.account_id.as_deref() {
+            Some(hex) => parse_account_id(hex)?,
+            None => pergamon_crypto::AccountId::generate()?,
+        },
+    };
+    let content = id.to_hex();
+    let intent = db.begin_remote_binding(
+        server,
+        account,
+        &content,
+        keys.device_id(),
+        &uuid::Uuid::new_v4().to_string(),
+        flow,
+    )?;
+    if store.load_account_id(account)?.is_none() {
+        store.save_account_id(account, &id)?;
+    }
+    let password = relay_password()?;
+    if options.register_relay_account {
+        binding::register_identity(&auth, identity, password.as_bytes())?;
+    }
+    let session = binding::login_device(&auth, identity, password.as_bytes(), &keys)?;
+    let status = binding::binding_status(&auth, &session)?;
+    db.identify_remote_binding(&session.auth_tenant_id, &status.server_instance_id)?;
+    let receipt=binding::bind_empty_namespace(&auth,&session,&keys,&content,&intent.operation_id)
+            .context("binding refused or incomplete; local identity retained; retry with the same relay identity")?;
+    let session = binding::login_device(&auth, identity, password.as_bytes(), &keys)?;
+    if session.content_account_id.as_deref() != Some(content.as_str())
+        || session.auth_tenant_id != receipt.auth_tenant_id
+        || session.binding_version != receipt.binding_version
+    {
+        bail!("relay session does not match the binding receipt; local adoption refused");
+    }
+    store
+        .save_remote_session(account, server, &serde_json::to_vec(&session)?)
+        .context("remote binding committed but session persistence failed; authenticate again")?;
+    let mut active = intent;
+    active.auth_tenant_id = Some(receipt.auth_tenant_id);
+    active.server_instance_id = Some(status.server_instance_id);
+    active.binding_version = Some(receipt.binding_version);
+    if flow != "create" {
+        verify_existing_relay_account(db, server, account, key_file, &id, &keys, None)?;
+        db.activate_remote_binding(&active, now_millis()).context(
+            "remote binding committed but local activation failed; retry attach to resume",
+        )?;
+    }
+    Ok(())
+}
+
+fn verify_existing_relay_account(
+    db: &Database,
+    server: &str,
+    account: &str,
+    key_file: Option<&PathBuf>,
+    id: &pergamon_crypto::AccountId,
+    keys: &pergamon_crypto::DeviceKeypairs,
+    session: Option<&pergamon_sync::account_binding::RemoteSession>,
+) -> Result<()> {
+    let store = open_key_store(key_file)?;
+    let epoch = db.sync_state()?.key_epoch;
+    let content = id.to_hex();
+    let relay = match session {
+        Some(session) => pergamon_sync::HttpRelay::with_credential(
+            server,
+            Some(pergamon_sync::TransportCredential::Bearer {
+                token: session.access_token.clone(),
+            }),
+        )?,
+        None => open_account_relay(db, server, account, key_file)?,
+    };
+    if session.is_none() {
+        match pergamon_sync::onboarding::fetch_device_record(&relay, id, keys.device_id()) {
+            Ok(record) if record.record.ed25519_pub == *keys.ed25519_verifying() => {}
+            Ok(_) => bail!("remote device record does not match local keys"),
+            Err(pergamon_sync::SyncError::NotFound(_)) => {
+                pergamon_sync::onboarding::bootstrap(&relay, id, keys, epoch, now_millis_i64())?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let directory = pergamon_sync::DeviceKeyDirectory::from_roster(
+        &pergamon_sync::onboarding::roster(&relay, id)?,
+    );
+    let crypto = pergamon_sync::CryptoContext::new(
+        store
+            .load_ark(account)?
+            .context("account root key disappeared")?,
+        content.clone(),
+        keys.device_id().to_owned(),
+        *keys.ed25519_signing(),
+        epoch,
+    )?;
+    let transport = match session {
+        Some(session) => pergamon_sync::http::HttpTransport::with_credential(
+            server,
+            Some(pergamon_sync::TransportCredential::Bearer {
+                token: session.access_token.clone(),
+            }),
+        )?,
+        None => pergamon_sync::http::HttpTransport::new(server)?.with_token_provider(
+            open_token_provider(db, server, account, key_file)?
+                .context("authenticated content session is unavailable")?,
+        ),
+    };
+    let sample = pergamon_sync::Transport::pull(&transport, &content, 0, Some(1))?;
+    if let Some(event) = sample.events.first() {
+        let public = directory
+            .get(&event.device_id)
+            .context("historical signer is missing from roster")?;
+        if !crypto.verify_event_sig(event, public)? {
+            bail!("historical event signature is invalid");
+        }
+        crypto
+            .decrypt_change(event)
+            .context("local keys cannot decrypt existing relay content")?;
+    }
+    Ok(())
+}
+
+fn guard_authentication_renewal(
+    db: &Database,
+    store: &keystore::DeviceKeyStore,
+    server: &str,
+    account: &str,
+) -> Result<()> {
+    let id = store.load_account_id(account)?.context(
+        "non-join login requires an established canonical content ID; use explicit create/attach, or --join with enrollment/recovery on an empty device",
+    )?;
+    let keys = store
+        .load_device_keys(account)?
+        .context("existing device keys are required")?;
+    let intent = db.remote_account_binding()?.context(
+        "non-join login only renews an authenticated binding or pending attach; use sync-remote enable --relay-identity for explicit attach",
+    )?;
+    if intent.relay_url != server.trim_end_matches('/')
+        || intent.local_label != account
+        || intent.content_account_id != id.to_hex()
+        || intent.device_id != keys.device_id()
+    {
+        bail!("authentication renewal does not match the existing local identity or relay");
+    }
+    if intent.state != "active" && intent.flow != "attach" {
+        bail!(
+            "login cannot complete pending create/join; finish the matching bootstrap/enrollment/recovery flow"
+        );
+    }
+    let local = db.sync_state()?;
+    if local
+        .account_id
+        .as_deref()
+        .is_some_and(|c| c != id.to_hex())
+        || local
+            .device_id
+            .as_deref()
+            .is_some_and(|d| d != keys.device_id())
+        || local
+            .server_url
+            .as_deref()
+            .is_some_and(|s| s.trim_end_matches('/') != intent.relay_url)
+    {
+        bail!("database identity or relay does not match authenticated renewal");
+    }
+    Ok(())
+}
+
+fn matching_pending_join(
+    pending: Option<&pergamon_storage::sync::RemoteAccountBinding>,
+    store: &keystore::DeviceKeyStore,
+    server: &str,
+    account: &str,
+) -> Result<bool> {
+    let Some(expected) = pending.filter(|b| {
+        b.flow == "join"
+            && b.state == "pending"
+            && b.local_label == account
+            && b.relay_url == server.trim_end_matches('/')
+    }) else {
+        return Ok(false);
+    };
+    let keys = store
+        .load_device_keys(account)?
+        .context("restore the original pending-join device keys")?;
+    if keys.device_id() != expected.device_id
+        || store
+            .load_account_id(account)?
+            .is_none_or(|id| id.to_hex() != expected.content_account_id)
+    {
+        bail!("pending join key material is missing or mismatched; it will not be regenerated");
+    }
+    Ok(true)
+}
+
+fn authenticated_login(
+    db: &Database,
+    server: &str,
+    identity: &str,
+    account: &str,
+    key_file: Option<&PathBuf>,
+    join: bool,
+) -> Result<()> {
+    use pergamon_sync::account_binding as binding;
+    let mut store = open_key_store(key_file)?;
+    let pending = db.remote_account_binding()?;
+    let matching = matching_pending_join(pending.as_ref(), &store, server, account)?;
+
+    if join {
+        pergamon_core::account_flow::guard_join_new_device(
+            &LocalAccountState {
+                has_device_keys: store.load_device_keys(account)?.is_some(),
+                has_ark: store.load_ark(account)?.is_some(),
+                has_account_id: store.load_account_id(account)?.is_some(),
+                is_sync_bound: db.sync_state()?.server_url.is_some(),
+                has_local_content: db.count_content_items(None)? > 0,
+            },
+            matching,
+        )?;
+    } else if store.load_ark(account)?.is_none() {
+        bail!(
+            "login does not recover content keys; use --join on an empty device and enroll/recover"
+        );
+    }
+    if !join {
+        guard_authentication_renewal(db, &store, server, account)?;
+    }
+    let keys = match store.load_device_keys(account)? {
+        Some(keys) => keys,
+        None if join => pergamon_crypto::DeviceKeypairs::generate()?,
+        None => bail!("existing device keys are required"),
+    };
+    let auth = pergamon_sync::http_auth::HttpAuth::new(server)?;
+    let password = relay_password()?;
+    let session = binding::login_device(&auth, identity, password.as_bytes(), &keys)?;
+    let content = session
+        .content_account_id
+        .as_deref()
+        .context("relay tenant has no content binding; attach explicitly")?;
+    if store
+        .load_account_id(account)?
+        .is_some_and(|id| id.to_hex() != content)
+    {
+        bail!("authenticated content ID differs from local account; login cannot replace it");
+    }
+    let status = binding::binding_status(&auth, &session)?;
+    let receipt = status
+        .binding
+        .context("authenticated relay has no binding")?;
+    if receipt.content_account_id != content || receipt.binding_version != session.binding_version {
+        bail!("inconsistent relay binding; local adoption refused");
+    }
+    if !join {
+        if pending.as_ref().is_some_and(|b| {
+            b.auth_tenant_id
+                .as_deref()
+                .is_some_and(|t| t != session.auth_tenant_id)
+                || b.server_instance_id
+                    .as_deref()
+                    .is_some_and(|s| s != status.server_instance_id)
+                || b.binding_version
+                    .is_some_and(|v| v != session.binding_version)
+        }) {
+            bail!("authentication renewal changed the established remote binding");
+        }
+        verify_existing_relay_account(
+            db,
+            server,
+            account,
+            key_file,
+            &parse_account_id(content)?,
+            &keys,
+            Some(&session),
+        )?;
+    }
+    let mut intent = db.begin_remote_binding(
+        server,
+        account,
+        content,
+        keys.device_id(),
+        &uuid::Uuid::new_v4().to_string(),
+        if join { "join" } else { "attach" },
+    )?;
+    db.identify_remote_binding(&session.auth_tenant_id, &status.server_instance_id)?;
+    if join {
+        store.save_device_keys(account, &keys)?;
+        store.save_account_id(account, &parse_account_id(content)?)?;
+    }
+    store.save_remote_session(account, server, &serde_json::to_vec(&session)?)?;
+    if join {
+        println!("Relay authenticated. Content keys are still required: enroll/accept or recover.");
+    } else {
+        intent.auth_tenant_id = Some(session.auth_tenant_id);
+        intent.server_instance_id = Some(status.server_instance_id);
+        intent.binding_version = Some(session.binding_version);
+        db.activate_remote_binding(&intent, now_millis())?;
+        println!("Relay authentication refreshed; content identity unchanged.");
+    }
+    Ok(())
+}
+
+fn open_token_provider(
+    db: &Database,
+    server: &str,
+    account: &str,
+    key_file: Option<&PathBuf>,
+) -> Result<Option<std::sync::Arc<dyn pergamon_sync::credential::AccessTokenProvider>>> {
+    use pergamon_sync::account_binding::{RefreshingSession, RemoteSession};
+    let pending = db.remote_account_binding()?;
+    if pending
+        .as_ref()
+        .is_some_and(|b| b.relay_url != server.trim_end_matches('/') || b.local_label != account)
+    {
+        bail!(
+            "requested relay or account conflicts with the authenticated relay binding (no blind fallback)"
+        );
+    }
+    let store = open_key_store(key_file)?;
+    let raw = store.load_remote_session(account, server)?;
+    let Some(raw) = raw else {
+        if pending.is_some() {
+            bail!(
+                "authenticated relay session unavailable; run sync-remote login (no blind fallback)"
+            );
+        }
+        return Ok(None);
+    };
+    let session: RemoteSession =
+        serde_json::from_slice(&raw).context("decoding secure relay session")?;
+    let keys = store
+        .load_device_keys(account)?
+        .context("session device keys are missing")?;
+    let id = store
+        .load_account_id(account)?
+        .context("session content identity is missing")?;
+    if session.content_account_id.as_deref() != Some(id.to_hex().as_str())
+        || session.device_id != keys.device_id()
+        || pending.as_ref().is_some_and(|b| {
+            b.content_account_id != id.to_hex()
+                || b.device_id != keys.device_id()
+                || b.auth_tenant_id.as_deref() != Some(session.auth_tenant_id.as_str())
+                || b.binding_version
+                    .is_some_and(|v| v != session.binding_version)
+        })
+    {
+        bail!("secure session does not match the local binding");
+    }
+    let store = std::sync::Mutex::new(store);
+    let label = account.to_owned();
+    let relay = server.to_owned();
+    let persist = move |next: &RemoteSession| -> pergamon_sync::error::Result<()> {
+        let bytes = serde_json::to_vec(next)?;
+        store
+            .lock()
+            .map_err(|_| {
+                pergamon_sync::SyncError::Protocol("secure store lock poisoned".to_owned())
+            })?
+            .save_remote_session(&label, &relay, &bytes)
+            .map_err(|e| {
+                pergamon_sync::SyncError::Protocol(format!(
+                    "cannot persist rotated session; log in again: {e}"
+                ))
+            })
+    };
+    let provider = RefreshingSession::new(
+        pergamon_sync::http_auth::HttpAuth::new(server)?,
+        keys,
+        session,
+        persist,
+    )?;
+    Ok(Some(std::sync::Arc::new(provider)))
+}
+
+fn open_account_relay(
+    db: &Database,
+    server: &str,
+    account: &str,
+    key_file: Option<&PathBuf>,
+) -> Result<pergamon_sync::HttpRelay> {
+    let provider = open_token_provider(db, server, account, key_file)?;
+    match provider {
+        Some(provider) => Ok(pergamon_sync::HttpRelay::new(server)?.with_token_provider(provider)),
+        None => open_relay(server),
+    }
+}
+
+fn revoke_relay_sessions(
+    db: &Database,
+    server: &str,
+    account: &str,
+    key_file: Option<&PathBuf>,
+    device: &str,
+) -> Result<Option<u64>> {
+    let Some(provider) = open_token_provider(db, server, account, key_file)? else {
+        return Ok(None);
+    };
+    let access = provider.access_token()?;
+    let store = open_key_store(key_file)?;
+    let bytes = store
+        .load_remote_session(account, server)?
+        .context("authenticated session disappeared")?;
+    let mut session: pergamon_sync::account_binding::RemoteSession =
+        serde_json::from_slice(&bytes)?;
+    session.access_token = access;
+    Ok(Some(pergamon_sync::account_binding::revoke_device_session(
+        &pergamon_sync::http_auth::HttpAuth::new(server)?,
+        &session,
+        device,
+    )?))
+}
+
 fn sync_remote_enable(
     db: &Database,
     server: &str,
     account: &str,
     key_file: Option<&PathBuf>,
 ) -> Result<()> {
+    if db.remote_account_binding()?.is_some() {
+        bail!(
+            "authenticated relay intent or binding already exists; use --relay-identity to authenticate (no blind fallback)"
+        );
+    }
     let mut store = open_key_store(key_file)?;
     let keys = store.load_device_keys(account)?.with_context(|| {
         format!("no device keys for '{account}'; run `pergamon device-key init` first")
@@ -6469,6 +7027,75 @@ fn sync_remote_enable(
         println!("  baseline: {baseline} change(s) enqueued from existing library");
     }
     println!("Run `pergamon sync-remote sync` to exchange changes.");
+    Ok(())
+}
+
+fn guard_cli_join(
+    db: &Database,
+    store: &keystore::DeviceKeyStore,
+    account: &str,
+    server: &str,
+    expected: &pergamon_crypto::AccountId,
+) -> Result<()> {
+    let content = expected.to_hex();
+    if store
+        .load_account_id(account)?
+        .is_some_and(|id| id != *expected)
+    {
+        bail!("requested join identity differs from the local account");
+    }
+    let pending = db.remote_account_binding()?;
+    let matching = pending.as_ref().is_some_and(|b| {
+        b.flow == "join"
+            && b.state == "pending"
+            && b.local_label == account
+            && b.relay_url == server.trim_end_matches('/')
+            && b.content_account_id == content
+    });
+    let local = db.sync_state()?;
+    if local.account_id.as_deref().is_some_and(|c| c != content) {
+        bail!("joining would replace the database account identity");
+    }
+    pergamon_core::account_flow::guard_join_new_device(
+        &LocalAccountState {
+            has_device_keys: store.load_device_keys(account)?.is_some(),
+            has_ark: store.load_ark(account)?.is_some(),
+            has_account_id: store.load_account_id(account)?.is_some(),
+            is_sync_bound: local.server_url.is_some() && !matching,
+            has_local_content: db.count_content_items(None)? > 0,
+        },
+        matching,
+    )?;
+    Ok(())
+}
+
+fn finish_local_adoption(
+    db: &Database,
+    store: &keystore::DeviceKeyStore,
+    server: &str,
+    account: &str,
+) -> Result<()> {
+    let Some(mut intent) = db.remote_account_binding()? else {
+        return Ok(());
+    };
+    if intent.state == "active" {
+        return Ok(());
+    }
+    if intent.local_label != account || intent.relay_url != server.trim_end_matches('/') {
+        bail!("pending relay adoption belongs to a different account or relay");
+    }
+    let bytes = store
+        .load_remote_session(account, server)?
+        .context("pending adoption has no secure session")?;
+    let session: pergamon_sync::account_binding::RemoteSession = serde_json::from_slice(&bytes)?;
+    if session.content_account_id.as_deref() != Some(intent.content_account_id.as_str())
+        || intent.auth_tenant_id.as_deref() != Some(session.auth_tenant_id.as_str())
+        || session.device_id != intent.device_id
+    {
+        bail!("pending session identity differs from adoption intent");
+    }
+    intent.binding_version = Some(session.binding_version);
+    db.activate_remote_binding(&intent, now_millis())?;
     Ok(())
 }
 
@@ -6533,6 +7160,25 @@ fn log_sync_round(report: &pergamon_sync::RoundReport) {
 /// Print the local sync status.
 fn sync_remote_status(db: &Database) -> Result<()> {
     let state = db.sync_state()?;
+    if let Some(binding) = db.remote_account_binding()? {
+        println!(
+            "Authenticated relay adoption: {} ({})",
+            binding.state, binding.flow
+        );
+        println!("  canonical: {}", binding.content_account_id);
+        if let Some(tenant) = binding.auth_tenant_id {
+            println!("  auth tenant: {tenant}");
+        } else {
+            println!("  auth tenant: unbound; authentication required");
+        }
+        if binding.state != "active" {
+            println!("Remote sync: not active; finish the matching create/attach/join operation.");
+            return Ok(());
+        }
+        println!(
+            "Credentials require an unlocked secure store; use sync-remote login if authentication expires."
+        );
+    }
     let Some(server) = state.server_url else {
         println!("Remote sync: disabled");
         println!("Run `pergamon sync-remote enable --server <url>` to enable it.");
@@ -6623,6 +7269,7 @@ fn handle_sync_device(db: &Database, action: SyncDeviceAction) -> Result<()> {
             key_file,
             create_new_account,
             no_recovery_code,
+            auth,
         } => sync_device_bootstrap(
             db,
             &server,
@@ -6630,6 +7277,7 @@ fn handle_sync_device(db: &Database, action: SyncDeviceAction) -> Result<()> {
             key_file.as_ref(),
             create_new_account,
             no_recovery_code,
+            &auth,
         ),
         SyncDeviceAction::Invite { account, key_file } => {
             sync_device_invite(db, &account, key_file.as_ref())
@@ -6642,6 +7290,7 @@ fn handle_sync_device(db: &Database, action: SyncDeviceAction) -> Result<()> {
             account,
             key_file,
         } => sync_device_enroll(
+            db,
             invite.as_deref(),
             server.as_deref(),
             account_id.as_deref(),
@@ -6720,6 +7369,27 @@ fn ensure_device_keys(
     Ok(keys)
 }
 
+fn require_pending_creation_keys(
+    store: &keystore::DeviceKeyStore,
+    pending: &pergamon_storage::sync::RemoteAccountBinding,
+) -> Result<()> {
+    let keys = store
+        .load_device_keys(&pending.local_label)?
+        .context("restore the original pending-create device keys; they will not be regenerated")?;
+    let id = store
+        .load_account_id(&pending.local_label)?
+        .context("restore the original pending-create content ID")?;
+    if store.load_ark(&pending.local_label)?.is_none()
+        || keys.device_id() != pending.device_id
+        || id.to_hex() != pending.content_account_id
+    {
+        bail!(
+            "pending creation has missing or mismatched key material; restore the original keystore"
+        );
+    }
+    Ok(())
+}
+
 /// First device on a new account: create keys + ARK + account id, publish the
 /// device record and self-trust attestation, and bind sync identity.
 ///
@@ -6735,6 +7405,7 @@ fn sync_device_bootstrap(
     key_file: Option<&PathBuf>,
     create_new_account: bool,
     no_recovery_code: bool,
+    auth: &RelayAuthArgs,
 ) -> Result<()> {
     let mut store = open_key_store(key_file)?;
 
@@ -6748,7 +7419,20 @@ fn sync_device_bootstrap(
         is_sync_bound: sync_state.server_url.is_some() || sync_state.account_id.is_some(),
         has_local_content: db.count_content_items(None)? > 0,
     };
-    if let Err(block) = guard_create_new(&state, create_new_account) {
+    let resume = db.remote_account_binding()?.is_some_and(|b| {
+        b.state == "pending"
+            && b.flow == "create"
+            && b.local_label == account
+            && b.relay_url == server.trim_end_matches('/')
+            && auth.relay_identity.is_some()
+    });
+    if resume {
+        let pending = db
+            .remote_account_binding()?
+            .context("pending creation disappeared")?;
+        require_pending_creation_keys(&store, &pending)?;
+    }
+    if !resume && let Err(block) = guard_create_new(&state, create_new_account) {
         if block == CreateAccountBlock::AlreadyHasAccount
             && let Some(id) = store.load_account_id(account)?
         {
@@ -6773,7 +7457,11 @@ fn sync_device_bootstrap(
     };
 
     let epoch = db.sync_state()?.key_epoch;
-    let relay = open_relay(server)?;
+    if auth.relay_identity.is_some() {
+        authenticated_attach(db, server, account, key_file, auth, "create")?;
+        store = open_key_store(key_file)?;
+    }
+    let relay = open_account_relay(db, server, account, key_file)?;
     pergamon_sync::onboarding::bootstrap(&relay, &account_id, &keys, epoch, now_millis_i64())
         .context("publishing device record")?;
 
@@ -6782,17 +7470,20 @@ fn sync_device_bootstrap(
     db.set_sync_identity(&account_hex, &device_id, epoch, Some(server))
         .context("writing sync identity")?;
 
-    println!("Created account '{account}' on {server}.");
-    println!("  account: {account_hex}");
-    println!("  device:  {device_id}");
-    println!("  epoch:   {epoch}");
-
     // Surface a recovery secret by default so a lost-all-devices account is
     // still recoverable. The ARK is still held above; reload it to wrap.
     let ark = store
         .load_ark(account)?
         .context("account root key missing after bootstrap")?;
-    match publish_bootstrap_recovery(&relay, &account_id, &ark, no_recovery_code)? {
+    match publish_bootstrap_recovery(
+        &relay,
+        &account_id,
+        &ark,
+        no_recovery_code,
+        &mut store,
+        server,
+        account,
+    )? {
         RecoveryOutcome::Code(code) => {
             println!();
             print_recovery_code(&code);
@@ -6811,6 +7502,11 @@ fn sync_device_bootstrap(
         }
     }
 
+    finish_local_adoption(db, &store, server, account)?;
+    println!("Created account '{account}' on {server}.");
+    println!("  account: {account_hex}");
+    println!("  device:  {device_id}");
+    println!("  epoch:   {epoch}");
     println!();
     println!("Add another device with `pergamon sync-device invite` on this device,");
     println!("then `pergamon sync-device enroll` on the new one.");
@@ -6835,7 +7531,16 @@ fn publish_bootstrap_recovery(
     account_id: &pergamon_crypto::hierarchy::AccountId,
     ark: &pergamon_crypto::hierarchy::AccountRootKey,
     no_recovery_code: bool,
+    store: &mut keystore::DeviceKeyStore,
+    server: &str,
+    account: &str,
 ) -> Result<RecoveryOutcome> {
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct PendingRecovery {
+        code: String,
+        content_account_id: String,
+        blob: Vec<u8>,
+    }
     if no_recovery_code {
         return Ok(RecoveryOutcome::Disabled);
     }
@@ -6846,10 +7551,38 @@ fn publish_bootstrap_recovery(
             .context("uploading recovery blob")?;
         return Ok(RecoveryOutcome::Passphrase);
     }
-    let code =
-        pergamon_crypto::recovery::generate_recovery_code().context("generating recovery code")?;
-    pergamon_sync::onboarding::recovery_publish(relay, account_id, ark, code.as_bytes())
-        .context("uploading recovery blob")?;
+    let pending = if let Some(bytes) = store.load_bootstrap_recovery(account, server)? {
+        let pending: PendingRecovery =
+            serde_json::from_slice(&bytes).context("decoding pending recovery artifact")?;
+        if pending.content_account_id != account_id.to_hex() {
+            bail!("pending recovery artifact belongs to another content account");
+        }
+        let recovered = pergamon_crypto::recover(
+            &pergamon_crypto::RecoveryBlob::from_bytes(&pending.blob)?,
+            account_id,
+            pending.code.as_bytes(),
+        )?;
+        if recovered.expose_bytes() != ark.expose_bytes() {
+            bail!("pending recovery artifact has different account keys");
+        }
+        pending
+    } else {
+        let code = pergamon_crypto::recovery::generate_recovery_code()
+            .context("generating recovery code")?;
+        let blob = pergamon_crypto::enable_recovery(ark, account_id, code.as_bytes())?.to_bytes();
+        let pending = PendingRecovery {
+            code,
+            content_account_id: account_id.to_hex(),
+            blob,
+        };
+        store.save_bootstrap_recovery(account, server, &serde_json::to_vec(&pending)?)?;
+        pending
+    };
+    pergamon_sync::RelayTransport::recovery_put(relay, &account_id.to_hex(), &pending.blob)
+        .context(
+            "recovery publication incomplete; retry creation to publish the same saved artifact",
+        )?;
+    let code = pending.code;
     Ok(RecoveryOutcome::Code(code))
 }
 
@@ -6904,6 +7637,7 @@ fn sync_device_invite(db: &Database, account: &str, key_file: Option<&PathBuf>) 
 /// New device: publish this device's record under the invited account and print
 /// its SAS versus the approver for out-of-band comparison.
 fn sync_device_enroll(
+    db: &Database,
     invite: Option<&str>,
     server: Option<&str>,
     account_id: Option<&str>,
@@ -6931,18 +7665,34 @@ fn sync_device_enroll(
     let account_id = parse_account_id(&account_hex)?;
 
     let mut store = open_key_store(key_file)?;
-    if store.load_device_keys(account)?.is_some() {
+    let pending = db.remote_account_binding()?;
+    let matching_pending = pending.as_ref().is_some_and(|b| {
+        b.flow == "join"
+            && b.state == "pending"
+            && b.content_account_id == account_hex
+            && b.relay_url == server.trim_end_matches('/')
+            && b.local_label == account
+    });
+    pergamon_core::account_flow::guard_join_new_device(
+        &LocalAccountState {
+            has_device_keys: store.load_device_keys(account)?.is_some(),
+            has_ark: store.load_ark(account)?.is_some(),
+            has_account_id: store.load_account_id(account)?.is_some(),
+            is_sync_bound: db.sync_state()?.server_url.is_some(),
+            has_local_content: db.count_content_items(None)? > 0,
+        },
+        matching_pending,
+    )?;
+    if store.load_device_keys(account)?.is_some() && !matching_pending {
         bail!(
             "device keys already exist for '{account}'; use a different --account or remove them first"
         );
     }
-    let keys = pergamon_crypto::device::DeviceKeypairs::generate()
-        .context("generating device keypairs")?;
-    store.save_device_keys(account, &keys)?;
+    let keys = ensure_device_keys(&mut store, account)?;
     // Remember the account handle so `accept` can address the relay later.
     store.save_account_id(account, &account_id)?;
 
-    let relay = open_relay(&server)?;
+    let relay = open_account_relay(db, &server, account, key_file)?;
     pergamon_sync::onboarding::enroll_publish(&relay, &account_id, &keys, now_millis_i64())
         .context("publishing device record")?;
     let sas = pergamon_sync::onboarding::sas_against(&relay, &account_id, &keys, &approver)
@@ -6989,7 +7739,7 @@ fn sync_device_approve(
         .server_url
         .context("this device is not bound to a server; run `pergamon sync-device bootstrap`")?;
     let epoch = state.key_epoch;
-    let relay = open_relay(&server)?;
+    let relay = open_account_relay(db, &server, account, key_file)?;
 
     // Show the SAS and, if requested, enforce a match before authorizing.
     let sas = pergamon_sync::onboarding::sas_against(&relay, &account_id, &keys, device)
@@ -7054,11 +7804,19 @@ fn sync_device_accept(
             "no server bound; pass --server or run `pergamon sync-device enroll` with an invite",
         )?,
     };
-    let relay = open_relay(&server)?;
+    guard_cli_join(db, &store, account, &server, &account_id)?;
+    let relay = open_account_relay(db, &server, account, key_file)?;
 
     let accepted = pergamon_sync::onboarding::accept(&relay, &account_id, &keys)
         .context("accepting enrollment")?;
     let epoch = accepted.bundle.key_epoch;
+    store = open_key_store(key_file)?;
+    if store
+        .load_ark(account)?
+        .is_some_and(|old| old.expose_bytes() != accepted.bundle.ark.expose_bytes())
+    {
+        bail!("enrollment would replace existing root keys");
+    }
     store.save_ark(account, &accepted.bundle.ark)?;
     store.save_account_id(account, &accepted.bundle.account_id)?;
 
@@ -7066,6 +7824,7 @@ fn sync_device_accept(
     let device_id = keys.device_id().to_owned();
     db.set_sync_identity(&account_hex, &device_id, epoch, Some(&server))
         .context("writing sync identity")?;
+    finish_local_adoption(db, &store, &server, account)?;
 
     println!("Accepted enrollment onto account {account_hex}.");
     match &accepted.approver_device_id {
@@ -7109,7 +7868,7 @@ fn sync_device_revoke(
         .server_url
         .context("this device is not bound to a server; run `pergamon sync-device bootstrap`")?;
     let epoch = state.key_epoch;
-    let relay = open_relay(&server)?;
+    let relay = open_account_relay(db, &server, account, key_file)?;
 
     let rev = pergamon_sync::onboarding::revoke(
         &relay,
@@ -7123,6 +7882,9 @@ fn sync_device_revoke(
     .context("revoking device")?;
     db.set_key_epoch(rev.new_epoch)
         .context("advancing local key epoch")?;
+    let _=revoke_relay_sessions(db,&server,account,key_file,device).context(
+        "content revocation was published but relay access revocation is incomplete; retry with sync-remote revoke-session",
+    )?;
 
     println!("Revoked device {device}.");
     println!("  new epoch:   {}", rev.new_epoch);
@@ -7174,7 +7936,7 @@ fn sync_device_recovery_enable(
         })?
     };
 
-    let relay = open_relay(&server)?;
+    let relay = open_account_relay(db, &server, account, key_file)?;
     pergamon_sync::onboarding::recovery_publish(&relay, &account_id, &ark, secret.as_bytes())
         .context("uploading recovery blob")?;
 
@@ -7198,12 +7960,20 @@ fn sync_device_recover(
         anyhow::anyhow!("set PERGAMON_RECOVERY_PASSPHRASE to the account's recovery secret")
     })?;
     let account_id = parse_account_id(account_id)?;
-    let relay = open_relay(server)?;
+    let existing = open_key_store(key_file)?;
+    guard_cli_join(db, &existing, account, server, &account_id)?;
+    let relay = open_account_relay(db, server, account, key_file)?;
 
     let ark = pergamon_sync::onboarding::recover_ark(&relay, &account_id, secret.as_bytes())
         .context("recovering account key")?;
 
     let mut store = open_key_store(key_file)?;
+    if store
+        .load_ark(account)?
+        .is_some_and(|old| old.expose_bytes() != ark.expose_bytes())
+    {
+        bail!("recovery would replace existing root keys");
+    }
     let keys = ensure_device_keys(&mut store, account)?;
     store.save_ark(account, &ark)?;
     store.save_account_id(account, &account_id)?;
@@ -7218,6 +7988,7 @@ fn sync_device_recover(
     let device_id = keys.device_id().to_owned();
     db.set_sync_identity(&account_hex, &device_id, epoch, Some(server))
         .context("writing sync identity")?;
+    finish_local_adoption(db, &store, server, account)?;
 
     println!("Recovered account {account_hex} on this device.");
     println!("  device:  {device_id}");
@@ -7244,7 +8015,7 @@ fn sync_device_devices(db: &Database, account: &str, key_file: Option<&PathBuf>)
         .sync_state()?
         .server_url
         .context("this device is not bound to a server")?;
-    let relay = open_relay(&server)?;
+    let relay = open_account_relay(db, &server, account, key_file)?;
 
     let roster =
         pergamon_sync::onboarding::roster(&relay, &account_id).context("listing device roster")?;
@@ -7277,4 +8048,71 @@ fn sync_device_devices(db: &Database, account: &str, key_file: Option<&PathBuf>)
 fn generate_completions(shell: clap_complete::Shell) {
     let mut cmd = Cli::command();
     clap_complete::generate(shell, &mut cmd, "pergamon", &mut std::io::stdout());
+}
+
+#[cfg(test)]
+mod authenticated_admission_tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    #[test]
+    fn legacy_helper_and_relay_admission_fence_pending_and_active_intents() {
+        for active in [false, true] {
+            let db = Database::open_in_memory().unwrap();
+            let mut intent = db
+                .begin_remote_binding(
+                    "https://relay-a.example",
+                    "default",
+                    "canonical",
+                    "device",
+                    "attempt",
+                    "attach",
+                )
+                .unwrap();
+            if active {
+                db.identify_remote_binding("tenant", "installation")
+                    .unwrap();
+                intent.auth_tenant_id = Some("tenant".to_owned());
+                intent.server_instance_id = Some("installation".to_owned());
+                intent.binding_version = Some(1);
+                db.activate_remote_binding(&intent, 1_700_000_000_000)
+                    .unwrap();
+            }
+            let before = db.remote_account_binding().unwrap();
+            let state = db.sync_state().unwrap();
+            for server in ["https://relay-a.example", "https://relay-b.example"] {
+                let error = sync_remote_enable(&db, server, "default", None).unwrap_err();
+                assert!(error.to_string().contains("authenticated relay intent"));
+                assert_eq!(db.remote_account_binding().unwrap(), before);
+                assert_eq!(db.sync_state().unwrap().server_url, state.server_url);
+                assert_eq!(db.sync_state().unwrap().account_id, state.account_id);
+            }
+            let error = open_token_provider(&db, "https://relay-b.example", "default", None)
+                .err()
+                .unwrap();
+            assert!(
+                error
+                    .to_string()
+                    .contains("conflicts with the authenticated relay")
+            );
+            let error = open_account_relay(&db, "https://relay-b.example", "default", None)
+                .err()
+                .unwrap();
+            assert!(
+                error
+                    .to_string()
+                    .contains("conflicts with the authenticated relay")
+            );
+            let error = open_token_provider(&db, "https://relay-a.example", "other-label", None)
+                .err()
+                .unwrap();
+            assert!(
+                error
+                    .to_string()
+                    .contains("conflicts with the authenticated relay")
+            );
+            assert_eq!(db.remote_account_binding().unwrap(), before);
+        }
+    }
 }

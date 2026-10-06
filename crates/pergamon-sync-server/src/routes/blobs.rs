@@ -35,15 +35,17 @@ pub async fn probe(
     maybe_auth: Option<Extension<AuthAccount>>,
     Json(req): Json<BlobProbeRequest>,
 ) -> Result<Json<BlobProbeResponse>, ApiError> {
-    if let Some(Extension(auth)) = maybe_auth {
-        authorize_account(&auth, &req.account_id, "POST", "/v1/blobs/probe")?;
+    if let Some(Extension(auth)) = &maybe_auth {
+        authorize_account(auth, &req.account_id, "POST", "/v1/blobs/probe")?;
     }
     let account_id = req.account_id.clone();
     let hashes = req.ct_hashes.clone();
     let (present, missing) = state
-        .with_tenant_store(&req.account_id, move |store| {
-            store.blob_probe(&account_id, &hashes)
-        })
+        .with_account_store(
+            &req.account_id,
+            maybe_auth.map(|Extension(a)| a),
+            move |store| store.blob_probe(&account_id, &hashes),
+        )
         .await?;
     Ok(Json(BlobProbeResponse { present, missing }))
 }
@@ -59,11 +61,12 @@ pub async fn probe(
 pub async fn put(
     State(state): State<AppState>,
     Path((account_id, ct_hash)): Path<(String, String)>,
+    maybe_auth: Option<Extension<AuthAccount>>,
     body: Bytes,
 ) -> Result<StatusCode, ApiError> {
     let tenant = account_id.clone();
     state
-        .with_tenant_store(&tenant, move |store| {
+        .with_account_store(&tenant, maybe_auth.map(|Extension(a)| a), move |store| {
             store.blob_put(&account_id, &ct_hash, &body)
         })
         .await?;
@@ -80,11 +83,14 @@ pub async fn put(
 pub async fn get(
     State(state): State<AppState>,
     Path((account_id, ct_hash)): Path<(String, String)>,
+    maybe_auth: Option<Extension<AuthAccount>>,
 ) -> Result<Response, ApiError> {
     let tenant = account_id.clone();
     let hash = ct_hash.clone();
     let bytes = state
-        .with_tenant_store(&tenant, move |store| store.blob_get(&account_id, &hash))
+        .with_account_store(&tenant, maybe_auth.map(|Extension(a)| a), move |store| {
+            store.blob_get(&account_id, &hash)
+        })
         .await?;
     bytes.map_or_else(
         || {

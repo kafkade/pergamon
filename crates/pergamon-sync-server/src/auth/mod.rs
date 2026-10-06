@@ -40,6 +40,7 @@
 //!   routes in the multi-tenant router builders.
 
 pub mod authz;
+pub mod binding;
 pub mod cipher_suite;
 pub mod routes;
 pub mod state;

@@ -416,8 +416,9 @@ and the AGPL/content-blindness properties are preserved:
 | Table (auth store) | Purpose | Notes |
 |---|---|---|
 | `accounts` | OPAQUE registration record | `identity_handle`, `opaque_record`, `envelope`, `oprf_key_id`, `created_at` |
-| `account_map` | `identity_handle` → `account_id` | internal only; never exposed to unauthenticated callers |
-| `sessions` / `tokens` | per-device bearer/refresh tokens | `token_id`, `account_id`, `device_id`, `expires_at`, `revoked_at` |
+| `account_map` | `identity_handle` → `auth_tenant_id` | internal auth identity, not a content namespace |
+| `content_bindings` | one live auth tenant → canonical content ID | immutable established binding, revision and retained retired reservations |
+| `sessions` / `tokens` | per-device bearer/refresh tokens | auth tenant, control/content scope, canonical-ID/revision snapshot, expiry and revocation |
 | `auth_failures` | per-identity throttling counters | feeds §1.7 backoff/lockout |
 | `quota` / `accounting` | per-tenant size + object counts | WP-3d; measured on ciphertext size only |
 
@@ -572,6 +573,189 @@ plane stays AGPL (ADR-029 Decision 5).
    `v4.x` we would ship, so it cannot be the sole assurance; gating *start* on a
    fresh audit would stall the epic unnecessarily when the review can run against
    the actual integration before release.
+
+## Part 5 — Authenticated account binding (#236)
+
+This section supersedes earlier direct-equality formulas that conflated the
+server-allocated UUID and the canonical content ID. It adds a reviewed auth-plane
+structure; it does **not** claim ADR-024/026's metadata boundary is unchanged.
+The independent external review remains outstanding: **DO NOT DEPLOY**.
+
+### Identities and authority
+
+| Identity | Meaning |
+| --- | --- |
+| `identity_handle` | OPAQUE verifier lookup; never a content route parameter |
+| `auth_tenant_id` (`T`) | Immutable relay-allocated auth identity, used for token/revoke/fairness and future billing |
+| `content_account_id` (`C`) | Stable ADR-024 content ID; unchanged in headers, signatures, crypto and local storage |
+| `--account` | Local secure-store label; never sent as namespace authority |
+| `device_id` | Existing hash of the device's Ed25519 public key |
+
+Every content principal resolves a valid token to **one live binding** and its
+current revision. Route/body/query targets must equal `C`; `T` is not an alias
+when it differs from `C`. Initial unbound sessions have `scope=control` and
+`content_account_id=null`. Bound sessions have `scope=content`, exact `C` and a
+binding revision. The relay never sees the ARK, recovery secret or password.
+
+First claim is authenticated allocation of an **empty** namespace, not proof of
+offline historical ownership. A disclosed unallocated ID can be squatted; an
+allocated ID cannot be stolen by another tenant's password, ID string or new
+device key. Occupied unbound blind namespaces are refused without parsing
+legacy signed records as authority. Explicit operator-assisted migration,
+deletion, portability and trust-chain redesign are separate work.
+
+### Versioned API and proof
+
+Content endpoints and `protocol_version=1` stay unchanged. The v2 auth plane
+adds register/login/refresh/revoke under `/v2/auth`, plus:
+
+| Endpoint | Behavior |
+| --- | --- |
+| `GET /v2/auth/content-binding` | Authenticated discovery of only the caller's binding and installation ID |
+| `POST /v2/auth/content-binding/start` | `{operation_id, content_account_id}` creates/resumes a device/tenant-bound challenge; no target-existence result |
+| `POST /v2/auth/content-binding/finish` | `{operation_id, challenge_id, pop_signature_b64}` commits allocation or returns the same successful receipt |
+
+Registration alone allocates no content namespace. A successful real OPAQUE
+login plus existing mint PoP is required for a usable device session. Binding
+revokes old credentials; a fresh login obtains content authority afterward.
+Login/recovery do not replace a binding or generate replacement root keys.
+
+V2 `register/finish` returns HTTP 200 with the same literal body for every valid
+upload, whether the handle is new or already registered:
+
+```json
+{"registration_received":true,"requires_login":true}
+```
+
+This acknowledges receipt, **not creation or authentication**. It contains no
+tenant/content ID, existence flag or created indicator. An existing verifier and
+identity are never overwritten; only successful OPAQUE login returns `T`/`C`.
+Duplicate submissions recover by that login, including interrupted registration.
+Malformed uploads and genuine storage failures remain explicit errors.
+V1's inherited registration response behavior is preserved for compatibility.
+Response uniformity is tested; it is **not** blanket proof of timing/side-channel
+resistance or a claim that the legacy v1 surface has been externally certified.
+
+The new signature is Ed25519 over the following existing length-prefix framing:
+
+```text
+"pergamon/v2/auth/content-binding-pop"
+|| lp(server_instance_id)
+|| lp(operation_id) || lp(challenge_id) || lp(nonce[32])
+|| lp(auth_tenant_id) || lp(content_account_id)
+|| lp(device_id) || ed25519_public_key[32]
+|| u64_be(binding_version) || i64_be(expires_at_ms)
+```
+
+`lp` is a big-endian u32 byte length followed by the bytes. The random nonce
+is 32 bytes, the challenge expires after 120 seconds, and at most 10,000 pending
+challenges are retained. Auth rate/body limits cover these endpoints.
+The server installation ID persists across restart and prevents cross-installation
+proof replay. Device/public-key derivation and strict signature verification
+reuse existing primitives; this is not proof of ARK possession.
+
+The content ID is exactly 32 lowercase hexadecimal characters; do not normalize
+an existing header string into another identity. Other tenant IDs are never
+accepted as alternative route parameters.
+
+### Atomic lifecycle and compatibility
+
+The versioned auth migration preserves OPAQUE records and issued token
+IDs/hashes/expiry/revocation, renames the stored auth identity explicitly, and
+imports old mappings as `legacy_reserved` bindings with `C=T`, revision zero.
+The separate auth database contains unique live bindings, retired reservations,
+bounded challenges, installation metadata and the successful receipt.
+
+An existing legacy allocation can transition to a different local `C` only if
+its old namespace has **never held objects/artifacts**. The old reservation is
+retired, never aliased or released. Established bindings, occupied old UUID
+namespaces and occupied unbound blind namespaces cannot be re-IDed or merged.
+Untouched legacy v1 clients retain their old response shapes and authority;
+v1 login for an explicitly transitioned tenant requires a protocol upgrade.
+Old tokens are revoked and cannot acquire the new content authority.
+
+Namespace history is recorded transactionally for events, blobs, device
+records, wraps, attestations and recovery blobs. Zero metered usage is not
+emptiness. The allocation check uses a content `BEGIN IMMEDIATE` writer
+barrier; binding/receipt/revision/revocations commit together in **one auth
+transaction**, with no content-row rewrite. There is no claim that a transaction
+spanning two independent WAL databases is automatically atomic.
+
+A shared namespace lease covers content store admission through completion.
+Binding takes the exclusive lease, then the content writer barrier, then auth
+transaction; admitted old requests are revalidated under the lease before
+touching storage. Thus binding cannot race a queued write. Ordinary read leases
+remain concurrent. All code uses consistent lock ordering and `spawn_blocking`
+for content/binding work.
+
+Access/refresh pairs mint atomically. Refresh conditionally consumes one valid
+refresh row with the same tenant/device/key/namespace/revision and replaces it
+with one fresh pair. Revocation uses the authenticated tenant, not client input.
+No password or raw bearer is persisted in relay receipts; only token hashes
+are stored server-side.
+
+A crash before auth commit leaves no allocation; after commit the receipt,
+revision and old-token revocations are all durable. If the response is lost,
+the old bearer remains invalid: log in again and discover the same receipt.
+An expired unfinished challenge may be recreated. Conflicting reuse of an
+operation ID is refused. A lost refresh response requires reauthentication,
+not retention/replay of raw token secrets.
+
+Paired installation markers reject a mismatched already-upgraded restore.
+Previously unmarked files have no retroactive provenance proof; operators must
+supply their actual existing pair for first upgrade. Back up auth, content,
+WAL/SHM and OPRF setup together while stopped.
+
+### Client adoption, errors and verification
+
+Apache `pergamon-sync::account_binding` exposes shared platform-neutral flows;
+`HttpAuth` is the optional blocking adapter. Core create/attach/join guards
+stay zero-I/O. Local V15 stores only nonsecret pending/active intent and receipt;
+session bundles are stored in the unlocked keyring/encrypted key file.
+Local adoption checks the unchanged content/device identity and enqueues the
+baseline in one SQLite transaction. Interrupted key-store/database writes are
+visible pending state, not an enabled-settings success.
+
+One rotating session provider supplies events, blobs and onboarding requests.
+Refresh secrets are durably replaced before fresh access authority is exposed.
+Persistence failure stops sync and requires login. Passwords are memory-only;
+restart requires operator unlock or an explicitly configured deployment-secret
+unlock. No authentication error falls back to blind mode.
+
+Central admission checks the authenticated intent's relay/account before
+selecting credentials. A conflicting destination or a missing secure session
+is an explicit error, never a blind/environment-credential transport, for
+both pending and active bindings. The legacy enable helper itself refuses
+authenticated intents, not just its CLI dispatcher.
+
+Non-join login is renewal only: it requires existing matching canonical ID,
+ARK/device keys and authenticated intent/binding. It never adopts a remote ID
+for an unbound local library or completes pending create/join. A pending
+matching attach verifies historical remote ciphertext/signatures with the
+local keys before credentials, local identity or activation are persisted.
+
+Valid control-only credentials targeting content are 403; missing, expired,
+revoked or malformed credentials are 401. Cross-tenant requests are 403 before
+object lookup, including blob probes. `CONTENT_NAMESPACE_UNAVAILABLE` is a
+generic authenticated 409 covering another reservation or unowned occupancy;
+it does not reveal an owner or distinguish those causes. Own established
+rebinding returns `BINDING_IMMUTABLE`; conflicting operation reuse returns
+`OPERATION_CONFLICT`; old unsupported auth negotiation returns
+`AUTH_PROTOCOL_UPGRADE_REQUIRED`. Temporary capacity/store failures are 503.
+Denials use structured audit logging without secrets. There is no unauthenticated
+namespace lookup endpoint.
+
+Real TCP hardened-router tests use locally created IDs/keys, pre-existing
+ciphertext/signatures/enrollment/recovery/rewrap artifacts and second-device
+decryption/application, not only register-then-use-the-server-UUID. They cover
+all route shapes, each occupied table, legacy compatibility, conflicting
+claims, wrong proof keys, refresh/revocation, commit rollback and restart.
+Explicit CLI process gates prove existing-library attach and fresh create /
+password-only keyless join / correct and incorrect recovery. Fixture-byte
+checks include auth/content WAL sidecars and positive ciphertext controls.
+
+These are tests of specified cases, **not external security certification**.
+Existing ADR-030 trust-chain/checkpoint/forward-secrecy deferrals remain.
 
 ## References
 

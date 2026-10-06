@@ -185,6 +185,47 @@ semver tags. This workflow is **not** part of the Terraform-managed required
 status checks (`kafkade/github-infra`) — Docker builds are slow and do not gate
 every PR — so adding the sync-server image requires no branch-protection change.
 
+## Amendment: Authenticated namespace binding and paired persistence
+
+Default `blind` mode retains its unauthenticated wire behavior. The optional,
+review-gated authenticated mode distinguishes relay auth tenants from stable
+content account IDs and permits explicit allocation only of unused namespaces.
+It adds server-visible **auth metadata**, not plaintext content access.
+Existing device records, wrapped bundles, attestations and recovery bytes remain
+opaque; the server verifies only the separate auth binding statement.
+
+The content store records namespace-use history for all six content/artifact
+tables, including unmetered artifacts. That history is occupancy metadata, not
+an ownership proof, and is retained through future deletion. Auth bindings and
+retired reservations remain in the separate auth database. No old content ID
+or cryptographic artifact is rewritten to match a relay tenant UUID.
+
+Binding commits its receipt, revision and token revocations in one auth
+transaction while an actual content writer barrier prevents allocation races.
+A shared namespace lease spans admitted content operations, preventing a
+queued old-authority write from committing after a compatibility transition.
+Concurrent reads still use the WAL reader pool. Multi-instance operation and
+concurrent blind/auth services sharing a pair of databases are unsupported.
+
+Authenticated stores carry matching installation markers. An already marked
+auth/content pair restored from different installations is refused at startup;
+the markers are not replaced to make the error disappear. The first upgrade
+of previously unmarked databases cannot retroactively prove their provenance:
+the operator must supply the correct existing pair. It still does not authorize
+claiming occupied, unbound blind namespaces.
+
+Back up the stopped service's **entire data directory**, including
+`pergamon-sync.db` and its WAL/SHM state, `pergamon-auth.db`, and
+`pergamon-oprf.key`. Restoring only one file does not restore authenticated
+binding authority. Do not run administrative writers during a binding operation.
+The installation marker is nonsecret; the OPRF setup remains secret and separate
+from the verifier database.
+
+See the
+[binding contract](../design/hosted-auth-control-plane.md#part-5--authenticated-account-binding-236).
+Authenticated mode remains **NOT YET EXTERNALLY SECURITY-REVIEWED / DO NOT
+DEPLOY**; neither account binding nor passing tests removes that gate.
+
 ## Consequences
 
 ### Positive

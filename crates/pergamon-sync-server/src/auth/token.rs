@@ -116,6 +116,22 @@ pub struct AuthAccount {
     pub account_id: String,
     /// The ADR-024 device the token is bound to.
     pub device_id: String,
+    /// Relay-local authentication identity, never an event header identity.
+    pub auth_tenant_id: String,
+    /// Version of the content authority granted at issuance.
+    pub binding_version: i64,
+    /// Admitted token row, for revocation revalidation at store admission.
+    pub token_id: String,
+}
+
+/// Relay authority never grants a content namespace to an unbound tenant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenScope {
+    /// Only authenticated identity/binding lifecycle operations.
+    Control,
+    /// The immutable content binding captured at issuance.
+    Content,
 }
 
 /// A freshly generated token: the parts to persist plus the opaque bearer string

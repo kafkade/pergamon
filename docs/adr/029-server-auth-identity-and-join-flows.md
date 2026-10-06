@@ -49,6 +49,10 @@ hosted-sync work: WP-2 (#188), the WP-3 epic (#187) and its children, WP-5a
 ADR-024's content-key hierarchy, ADR-026's relay, or ADR-022's wire contract;
 where this ADR cites them it is describing, not amending, them.
 
+The subsequent [#236 binding amendment](#amendment--explicit-authenticated-content-binding-236)
+explicitly extends the auth-metadata boundary and disambiguates tenant/content
+identities; it preserves the content cryptographic encodings and key hierarchy.
+
 ## Decision
 
 ### Decision 1 — One reviewed PAKE for the server auth identity
@@ -173,6 +177,69 @@ stateDiagram-v2
   keys are independent of the server auth identity.
 - A server only ever receives **ciphertext** and opaque onboarding artifacts.
 
+### Amendment — Explicit authenticated content binding (#236)
+
+Server authentication identity and content identity are **different identifiers**.
+The relay allocates an immutable `auth_tenant_id` for the OPAQUE identity.
+The canonical client-created `content_account_id` remains the ADR-024 account
+handle used by events, cryptographic associated data, enrollment and recovery.
+The local keystore label (`--account`) selects local entries and is neither
+remote identity. Device identity remains the existing Ed25519 public-key hash.
+
+V2 registration creates only an **unbound auth tenant**. OPAQUE login with
+device proof of possession can issue a **control-only** session, not a content
+namespace. A separate authenticated, fresh device-signed binding operation
+allocates that tenant's one canonical content namespace. Login never replaces a
+binding and never recovers or generates an ARK.
+
+Registration finish acknowledges only receipt and the requirement to log in.
+New and existing handles receive the same HTTP status and literal response,
+without IDs or a created/existence indicator. Existing verifiers are not
+overwritten; tenant/content IDs are disclosed only after successful OPAQUE login.
+Legacy v1 behavior is retained. Uniform responses do not themselves certify
+timing resistance; that remains part of independent external review.
+
+**First allocation is not proof of historical offline ownership.** It is
+permitted only for an unreserved namespace with no history or objects in any
+of the six content/artifact tables. Possession of a random ID or a newly
+generated device key cannot take an already allocated namespace. A disclosed,
+not-yet-allocated offline ID can be reserved first by someone else; random IDs
+prevent practical guessing, not disclosed-ID squatting.
+
+An occupied blind-relay namespace has no authenticated ownership anchor.
+Device self-signatures and trust attestations do not sign an account ID, and
+the server cannot infer authority from them. **Automatic legacy claims are
+refused**, including artifact-only namespaces with zero metered usage.
+Operator-assisted migration requires a separate approved procedure; #236 adds
+no administrative claim endpoint, routing alias or account merge.
+
+Existing v1 mappings and token secrets are preserved as legacy bindings with
+`content_account_id == auth_tenant_id`. An explicitly requested transition of a
+demonstrably unused legacy allocation may adopt the local canonical ID. Its old
+namespace remains reserved, its old tokens are revoked, and new credentials
+capture the canonical ID and binding revision. Once content/artifact history
+exists, the established namespace cannot change. Established ciphertext,
+signatures, root/device keys and recovery artifacts are never re-IDed.
+
+For create, persist one local ID/ARK and resumable intent, bind before publishing
+remote artifacts, then complete recovery publication and local activation.
+For attach, retain existing keys/ID and reject conflicting local or remote
+identity. For join, authenticate to the already bound tenant to reach its opaque
+onboarding artifacts, then obtain the existing ARK through SAS enrollment or
+recovery; compare the requested, authenticated and opened content IDs before
+adoption. Password login is never content recovery.
+
+This amendment adds **server-visible auth metadata**: tenant/content binding,
+device verification key, fresh binding statement, revision and operation
+receipt. ADR-024/026's opaque content/artifact payloads remain opaque, but the
+auth boundary is explicitly extended rather than described as unchanged.
+The wire/storage/lifecycle contract is specified in the
+[hosted-auth design](../design/hosted-auth-control-plane.md#part-5--authenticated-account-binding-236).
+
+The existing **NOT YET EXTERNALLY SECURITY-REVIEWED / DO NOT DEPLOY** gate
+includes the binding statement, first-allocation authority and compatibility
+transition. Tests and this contract are not external certification.
+
 ### Decision 4 — Password reset and content recovery are separate operations
 
 These are two different operations with two different outcomes, and the UX must
@@ -264,7 +331,7 @@ distinct to avoid the ADR-017 confusion:
    PAKE for quotas/billing; still zero-access to content.
 5. **Future hosted zero-access browser client** — a WASM client that holds keys
    in the browser and speaks to surfaces 3/4 without the server ever seeing
-   plaintext (future ADR-031 / WP-5a, ADR-016 WASM boundary).
+   plaintext (reserved ADR-033 / WP-5a, ADR-016 WASM boundary).
 
 ## Consequences
 

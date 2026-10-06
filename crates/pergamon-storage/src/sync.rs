@@ -59,6 +59,31 @@ pub struct SyncState {
     pub baseline_done: bool,
 }
 
+/// Device-local, nonsecret authenticated relay intent/receipt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteAccountBinding {
+    /// Explicit relay destination without authentication secrets.
+    pub relay_url: String,
+    /// Local secure-store label, independent of remote identity.
+    pub local_label: String,
+    /// Canonical content identity; absent for unbound control authority.
+    pub content_account_id: String,
+    /// Device handle cryptographically tied to the Ed25519 public key.
+    pub device_id: String,
+    /// Stable caller operation identifier for interrupted-operation recovery.
+    pub operation_id: String,
+    /// Explicit create, attach or join intent for safe local resumption.
+    pub flow: String,
+    /// Relay authentication tenant; never an encrypted content header.
+    pub auth_tenant_id: Option<String>,
+    /// Persistent nonsecret relay installation identifier.
+    pub server_instance_id: Option<String>,
+    /// Durable authority revision captured at credential issuance.
+    pub binding_version: Option<i64>,
+    /// Binding lifecycle state; retired namespaces never authorize routing.
+    pub state: String,
+}
+
 /// A pending outbox row awaiting push.
 #[derive(Debug, Clone)]
 pub struct OutboxRow {
@@ -1193,95 +1218,97 @@ impl Database {
     /// if any read/enqueue fails. Requiring identity is deliberate: a baseline is
     /// only meaningful once the account/device handles exist.
     pub fn enqueue_sync_baseline(&self, now_millis: u64) -> Result<usize, StorageError> {
-        self.in_transaction(|db| {
-            let state = db.sync_state()?;
-            if state.device_id.is_none() {
-                return Err(StorageError::Generic(
-                    "cannot enqueue sync baseline before sync is enabled (no device identity)"
-                        .to_owned(),
-                ));
-            }
-            if state.baseline_done {
-                return Ok(0);
-            }
+        self.in_transaction(|db| db.enqueue_sync_baseline_inner(now_millis))
+    }
 
-            let mut n = 0usize;
+    fn enqueue_sync_baseline_inner(&self, now_millis: u64) -> Result<usize, StorageError> {
+        let db = self;
+        let state = db.sync_state()?;
+        if state.device_id.is_none() {
+            return Err(StorageError::Generic(
+                "cannot enqueue sync baseline before sync is enabled (no device identity)"
+                    .to_owned(),
+            ));
+        }
+        if state.baseline_done {
+            return Ok(0);
+        }
 
-            // Feeds (subscriptions) — no synced dependencies.
-            for feed in db.list_feeds()? {
-                n += db.baseline_upsert(
-                    EntityType::FeedSubscription,
-                    &feed.id.to_string(),
-                    now_millis,
-                )?;
-            }
-            // Tags — no dependencies.
-            for tag in db.list_tags()? {
-                n += db.baseline_upsert(EntityType::Tag, &tag.id.to_string(), now_millis)?;
-            }
-            // Collections — parent before child (self-referential parent_id FK).
-            for id in order_collections_parent_first(&db.list_collections()?) {
-                n += db.baseline_upsert(EntityType::Collection, &id, now_millis)?;
-            }
-            // Documents — every content item except highlight shells, which are
-            // carried by their `Highlight` change (below) so the highlight_meta
-            // is reconstructed too.
-            for item in db.list_all_content_items()? {
-                if item.content_type == ContentType::Highlight {
-                    continue;
-                }
-                n += db.baseline_upsert(EntityType::Document, &item.id.to_string(), now_millis)?;
-            }
-            // Highlights — reconstruct the content_items shell + highlight_meta.
-            // (After documents so a highlight's `source_item_id` FK resolves.)
-            for meta in db.list_all_highlight_meta()? {
-                n += db.baseline_upsert(
-                    EntityType::Highlight,
-                    &meta.content_item_id.to_string(),
-                    now_millis,
-                )?;
-            }
-            // Notes — reference their content item.
-            for note in db.list_all_notes()? {
-                n += db.baseline_upsert(EntityType::Note, &note.id.to_string(), now_millis)?;
-            }
-            // Review cards — reference a highlight (FK to highlight_meta).
-            for card in db.list_all_review_cards()? {
-                n +=
-                    db.baseline_upsert(EntityType::ReviewCard, &card.id.to_string(), now_millis)?;
-            }
-            // Review logs — append-only, reference their card.
-            for log in db.list_all_review_logs()? {
-                n += db.baseline_upsert(EntityType::ReviewLog, &log.id.to_string(), now_millis)?;
-            }
-            // Tag membership edges (content_item_id:tag_id).
-            for (content_item_id, tag_id) in db.list_all_content_item_tags()? {
-                n += db.baseline_edge(
-                    EntityType::TagEdge,
-                    &content_item_id.to_string(),
-                    &tag_id.to_string(),
-                    now_millis,
-                )?;
-            }
-            // Collection membership edges (content_item_id:collection_id).
-            for (content_item_id, collection_id, _sort_order) in db.list_all_collection_items()? {
-                n += db.baseline_edge(
-                    EntityType::CollectionEdge,
-                    &content_item_id.to_string(),
-                    &collection_id.to_string(),
-                    now_millis,
-                )?;
-            }
-            // Settings — one entity per key. No enumeration API exists yet (the
-            // table is unused by current mutations), so read the keys directly to
-            // stay complete and future-proof.
-            for key in db.settings_keys()? {
-                n += db.baseline_upsert(EntityType::Settings, &key, now_millis)?;
-            }
+        let mut n = 0usize;
 
-            db.set_baseline_done(true)?;
-            Ok(n)
-        })
+        // Feeds (subscriptions) — no synced dependencies.
+        for feed in db.list_feeds()? {
+            n += db.baseline_upsert(
+                EntityType::FeedSubscription,
+                &feed.id.to_string(),
+                now_millis,
+            )?;
+        }
+        // Tags — no dependencies.
+        for tag in db.list_tags()? {
+            n += db.baseline_upsert(EntityType::Tag, &tag.id.to_string(), now_millis)?;
+        }
+        // Collections — parent before child (self-referential parent_id FK).
+        for id in order_collections_parent_first(&db.list_collections()?) {
+            n += db.baseline_upsert(EntityType::Collection, &id, now_millis)?;
+        }
+        // Documents — every content item except highlight shells, which are
+        // carried by their `Highlight` change (below) so the highlight_meta
+        // is reconstructed too.
+        for item in db.list_all_content_items()? {
+            if item.content_type == ContentType::Highlight {
+                continue;
+            }
+            n += db.baseline_upsert(EntityType::Document, &item.id.to_string(), now_millis)?;
+        }
+        // Highlights — reconstruct the content_items shell + highlight_meta.
+        // (After documents so a highlight's `source_item_id` FK resolves.)
+        for meta in db.list_all_highlight_meta()? {
+            n += db.baseline_upsert(
+                EntityType::Highlight,
+                &meta.content_item_id.to_string(),
+                now_millis,
+            )?;
+        }
+        // Notes — reference their content item.
+        for note in db.list_all_notes()? {
+            n += db.baseline_upsert(EntityType::Note, &note.id.to_string(), now_millis)?;
+        }
+        // Review cards — reference a highlight (FK to highlight_meta).
+        for card in db.list_all_review_cards()? {
+            n += db.baseline_upsert(EntityType::ReviewCard, &card.id.to_string(), now_millis)?;
+        }
+        // Review logs — append-only, reference their card.
+        for log in db.list_all_review_logs()? {
+            n += db.baseline_upsert(EntityType::ReviewLog, &log.id.to_string(), now_millis)?;
+        }
+        // Tag membership edges (content_item_id:tag_id).
+        for (content_item_id, tag_id) in db.list_all_content_item_tags()? {
+            n += db.baseline_edge(
+                EntityType::TagEdge,
+                &content_item_id.to_string(),
+                &tag_id.to_string(),
+                now_millis,
+            )?;
+        }
+        // Collection membership edges (content_item_id:collection_id).
+        for (content_item_id, collection_id, _sort_order) in db.list_all_collection_items()? {
+            n += db.baseline_edge(
+                EntityType::CollectionEdge,
+                &content_item_id.to_string(),
+                &collection_id.to_string(),
+                now_millis,
+            )?;
+        }
+        // Settings — one entity per key. No enumeration API exists yet (the
+        // table is unused by current mutations), so read the keys directly to
+        // stay complete and future-proof.
+        for key in db.settings_keys()? {
+            n += db.baseline_upsert(EntityType::Settings, &key, now_millis)?;
+        }
+
+        db.set_baseline_done(true)?;
+        Ok(n)
     }
 
     /// Enqueue one baseline `Upsert` for a single-entity type, built from the
@@ -1656,5 +1683,189 @@ pub(crate) fn json_to_sql(value: &Value) -> rusqlite::types::Value {
             .map_or_else(|| Sql::Real(n.as_f64().unwrap_or(0.0)), Sql::Integer),
         Value::String(s) => Sql::Text(s.clone()),
         other => Sql::Text(other.to_string()),
+    }
+}
+
+#[allow(clippy::missing_errors_doc)]
+impl Database {
+    /// Read resumable relay state. This table never contains credentials.
+    ///
+    /// # Errors
+    /// Returns an error for invalid identity, malformed wire data, or failed persistence/transport.
+    pub fn remote_account_binding(&self) -> Result<Option<RemoteAccountBinding>, StorageError> {
+        Ok(self
+            .connection()
+            .query_row(
+                "SELECT relay_url,local_label,content_account_id,device_id,operation_id,
+                    auth_tenant_id,server_instance_id,binding_version,state,flow
+             FROM remote_account_binding WHERE id=1",
+                [],
+                |r| {
+                    Ok(RemoteAccountBinding {
+                        relay_url: r.get(0)?,
+                        local_label: r.get(1)?,
+                        content_account_id: r.get(2)?,
+                        device_id: r.get(3)?,
+                        operation_id: r.get(4)?,
+                        auth_tenant_id: r.get(5)?,
+                        server_instance_id: r.get(6)?,
+                        binding_version: r.get(7)?,
+                        state: r.get(8)?,
+                        flow: r.get(9)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// Record intent without overwriting an established library identity.
+    ///
+    /// # Errors
+    /// Returns an error for invalid identity, malformed wire data, or failed persistence/transport.
+    pub fn begin_remote_binding(
+        &self,
+        relay: &str,
+        label: &str,
+        content: &str,
+        device: &str,
+        operation: &str,
+        flow: &str,
+    ) -> Result<RemoteAccountBinding, StorageError> {
+        let relay = relay.trim_end_matches('/');
+        let local = self.sync_state()?;
+        if local.account_id.as_deref().is_some_and(|c| c != content)
+            || local.device_id.as_deref().is_some_and(|d| d != device)
+            || local
+                .server_url
+                .as_deref()
+                .is_some_and(|s| s.trim_end_matches('/') != relay)
+        {
+            return Err(StorageError::Constraint(
+                "attach would replace an existing identity or relay".to_owned(),
+            ));
+        }
+        if let Some(old) = self.remote_account_binding()? {
+            if old.relay_url != relay
+                || old.local_label != label
+                || old.content_account_id != content
+                || old.device_id != device
+                || (old.state == "pending" && old.flow != flow)
+            {
+                return Err(StorageError::Constraint(
+                    "another relay binding is active or pending".to_owned(),
+                ));
+            }
+            return Ok(old);
+        }
+        self.connection().execute(
+            "INSERT INTO remote_account_binding
+             (id,relay_url,local_label,content_account_id,device_id,operation_id,flow,state)
+             VALUES (1,?1,?2,?3,?4,?5,?6,'pending')",
+            params![relay, label, content, device, operation, flow],
+        )?;
+        self.remote_account_binding()?
+            .ok_or_else(|| StorageError::Generic("binding intent was not persisted".to_owned()))
+    }
+
+    /// Atomically adopt an unchanged content identity and enqueue its baseline.
+    ///
+    /// # Errors
+    /// Returns an error for invalid identity, malformed wire data, or failed persistence/transport.
+    pub fn identify_remote_binding(
+        &self,
+        tenant: &str,
+        server_instance: &str,
+    ) -> Result<(), StorageError> {
+        let pending = self
+            .remote_account_binding()?
+            .ok_or_else(|| StorageError::Constraint("no binding intent".to_owned()))?;
+        if pending
+            .auth_tenant_id
+            .as_deref()
+            .is_some_and(|t| t != tenant)
+            || pending
+                .server_instance_id
+                .as_deref()
+                .is_some_and(|s| s != server_instance)
+        {
+            return Err(StorageError::Constraint(
+                "authenticated relay identity changed during attach".to_owned(),
+            ));
+        }
+        self.connection().execute(
+            "UPDATE remote_account_binding SET auth_tenant_id=?1,server_instance_id=?2 WHERE id=1",
+            params![tenant, server_instance],
+        )?;
+        Ok(())
+    }
+
+    /// Activate a verified receipt and baseline in the same local transaction.
+    ///
+    /// # Errors
+    /// Returns an error for invalid identity, malformed wire data, or failed persistence/transport.
+    pub fn activate_remote_binding(
+        &self,
+        receipt: &RemoteAccountBinding,
+        now_millis: u64,
+    ) -> Result<usize, StorageError> {
+        self.in_transaction(|db| {
+            let pending = db
+                .remote_account_binding()?
+                .ok_or_else(|| StorageError::Constraint("no binding intent".to_owned()))?;
+            if pending.relay_url != receipt.relay_url
+                || pending.local_label != receipt.local_label
+                || pending.content_account_id != receipt.content_account_id
+                || pending.device_id != receipt.device_id
+                || pending.operation_id != receipt.operation_id
+                || receipt.auth_tenant_id.is_none()
+                || receipt.server_instance_id.is_none()
+                || receipt.binding_version.is_none()
+                || pending
+                    .auth_tenant_id
+                    .as_ref()
+                    .is_some_and(|t| Some(t) != receipt.auth_tenant_id.as_ref())
+                || pending
+                    .server_instance_id
+                    .as_ref()
+                    .is_some_and(|s| Some(s) != receipt.server_instance_id.as_ref())
+                || pending
+                    .binding_version
+                    .is_some_and(|v| Some(v) != receipt.binding_version)
+            {
+                return Err(StorageError::Constraint(
+                    "binding receipt does not match local intent".to_owned(),
+                ));
+            }
+            let local = db.sync_state()?;
+            if local
+                .account_id
+                .as_deref()
+                .is_some_and(|c| c != receipt.content_account_id)
+                || local
+                    .device_id
+                    .as_deref()
+                    .is_some_and(|d| d != receipt.device_id)
+            {
+                return Err(StorageError::Constraint(
+                    "local identity changed during attach".to_owned(),
+                ));
+            }
+            db.set_sync_identity(
+                &receipt.content_account_id,
+                &receipt.device_id,
+                local.key_epoch,
+                Some(&receipt.relay_url),
+            )?;
+            db.connection().execute(
+                "UPDATE remote_account_binding SET auth_tenant_id=?1,server_instance_id=?2,
+                 binding_version=?3,state='active' WHERE id=1",
+                params![
+                    receipt.auth_tenant_id,
+                    receipt.server_instance_id,
+                    receipt.binding_version
+                ],
+            )?;
+            db.enqueue_sync_baseline_inner(now_millis)
+        })
     }
 }

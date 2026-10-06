@@ -69,7 +69,8 @@ use crate::auth::token::{self, TokenKind};
 use crate::auth::wire::{
     LoginFinishRequest, LoginFinishResponse, LoginStartRequest, LoginStartResponse, RefreshRequest,
     RefreshResponse, RegisterFinishRequest, RegisterFinishResponse, RegisterStartRequest,
-    RegisterStartResponse, RevokeRequest, RevokeResponse, TokenBundle,
+    RegisterStartResponse, RevokeRequest, RevokeResponse, TokenBundle, V2LoginFinishResponse,
+    V2RegisterFinishResponse, V2TokenBundle,
 };
 use crate::error::ApiError;
 
@@ -119,7 +120,7 @@ fn mint_on_login(
     req: &LoginFinishRequest,
     credential_finalization: &[u8],
     account_id: &str,
-) -> Result<Option<TokenBundle>, ApiError> {
+) -> Result<Option<V2TokenBundle>, ApiError> {
     // A token is minted only when ALL three PoP fields are present. Absent PoP =
     // WP-3a behavior (no token). A *partial* PoP is a malformed request.
     let (device_id, pub_b64, sig_b64) = match (
@@ -157,29 +158,22 @@ fn mint_on_login(
         return Err(ApiError::unauthorized("device proof-of-possession failed"));
     }
 
-    let cfg = *state.token_config();
-    let (access_token, access_expires_at) = store.mint(
-        account_id,
-        device_id,
-        &ed25519_pub,
-        TokenKind::Access,
-        cfg.access_ttl_ms,
-    )?;
-    let (refresh_token, refresh_expires_at) = store.mint(
-        account_id,
-        device_id,
-        &ed25519_pub,
-        TokenKind::Refresh,
-        cfg.refresh_ttl_ms,
-    )?;
-
-    Ok(Some(TokenBundle {
-        access_token,
-        access_expires_at,
-        refresh_token,
-        refresh_expires_at,
+    let pair = store.mint_pair(account_id, device_id, &ed25519_pub, *state.token_config())?;
+    let binding = store.binding(account_id)?;
+    Ok(Some(V2TokenBundle {
+        scope: if binding.is_some() {
+            token::TokenScope::Content
+        } else {
+            token::TokenScope::Control
+        },
+        access_token: pair.access_token,
+        access_expires_at: pair.access_expires_at,
+        refresh_token: pair.refresh_token,
+        refresh_expires_at: pair.refresh_expires_at,
         device_id: device_id.to_string(),
-        account_id: account_id.to_string(),
+        auth_tenant_id: account_id.to_string(),
+        content_account_id: binding.as_ref().map(|b| b.content_account_id.clone()),
+        binding_version: binding.as_ref().map_or(0, |b| b.binding_version),
     }))
 }
 
@@ -227,12 +221,43 @@ pub async fn register_finish(
     let record_bytes = record.serialize().to_vec();
 
     let oprf_key_id = state.oprf_key_id().to_string();
-    let account_id = {
-        let mut store = state.lock_store()?;
-        store.finish_registration(&req.identity_handle, &record_bytes, &oprf_key_id)?
-    };
+    let account_id = tokio::task::spawn_blocking(move || {
+        state.register_legacy(&req.identity_handle, &record_bytes, &oprf_key_id)
+    })
+    .await
+    .map_err(|e| {
+        tracing::error!(error=%e,"legacy registration task failed");
+        ApiError::internal("registration storage unavailable")
+    })??;
 
     Ok(Json(RegisterFinishResponse { account_id }))
+}
+
+/// V2 registration creates auth authority only, never a content claim.
+///
+/// # Errors
+/// Returns an error for invalid identity, malformed wire data, or failed persistence/transport.
+pub async fn register_finish_v2(
+    State(state): State<AuthState>,
+    Json(req): Json<RegisterFinishRequest>,
+) -> Result<Json<V2RegisterFinishResponse>, ApiError> {
+    let bytes = decode_b64("registration_upload_b64", &req.registration_upload_b64)?;
+    let upload = RegistrationUpload::<PergamonCipherSuite>::deserialize(&bytes)
+        .map_err(|_| ApiError::bad_request("malformed registration upload"))?;
+    let record = ServerRegistration::<PergamonCipherSuite>::finish(upload);
+    let result = state.lock_store()?.register_unbound(
+        &req.identity_handle,
+        &record.serialize(),
+        state.oprf_key_id(),
+    );
+    match result {
+        Ok(_) | Err(super::store::AuthStoreError::HandleExists) => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(Json(V2RegisterFinishResponse {
+        registration_received: true,
+        requires_login: true,
+    }))
 }
 
 /// `POST /v1/auth/login/start` — begin the OPAQUE AKE (KE1 → KE2).
@@ -304,6 +329,40 @@ pub async fn login_finish(
     State(state): State<AuthState>,
     Json(req): Json<LoginFinishRequest>,
 ) -> Result<Json<LoginFinishResponse>, ApiError> {
+    let response = finish_login(&state, &req, false)?;
+    let account_id = response
+        .content_account_id
+        .ok_or_else(|| ApiError::internal("missing legacy binding"))?;
+    Ok(Json(LoginFinishResponse {
+        authenticated: response.authenticated,
+        account_id: account_id.clone(),
+        token: response.token.map(|t| TokenBundle {
+            access_token: t.access_token,
+            access_expires_at: t.access_expires_at,
+            refresh_token: t.refresh_token,
+            refresh_expires_at: t.refresh_expires_at,
+            device_id: t.device_id,
+            account_id,
+        }),
+    }))
+}
+
+/// V2 login exposes both identities and can issue a control-only credential.
+///
+/// # Errors
+/// Returns an error for invalid identity, malformed wire data, or failed persistence/transport.
+pub async fn login_finish_v2(
+    State(state): State<AuthState>,
+    Json(req): Json<LoginFinishRequest>,
+) -> Result<Json<V2LoginFinishResponse>, ApiError> {
+    Ok(Json(finish_login(&state, &req, true)?))
+}
+
+fn finish_login(
+    state: &AuthState,
+    req: &LoginFinishRequest,
+    v2: bool,
+) -> Result<V2LoginFinishResponse, ApiError> {
     // An unknown/expired login_id is a uniform auth failure — no identity
     // context to attribute a throttle failure to, so just reject.
     let Some((server_login, identity_handle)) = state.take_pending(&req.login_id)? else {
@@ -348,14 +407,28 @@ pub async fn login_finish(
     let account_id = store
         .account_id(&identity_handle)?
         .ok_or_else(|| ApiError::internal("authenticated identity has no account mapping"))?;
+    let binding = store.binding(&account_id)?;
+    if !v2
+        && binding
+            .as_ref()
+            .is_none_or(|b| b.state != "legacy_reserved")
+    {
+        return Err(super::binding::conflict(
+            "AUTH_PROTOCOL_UPGRADE_REQUIRED",
+            "this tenant requires auth protocol v2",
+        ));
+    }
     // Mint a per-device token bundle iff a valid device PoP accompanies the login.
-    let token = mint_on_login(&state, &mut store, &req, &finalization_bytes, &account_id)?;
+    let token = mint_on_login(state, &mut store, req, &finalization_bytes, &account_id)?;
     drop(store);
-    Ok(Json(LoginFinishResponse {
+    Ok(V2LoginFinishResponse {
         authenticated: true,
-        account_id,
+        auth_tenant_id: account_id,
+        content_account_id: binding.as_ref().map(|b| b.content_account_id.clone()),
+        binding_version: binding.as_ref().map_or(0, |b| b.binding_version),
+        binding_state: binding.map_or_else(|| "unbound".to_owned(), |b| b.state),
         token,
-    }))
+    })
 }
 
 /// `POST /v1/auth/token/refresh` — exchange a valid refresh token plus a fresh
@@ -415,7 +488,7 @@ pub async fn token_refresh(
     let cfg = *state.token_config();
     let rotated = store.rotate_refresh(
         &refresh.token_id,
-        &refresh.account_id,
+        &refresh.auth_tenant_id,
         &refresh.device_id,
         &ed25519_pub,
         cfg.access_ttl_ms,
@@ -447,12 +520,11 @@ pub async fn token_revoke(
     Json(req): Json<RevokeRequest>,
 ) -> Result<Json<RevokeResponse>, ApiError> {
     let bearer = bearer_from_headers(&headers)?;
-    let caller = state
-        .validate_token(&bearer)?
-        .ok_or_else(|| ApiError::unauthorized("invalid or missing access token"))?;
-
     let mut store = state.lock_store()?;
-    let revoked = store.revoke_device(&caller.account_id, &req.device_id)?;
+    let caller = store
+        .load_valid_token(&bearer, TokenKind::Access)?
+        .ok_or_else(|| ApiError::unauthorized("invalid or missing access token"))?;
+    let revoked = store.revoke_device(&caller.auth_tenant_id, &req.device_id)?;
     drop(store);
     Ok(Json(RevokeResponse {
         revoked: u64::try_from(revoked).unwrap_or(u64::MAX),

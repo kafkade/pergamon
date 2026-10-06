@@ -243,6 +243,11 @@ impl CryptoContext {
     /// # Errors
     /// Returns a [`SyncError`] if base64 decode, decryption, or parsing fails.
     pub fn decrypt_change(&self, event: &StoredEvent) -> Result<ChangeBody> {
+        if event.account_id != self.account_id_hex {
+            return Err(SyncError::Protocol(
+                "event belongs to a different canonical content account".to_owned(),
+            ));
+        }
         let ciphertext = STANDARD.decode(&event.ciphertext_b64)?;
         let header = Self::header_for(event);
         let ack = self.content_key_for(event.key_epoch)?;

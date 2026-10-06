@@ -9,9 +9,10 @@
 //! only base64-transports and content-hash deduplicates them. This preserves the
 //! blind-relay invariant: authenticity is enforced entirely client-side.
 
-use axum::Json;
+use crate::auth::AuthAccount;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
+use axum::{Extension, Json};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 
@@ -44,12 +45,13 @@ fn decode_b64(field: &str, value: &str) -> Result<Vec<u8>, ApiError> {
 pub async fn device_put(
     State(state): State<AppState>,
     Path((account_id, device_id)): Path<(String, String)>,
+    maybe_auth: Option<Extension<AuthAccount>>,
     Json(req): Json<DeviceRecordInput>,
 ) -> Result<StatusCode, ApiError> {
     let bytes = decode_b64("record_b64", &req.record_b64)?;
     let tenant = account_id.clone();
     state
-        .with_tenant_store(&tenant, move |store| {
+        .with_account_store(&tenant, maybe_auth.map(|Extension(a)| a), move |store| {
             store.device_record_put(&account_id, &device_id, &bytes)
         })
         .await?;
@@ -64,11 +66,12 @@ pub async fn device_put(
 pub async fn device_get(
     State(state): State<AppState>,
     Path((account_id, device_id)): Path<(String, String)>,
+    maybe_auth: Option<Extension<AuthAccount>>,
 ) -> Result<Json<DeviceRecordEntry>, ApiError> {
     let tenant = account_id.clone();
     let device = device_id.clone();
     let bytes = state
-        .with_tenant_store(&tenant, move |store| {
+        .with_account_store(&tenant, maybe_auth.map(|Extension(a)| a), move |store| {
             store.device_record_get(&account_id, &device)
         })
         .await?;
@@ -90,10 +93,13 @@ pub async fn device_get(
 pub async fn devices_list(
     State(state): State<AppState>,
     Path(account_id): Path<String>,
+    maybe_auth: Option<Extension<AuthAccount>>,
 ) -> Result<Json<DeviceRecordsResponse>, ApiError> {
     let tenant = account_id.clone();
     let rows = state
-        .with_tenant_store(&tenant, move |store| store.device_records_list(&account_id))
+        .with_account_store(&tenant, maybe_auth.map(|Extension(a)| a), move |store| {
+            store.device_records_list(&account_id)
+        })
         .await?;
     let devices = rows
         .into_iter()
@@ -113,12 +119,13 @@ pub async fn devices_list(
 pub async fn wrap_put(
     State(state): State<AppState>,
     Path((account_id, device_id)): Path<(String, String)>,
+    maybe_auth: Option<Extension<AuthAccount>>,
     Json(req): Json<WrappedBundleInput>,
 ) -> Result<Json<WrappedBundleAck>, ApiError> {
     let bytes = decode_b64("bundle_b64", &req.bundle_b64)?;
     let tenant = account_id.clone();
     let result = state
-        .with_tenant_store(&tenant, move |store| {
+        .with_account_store(&tenant, maybe_auth.map(|Extension(a)| a), move |store| {
             store.wrapped_bundle_put(&account_id, &device_id, &bytes)
         })
         .await?;
@@ -137,12 +144,13 @@ pub async fn wraps_list(
     State(state): State<AppState>,
     Path((account_id, device_id)): Path<(String, String)>,
     Query(query): Query<RelayListQuery>,
+    maybe_auth: Option<Extension<AuthAccount>>,
 ) -> Result<Json<WrappedBundlesResponse>, ApiError> {
     let limit = query.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
     let tenant = account_id.clone();
     let after = query.after;
     let rows = state
-        .with_tenant_store(&tenant, move |store| {
+        .with_account_store(&tenant, maybe_auth.map(|Extension(a)| a), move |store| {
             store.wrapped_bundles_list(&account_id, &device_id, after, limit)
         })
         .await?;
@@ -169,12 +177,13 @@ pub async fn wraps_list(
 pub async fn attestation_append(
     State(state): State<AppState>,
     Path(account_id): Path<String>,
+    maybe_auth: Option<Extension<AuthAccount>>,
     Json(req): Json<AttestationInput>,
 ) -> Result<Json<AttestationAck>, ApiError> {
     let bytes = decode_b64("attestation_b64", &req.attestation_b64)?;
     let tenant = account_id.clone();
     let result = state
-        .with_tenant_store(&tenant, move |store| {
+        .with_account_store(&tenant, maybe_auth.map(|Extension(a)| a), move |store| {
             store.attestation_append(&account_id, &bytes)
         })
         .await?;
@@ -193,12 +202,13 @@ pub async fn attestations_list(
     State(state): State<AppState>,
     Path(account_id): Path<String>,
     Query(query): Query<RelayListQuery>,
+    maybe_auth: Option<Extension<AuthAccount>>,
 ) -> Result<Json<AttestationsResponse>, ApiError> {
     let limit = query.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
     let tenant = account_id.clone();
     let after = query.after;
     let rows = state
-        .with_tenant_store(&tenant, move |store| {
+        .with_account_store(&tenant, maybe_auth.map(|Extension(a)| a), move |store| {
             store.attestations_list(&account_id, after, limit)
         })
         .await?;
@@ -225,12 +235,13 @@ pub async fn attestations_list(
 pub async fn recovery_put(
     State(state): State<AppState>,
     Path(account_id): Path<String>,
+    maybe_auth: Option<Extension<AuthAccount>>,
     Json(req): Json<RecoveryBlobInput>,
 ) -> Result<StatusCode, ApiError> {
     let bytes = decode_b64("blob_b64", &req.blob_b64)?;
     let tenant = account_id.clone();
     state
-        .with_tenant_store(&tenant, move |store| {
+        .with_account_store(&tenant, maybe_auth.map(|Extension(a)| a), move |store| {
             store.recovery_blob_put(&account_id, &bytes)
         })
         .await?;
@@ -244,10 +255,13 @@ pub async fn recovery_put(
 pub async fn recovery_get(
     State(state): State<AppState>,
     Path(account_id): Path<String>,
+    maybe_auth: Option<Extension<AuthAccount>>,
 ) -> Result<Json<RecoveryBlobResponse>, ApiError> {
     let tenant = account_id.clone();
     let bytes = state
-        .with_tenant_store(&tenant, move |store| store.recovery_blob_get(&account_id))
+        .with_account_store(&tenant, maybe_auth.map(|Extension(a)| a), move |store| {
+            store.recovery_blob_get(&account_id)
+        })
         .await?;
     bytes.map_or_else(
         || Err(ApiError::not_found("no recovery blob for this account")),

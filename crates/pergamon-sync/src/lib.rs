@@ -36,6 +36,8 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "auth")]
+pub mod account_binding;
 pub mod apply;
 #[cfg(feature = "auth")]
 pub mod auth;
@@ -45,6 +47,8 @@ pub mod crypto;
 pub mod daemon;
 pub mod engine;
 pub mod error;
+#[cfg(all(feature = "auth", feature = "http"))]
+pub mod http_auth;
 pub mod onboarding;
 pub mod relay;
 pub mod schedule;

@@ -23,6 +23,7 @@ use crate::relay::{RelayAttestation, RelayDevice, RelayTransport, RelayWrap};
 pub struct HttpRelay {
     client: Client,
     base_url: String,
+    token_provider: Option<std::sync::Arc<dyn crate::credential::AccessTokenProvider>>,
 }
 
 // Serde mirrors of the server's `envelope` relay types. Kept local so this
@@ -109,11 +110,35 @@ impl HttpRelay {
         Ok(Self {
             client,
             base_url: base_url.into().trim_end_matches('/').to_owned(),
+            token_provider: None,
         })
     }
 
     fn url(&self, path: &str) -> String {
         format!("{}{path}", self.base_url)
+    }
+
+    /// Use the same rotating session as event and blob requests.
+    #[must_use]
+    pub fn with_token_provider(
+        mut self,
+        provider: std::sync::Arc<dyn crate::credential::AccessTokenProvider>,
+    ) -> Self {
+        self.token_provider = Some(provider);
+        self
+    }
+
+    fn request(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+    ) -> Result<reqwest::blocking::RequestBuilder> {
+        crate::http::authorized_request(
+            &self.client,
+            method,
+            self.url(path),
+            self.token_provider.as_deref(),
+        )
     }
 }
 
@@ -136,8 +161,10 @@ fn ensure_ok(status: StatusCode) -> Result<()> {
 impl RelayTransport for HttpRelay {
     fn device_put(&self, account_id: &str, device_id: &str, record: &[u8]) -> Result<()> {
         let resp = self
-            .client
-            .put(self.url(&format!("/v1/devices/{account_id}/{device_id}")))
+            .request(
+                reqwest::Method::PUT,
+                &format!("/v1/devices/{account_id}/{device_id}"),
+            )?
             .json(&RecordInput {
                 record_b64: STANDARD.encode(record),
             })
@@ -148,8 +175,10 @@ impl RelayTransport for HttpRelay {
 
     fn device_get(&self, account_id: &str, device_id: &str) -> Result<Option<Vec<u8>>> {
         let resp = self
-            .client
-            .get(self.url(&format!("/v1/devices/{account_id}/{device_id}")))
+            .request(
+                reqwest::Method::GET,
+                &format!("/v1/devices/{account_id}/{device_id}"),
+            )?
             .send()
             .map_err(|e| SyncError::Transport(e.to_string()))?;
         if resp.status() == StatusCode::NOT_FOUND {
@@ -164,8 +193,7 @@ impl RelayTransport for HttpRelay {
 
     fn devices_list(&self, account_id: &str) -> Result<Vec<RelayDevice>> {
         let resp = self
-            .client
-            .get(self.url(&format!("/v1/devices/{account_id}")))
+            .request(reqwest::Method::GET, &format!("/v1/devices/{account_id}"))?
             .send()
             .map_err(|e| SyncError::Transport(e.to_string()))?;
         ensure_ok(resp.status())?;
@@ -185,8 +213,10 @@ impl RelayTransport for HttpRelay {
 
     fn wrap_put(&self, account_id: &str, device_id: &str, bundle: &[u8]) -> Result<u64> {
         let resp = self
-            .client
-            .post(self.url(&format!("/v1/wraps/{account_id}/{device_id}")))
+            .request(
+                reqwest::Method::POST,
+                &format!("/v1/wraps/{account_id}/{device_id}"),
+            )?
             .json(&BundleInput {
                 bundle_b64: STANDARD.encode(bundle),
             })
@@ -201,8 +231,10 @@ impl RelayTransport for HttpRelay {
 
     fn wraps_list(&self, account_id: &str, device_id: &str, after: u64) -> Result<Vec<RelayWrap>> {
         let resp = self
-            .client
-            .get(self.url(&format!("/v1/wraps/{account_id}/{device_id}")))
+            .request(
+                reqwest::Method::GET,
+                &format!("/v1/wraps/{account_id}/{device_id}"),
+            )?
             .query(&[("after", after.to_string())])
             .send()
             .map_err(|e| SyncError::Transport(e.to_string()))?;
@@ -223,8 +255,10 @@ impl RelayTransport for HttpRelay {
 
     fn attestation_append(&self, account_id: &str, attestation: &[u8]) -> Result<u64> {
         let resp = self
-            .client
-            .post(self.url(&format!("/v1/attestations/{account_id}")))
+            .request(
+                reqwest::Method::POST,
+                &format!("/v1/attestations/{account_id}"),
+            )?
             .json(&AttestationInput {
                 attestation_b64: STANDARD.encode(attestation),
             })
@@ -239,8 +273,10 @@ impl RelayTransport for HttpRelay {
 
     fn attestations_list(&self, account_id: &str, after: u64) -> Result<Vec<RelayAttestation>> {
         let resp = self
-            .client
-            .get(self.url(&format!("/v1/attestations/{account_id}")))
+            .request(
+                reqwest::Method::GET,
+                &format!("/v1/attestations/{account_id}"),
+            )?
             .query(&[("after", after.to_string())])
             .send()
             .map_err(|e| SyncError::Transport(e.to_string()))?;
@@ -261,8 +297,7 @@ impl RelayTransport for HttpRelay {
 
     fn recovery_put(&self, account_id: &str, blob: &[u8]) -> Result<()> {
         let resp = self
-            .client
-            .put(self.url(&format!("/v1/recovery/{account_id}")))
+            .request(reqwest::Method::PUT, &format!("/v1/recovery/{account_id}"))?
             .json(&RecoveryInput {
                 blob_b64: STANDARD.encode(blob),
             })
@@ -273,8 +308,7 @@ impl RelayTransport for HttpRelay {
 
     fn recovery_get(&self, account_id: &str) -> Result<Option<Vec<u8>>> {
         let resp = self
-            .client
-            .get(self.url(&format!("/v1/recovery/{account_id}")))
+            .request(reqwest::Method::GET, &format!("/v1/recovery/{account_id}"))?
             .send()
             .map_err(|e| SyncError::Transport(e.to_string()))?;
         if resp.status() == StatusCode::NOT_FOUND {

@@ -98,11 +98,19 @@ pub fn build_router(state: AppState) -> Router {
 ///
 /// **NOT YET EXTERNALLY SECURITY-REVIEWED — do not deploy** (see [`auth`]).
 pub fn build_router_multitenant(state: AppState, auth_state: auth::AuthState) -> Router {
-    routes::router(state)
+    if let Err(error) = auth_state.pair_content_store(&state.store) {
+        tracing::error!(error=%error,"refusing mismatched relay database pair");
+        return Router::new()
+            .fallback(|| async { error::ApiError::unavailable("relay database pairing failed") });
+    }
+    let auth_state = auth_state.with_content_store(state.store.clone());
+    let state = state.authenticated(auth_state.clone());
+    routes::router(state.clone())
         .layer(from_fn_with_state(
             auth_state.clone(),
             auth::require_account_auth,
         ))
+        .merge(auth::binding::router(auth_state.clone(), state))
         .merge(auth::auth_router(auth_state))
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
@@ -145,8 +153,17 @@ pub fn build_router_multitenant_hardened(
     auth_state: auth::AuthState,
     abuse: &AbuseConfig,
 ) -> Router {
+    if let Err(error) = auth_state.pair_content_store(&state.store) {
+        tracing::error!(error=%error,"refusing mismatched relay database pair");
+        return Router::new()
+            .fallback(|| async { error::ApiError::unavailable("relay database pairing failed") });
+    }
+    let auth_state = auth_state.with_content_store(state.store.clone());
+    let state = state.authenticated(auth_state.clone());
     let auth = abuse::apply_strict_rate_limit(
-        auth::auth_router(auth_state.clone()).layer(abuse::body_limit_layer(abuse.max_body_bytes)),
+        auth::auth_router(auth_state.clone())
+            .merge(auth::binding::router(auth_state.clone(), state.clone()))
+            .layer(abuse::body_limit_layer(abuse.max_body_bytes)),
         abuse,
     );
     routes::hardened_router(state, abuse)

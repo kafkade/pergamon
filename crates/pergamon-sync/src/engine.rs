@@ -159,6 +159,11 @@ impl<T: Transport> SyncEngine<T> {
             }
             let page_len = page.events.len();
             for ev in &page.events {
+                if ev.account_id != account {
+                    return Err(SyncError::Protocol(
+                        "relay returned an event for a different content account".to_owned(),
+                    ));
+                }
                 // Suppress this device's own echoes.
                 if ev.device_id == self.crypto.device_id {
                     continue;
