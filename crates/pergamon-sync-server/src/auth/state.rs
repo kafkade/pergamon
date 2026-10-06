@@ -75,6 +75,7 @@ pub struct AuthState {
     ///
     /// [#201]: https://github.com/kafkade/pergamon/issues/201
     pending: Arc<Mutex<HashMap<String, PendingLogin>>>,
+    content_store: Option<Arc<crate::store::SyncStore>>,
 }
 
 impl AuthState {
@@ -97,6 +98,7 @@ impl AuthState {
             throttle,
             token_config: TokenConfig::default(),
             pending: Arc::new(Mutex::new(HashMap::new())),
+            content_store: None,
         }
     }
 
@@ -105,6 +107,44 @@ impl AuthState {
     pub const fn with_token_config(mut self, token_config: TokenConfig) -> Self {
         self.token_config = token_config;
         self
+    }
+
+    /// Verify the paired auth/content installation before serving requests.
+    ///
+    /// # Errors
+    /// Returns an explicit mismatch or persistence error; do not serve this pair.
+    pub fn pair_content_store(&self, store: &crate::store::SyncStore) -> Result<(), ApiError> {
+        let instance = self.lock_store()?.server_instance_id()?;
+        Ok(store.pair_auth_instance(&instance)?)
+    }
+
+    pub(crate) fn with_content_store(mut self, store: Arc<crate::store::SyncStore>) -> Self {
+        self.content_store = Some(store);
+        self
+    }
+
+    pub(crate) fn register_legacy(
+        &self,
+        identity: &str,
+        record: &[u8],
+        key_id: &str,
+    ) -> Result<String, ApiError> {
+        let candidate = Uuid::new_v4().simple().to_string();
+        let register = |occupied: &dyn Fn(&str) -> Result<bool, ApiError>| {
+            if occupied(&candidate)? {
+                return Err(super::binding::conflict(
+                    "CONTENT_NAMESPACE_UNAVAILABLE",
+                    "content namespace unavailable",
+                ));
+            }
+            Ok(self
+                .lock_store()?
+                .finish_registration_at(identity, record, key_id, &candidate)?)
+        };
+        self.content_store.as_ref().map_or_else(
+            || register(&|_| Ok(false)),
+            |store| store.with_namespace_barrier(register),
+        )
     }
 
     /// Lock the auth store, mapping a poisoned lock to a 500.
@@ -152,7 +192,13 @@ impl AuthState {
     /// # Errors
     /// Returns [`ApiError::internal`] on a poisoned lock or a store failure.
     pub fn validate_token(&self, bearer: &str) -> Result<Option<AuthAccount>, ApiError> {
-        Ok(self.lock_store()?.validate_token(bearer)?)
+        let store = self.lock_store()?;
+        if let Some(token) = store.load_valid_token(bearer, super::token::TokenKind::Access)?
+            && token.content_account_id.is_none()
+        {
+            return Err(ApiError::forbidden("content binding is required"));
+        }
+        Ok(store.validate_token(bearer)?)
     }
 
     /// Store a pending login's server state, returning a fresh `login_id`.

@@ -17,6 +17,15 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 
+/// Shared, securely persisted rotating bearer authority for all relay surfaces.
+pub trait AccessTokenProvider: Send + Sync {
+    /// Return current authority, persisting a rotation before exposing it.
+    ///
+    /// # Errors
+    /// Returns an error if refresh or durable session persistence fails.
+    fn access_token(&self) -> crate::error::Result<String>;
+}
+
 /// A credential the HTTP transports send as an `Authorization` header.
 ///
 /// Construct it from configuration (e.g. environment variables) and hand it to

@@ -2898,6 +2898,7 @@ dependencies = [
  "opaque-ke",
  "pergamon-core",
  "pergamon-crypto",
+ "pergamon-keystore",
  "pergamon-storage",
  "pergamon-sync",
  "rand 0.8.7",

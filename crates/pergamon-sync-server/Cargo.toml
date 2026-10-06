@@ -72,3 +72,4 @@ pergamon-crypto = { workspace = true }
 pergamon-sync = { workspace = true, features = ["http", "auth"] }
 pergamon-storage = { workspace = true }
 pergamon-core = { workspace = true }
+pergamon-keystore = { workspace = true, default-features = false }

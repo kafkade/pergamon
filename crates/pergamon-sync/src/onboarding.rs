@@ -244,6 +244,11 @@ pub fn accept<R: RelayTransport>(
     let bundle = bundle.ok_or_else(|| {
         SyncError::Protocol("no relayed bundle could be opened by this device".to_owned())
     })?;
+    if bundle.account_id != *account_id {
+        return Err(SyncError::Protocol(
+            "opened enrollment belongs to a different content account".to_owned(),
+        ));
+    }
 
     // Look for a verifiable trust attestation naming this device as subject.
     let approver_device_id = find_truster(relay, &account_hex, keys.device_id())?;

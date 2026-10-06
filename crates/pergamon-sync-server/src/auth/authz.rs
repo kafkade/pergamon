@@ -39,10 +39,13 @@
 //!   different tenant. Every 403 is paired with a structured audit
 //!   [`tracing::warn!`] on the `pergamon::auth::audit` target.
 //!
-//! ## Account-id namespace (verified)
-//! The `account_id` a token carries is the server-allocated 128-bit handle minted
-//! at OPAQUE `register/finish`; the blind content plane keys on that **same** id.
-//! A direct equality check is therefore correct and complete.
+//! ## Canonical namespace resolution
+//! [`AuthAccount::account_id`] is the canonical content ID resolved from the
+//! token's live tenant binding and issuance revision. The relay's auth tenant
+//! is separate; only untouched legacy bindings have equal tenant/content IDs.
+//! Equality authorizes exactly the canonical namespace, never an alias. Store
+//! admission revalidates the snapshot under a namespace lease so a queued write
+//! cannot outlive a compatibility transition.
 //!
 //! ## Seams left for later work (do not enforce here)
 //! - **Per-device roster membership is deliberately NOT required.** ADR-029
@@ -197,6 +200,9 @@ mod tests {
         AuthAccount {
             account_id: id.to_string(),
             device_id: "device-abc".to_string(),
+            auth_tenant_id: id.to_string(),
+            binding_version: 0,
+            token_id: "test".to_string(),
         }
     }
 

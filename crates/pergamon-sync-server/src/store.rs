@@ -78,6 +78,9 @@ const READER_PRAGMAS: &str = "PRAGMA busy_timeout = 5000;
 /// Errors returned by the [`SyncStore`].
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
+    /// Auth and content files were restored from different paired installations.
+    #[error("auth/content database pairing mismatch; restore the matching backup pair")]
+    AccountPairMismatch,
     /// The store could not hand out a connection in time (WP-3e, #201).
     ///
     /// A **transient capacity** condition — the reader pool was saturated or the
@@ -621,7 +624,87 @@ impl SyncStore {
                 PRIMARY KEY (account_id)
             );",
         )?;
+        Self::init_namespace_history(&conn)
+    }
+
+    fn init_namespace_history(conn: &Connection) -> Result<(), StoreError> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS relay_metadata (
+                name TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS namespace_history (
+                account_id TEXT PRIMARY KEY NOT NULL
+             );
+             INSERT OR IGNORE INTO namespace_history
+                 SELECT account_id FROM events UNION SELECT account_id FROM blobs
+                 UNION SELECT account_id FROM device_records
+                 UNION SELECT account_id FROM wrapped_bundles
+                 UNION SELECT account_id FROM attestations
+                 UNION SELECT account_id FROM recovery_blobs;",
+        )?;
+        for table in [
+            "events",
+            "blobs",
+            "device_records",
+            "wrapped_bundles",
+            "attestations",
+            "recovery_blobs",
+        ] {
+            conn.execute_batch(&format!(
+                "CREATE TRIGGER IF NOT EXISTS namespace_history_{table}
+                 AFTER INSERT ON {table} BEGIN
+                 INSERT OR IGNORE INTO namespace_history VALUES (NEW.account_id); END;"
+            ))?;
+        }
         Ok(())
+    }
+
+    /// Bind this content file to the auth installation; never replace that marker.
+    ///
+    /// # Errors
+    /// Returns an explicit pairing mismatch or a database error.
+    pub fn pair_auth_instance(&self, instance: &str) -> Result<(), StoreError> {
+        let mut conn = self.writer()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO relay_metadata(name,value) VALUES('auth_instance',?1)",
+            params![instance],
+        )?;
+        let actual: String = tx.query_row(
+            "SELECT value FROM relay_metadata WHERE name='auth_instance'",
+            [],
+            |r| r.get(0),
+        )?;
+        if actual != instance {
+            return Err(StoreError::AccountPairMismatch);
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Hold the actual `SQLite` writer barrier while committing auth-only allocation.
+    pub(crate) fn with_namespace_barrier<T>(
+        &self,
+        operation: impl FnOnce(
+            &dyn Fn(&str) -> Result<bool, crate::error::ApiError>,
+        ) -> Result<T, crate::error::ApiError>,
+    ) -> Result<T, crate::error::ApiError> {
+        let mut conn = self.writer()?;
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(StoreError::from)?;
+        let occupied = |account: &str| -> Result<bool, crate::error::ApiError> {
+            Ok(tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM namespace_history WHERE account_id=?1)",
+                    params![account],
+                    |r| r.get(0),
+                )
+                .map_err(StoreError::from)?)
+        };
+        let result = operation(&occupied)?;
+        tx.commit().map_err(StoreError::from)?;
+        Ok(result)
     }
 
     /// Return `true` if the account already holds a blob with this `ct_hash`.

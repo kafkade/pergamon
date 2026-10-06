@@ -330,6 +330,98 @@ when it syncs through the proxy.
 Embedding the credential in the server URL still works as a last resort, but
 is discouraged: it can leak into shell history, process listings, and logs.
 
+### Authenticated relay attach (review-gated)
+
+**NOT YET EXTERNALLY SECURITY-REVIEWED — DO NOT DEPLOY authenticated mode
+to production.** The default blind/proxy mode above is unchanged. The optional
+OPAQUE auth plane uses a separate relay auth tenant and an immutable canonical
+content ID; it never obtains content keys from the relay password.
+
+For an existing local account, use its existing keys and library:
+
+```sh
+# Supply key-file unlock separately using the existing keystore configuration.
+KEY_FILE=/path/to/existing-sync-keys.json
+read -r -s -p 'Relay auth password: ' PERGAMON_SYNC_AUTH_PASSWORD
+export PERGAMON_SYNC_AUTH_PASSWORD
+pergamon sync-remote enable --server https://sync.example.com \
+  --relay-identity your-login --register-relay-account --key-file "$KEY_FILE"
+unset PERGAMON_SYNC_AUTH_PASSWORD
+pergamon sync-remote sync --key-file "$KEY_FILE"
+```
+
+Omit `--register-relay-account` when the auth identity already exists. Attach
+does not regenerate the ARK/device keys or substitute the relay tenant UUID for
+the local content ID. It performs real OPAQUE login, an explicit empty-namespace
+binding and checked local activation before reporting enabled sync.
+
+Only **unused, unreserved namespaces** can be allocated. Existing occupied
+blind-relay data, including just a recovery blob or device record, cannot be
+claimed automatically. Knowing an ID or posting a self-signed device record is
+not ownership proof. An occupied legacy UUID cannot be re-IDed; no implicit
+account merge, alias or migration is performed. A disclosed, unallocated offline
+ID can be reserved first by someone else; the random handle is not a password.
+
+A fresh first device can use `sync-device bootstrap` with the same
+`--relay-identity` / `--register-relay-account` options. It persists one resumable
+ID/key set, binds before publishing artifacts and completes recovery publication
+before local activation. Retry incomplete creation with the same identity;
+do not initialize replacement keys. An already completed account cannot create
+another as an implicit retry.
+
+A genuinely empty new device authenticates without inventing an ARK:
+
+```sh
+pergamon sync-remote login --server https://sync.example.com \
+  --relay-identity your-login --join --key-file "$KEY_FILE"
+# Login is not content recovery: now complete SAS enroll/accept or recover.
+pergamon sync-device recover --server https://sync.example.com \
+  --account-id CANONICAL_CONTENT_ID --key-file "$KEY_FILE"
+```
+
+Supply the memory-only relay password again for `login`, and the separate
+`PERGAMON_RECOVERY_PASSPHRASE` for `recover`. Authenticated/expected/opened
+content IDs must agree; wrong secrets or conflicting libraries refuse adoption.
+Do not use `device-key init` to join: that intentionally creates a new ARK.
+
+Without `--join`, `login` only renews an established matching authenticated
+binding or pending attach with its existing content ID, ARK and device keys.
+It cannot assign a remote content ID to an unrelated local library. Pending
+attach activation verifies existing remote encrypted content against the local
+keys before saving credentials or enabling sync; finish pending create/join
+through their original bootstrap/enrollment/recovery flow instead.
+
+Legacy `sync-remote enable` refuses any existing authenticated intent or
+binding, including a pending attach. Shared transport admission also rejects
+a different relay/account label or a missing authenticated secure session,
+even when saved settings are inconsistent; environment credentials never
+substitute for that session. Only callers with no authenticated intent/binding
+may use the genuinely legacy blind/proxy path.
+
+Access/refresh bundles are stored only in the unlocked secure store. One shared
+provider rotates credentials for event, blob and onboarding requests and
+persists the replacement refresh secret before using new access authority.
+A persistence or lost-refresh-response failure requires login again. The relay
+password is never stored in SQLite, key files, application configuration or
+backups; do not put it in a persistent service environment file.
+
+Authenticated `sync-device revoke` performs content-plane rotation and
+relay-token revocation; these are independent operations, not one cross-plane
+transaction. A partial offboarding reports failure. Use
+`sync-remote revoke-session --device DEVICE_ID --key-file "$KEY_FILE"` to retry
+only the auth half without rotating the content epoch again. Token revocation
+invalidates existing credentials; it is not a permanent device blacklist or
+forward-secret removal of an ARK already held by that device.
+
+Restart requires operator key-store unlock, or optional deployment-secret
+auto-unlock configured by the deployment. Pending remote/local adoption is
+visible in nonsecret local bookkeeping; it never falls back to blind mode or
+becomes settings-only success. Binding does not implement WP-5 web UI,
+automatic server portability or an operator-assisted migration procedure.
+
+See [the full binding contract](design/hosted-auth-control-plane.md#part-5--authenticated-account-binding-236)
+for wire errors, token compatibility and the independent external-review gate.
+
 ## Data persistence
 
 All persistent state lives under `/data` inside the container:
@@ -352,6 +444,14 @@ database is useless to anyone without your account key.
 The Compose file mounts a named volume (`pergamon-sync-data`) at `/data`, so data
 survives `down`/`up`. The image deliberately does **not** declare a `VOLUME`
 directive — you control where the data lives.
+
+Authenticated mode additionally persists `pergamon-auth.db` (OPAQUE verifier,
+tenant/content binding, token hashes and operation metadata) and the separate
+secret `pergamon-oprf.key`. Auth/content installation markers are paired:
+restoring files from different already-upgraded installations refuses startup.
+Previously unmarked files have no retroactive provenance proof; supply their
+actual existing pair for first upgrade. Back up the stopped service's entire
+data directory, not just the content file; include any WAL/SHM sidecars.
 
 ### Bind mounts and permissions
 

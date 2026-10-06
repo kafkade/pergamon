@@ -163,6 +163,47 @@ impl DeviceKeyStore {
         Ok(Some(AccountId::from_bytes(bytes)))
     }
 
+    /// Persist a redacted-on-output session bundle separately from account keys.
+    ///
+    /// # Errors
+    /// Returns an error for invalid identity, malformed wire data, or failed persistence/transport.
+    pub fn save_remote_session(&mut self, account: &str, relay: &str, bytes: &[u8]) -> Result<()> {
+        self.set(account, &session_suffix(relay), bytes)
+    }
+
+    /// Load session bytes from an unlocked store; decoding belongs to the client.
+    ///
+    /// # Errors
+    /// Returns an error for invalid identity, malformed wire data, or failed persistence/transport.
+    pub fn load_remote_session(&self, account: &str, relay: &str) -> Result<Option<Vec<u8>>> {
+        self.get(account, &session_suffix(relay))
+    }
+
+    /// Keep a first-device recovery artifact stable across interrupted publication.
+    ///
+    /// # Errors
+    /// Returns an error for invalid identity, malformed wire data, or failed persistence/transport.
+    pub fn save_bootstrap_recovery(
+        &mut self,
+        account: &str,
+        relay: &str,
+        bytes: &[u8],
+    ) -> Result<()> {
+        self.set(
+            account,
+            &format!("bootstrap-{}", session_suffix(relay)),
+            bytes,
+        )
+    }
+
+    /// Load an unpublished/retried recovery artifact from the unlocked store.
+    ///
+    /// # Errors
+    /// Returns an error for invalid identity, malformed wire data, or failed persistence/transport.
+    pub fn load_bootstrap_recovery(&self, account: &str, relay: &str) -> Result<Option<Vec<u8>>> {
+        self.get(account, &format!("bootstrap-{}", session_suffix(relay)))
+    }
+
     /// Write a secret under the `{account}:{suffix}` entry.
     fn set(&mut self, account: &str, suffix: &str, bytes: &[u8]) -> Result<()> {
         let entry = entry_name(account, suffix);
@@ -180,7 +221,7 @@ impl DeviceKeyStore {
         match &self.backend {
             #[cfg(feature = "keyring")]
             Backend::Keyring => keyring_get(&entry),
-            Backend::EncryptedFile(file) => Ok(file.get(&entry)),
+            Backend::EncryptedFile(file) => file.get(&entry),
         }
     }
 }
@@ -188,6 +229,16 @@ impl DeviceKeyStore {
 /// The keychain account name for a scoped secret.
 fn entry_name(account: &str, suffix: &str) -> String {
     format!("{account}:{suffix}")
+}
+
+fn session_suffix(relay: &str) -> String {
+    use std::fmt::Write as _;
+    let hash = primitives::blake3_hash(relay.trim_end_matches('/').as_bytes());
+    let mut suffix = String::from("remote-session-");
+    for byte in hash {
+        let _ = write!(suffix, "{byte:02x}");
+    }
+    suffix
 }
 
 /// Store `bytes` (base64) in the OS keychain under `entry`.
@@ -276,6 +327,16 @@ impl EncryptedFile {
 
     /// Encrypt and store `bytes` under `entry`, then flush the file.
     fn set(&mut self, entry: &str, bytes: &[u8]) -> Result<()> {
+        if self.path.exists() {
+            let raw =
+                std::fs::read(&self.path).context("refreshing secure key file before write")?;
+            let current: FileFormat =
+                serde_json::from_slice(&raw).context("decoding current secure key file")?;
+            if decode_salt(&current.salt_b64)? != self.salt {
+                bail!("secure key file was replaced; unlock it again before writing");
+            }
+            self.entries = current.entries;
+        }
         let sealed = primitives::aead_seal(&self.kek, entry.as_bytes(), bytes)
             .context("sealing key-file entry")?;
         self.entries
@@ -284,8 +345,8 @@ impl EncryptedFile {
     }
 
     /// Decrypt and return the secret under `entry`, if present.
-    fn get(&self, entry: &str) -> Option<Vec<u8>> {
-        self.decrypt_entry(entry).ok().flatten()
+    fn get(&self, entry: &str) -> Result<Option<Vec<u8>>> {
+        self.decrypt_entry(entry)
     }
 
     /// Decrypt the named entry, returning `Ok(None)` when it is absent and an
@@ -344,6 +405,58 @@ mod tests {
 
     fn temp_path() -> PathBuf {
         std::env::temp_dir().join(format!("pergamon-keystore-{}.json", uuid::Uuid::new_v4()))
+    }
+
+    #[test]
+    fn remote_session_is_scoped_encrypted_and_survives_other_key_writes() {
+        let path = temp_path();
+        let mut first = DeviceKeyStore::encrypted_file(&path, b"pw").unwrap();
+        first
+            .save_ark("owner", &AccountRootKey::from_bytes([7; 32]))
+            .unwrap();
+        let mut stale = DeviceKeyStore::encrypted_file(&path, b"pw").unwrap();
+        let session=b"{\"access_token\":\"private-access-fixture\",\"refresh_token\":\"private-refresh-fixture\"}";
+        first
+            .save_remote_session("owner", "https://relay.example/", session)
+            .unwrap();
+        stale
+            .save_account_id("owner", &AccountId::from_bytes([9; 16]))
+            .unwrap();
+        let reopened = DeviceKeyStore::encrypted_file(&path, b"pw").unwrap();
+        assert_eq!(
+            reopened
+                .load_remote_session("owner", "https://relay.example")
+                .unwrap()
+                .unwrap(),
+            session
+        );
+        assert!(
+            reopened
+                .load_remote_session("other", "https://relay.example")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            reopened
+                .load_remote_session("owner", "https://elsewhere.example")
+                .unwrap()
+                .is_none()
+        );
+        let raw = std::fs::read(&path).unwrap();
+        assert!(!raw.windows(session.len()).any(|w| w == session));
+        let mut parsed: FileFormat = serde_json::from_slice(&raw).unwrap();
+        parsed.entries.insert(
+            entry_name("owner", &session_suffix("https://relay.example")),
+            "invalid base64".to_owned(),
+        );
+        std::fs::write(&path, serde_json::to_vec(&parsed).unwrap()).unwrap();
+        let corrupt = DeviceKeyStore::encrypted_file(&path, b"pw").unwrap();
+        assert!(
+            corrupt
+                .load_remote_session("owner", "https://relay.example")
+                .is_err()
+        );
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

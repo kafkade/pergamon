@@ -44,6 +44,15 @@ pub enum SyncError {
     #[error("protocol error: {0}")]
     Protocol(String),
 
+    /// An explicit auth refusal; never retry it as an offline transport failure.
+    #[error("relay authentication refused ({status}): {code}")]
+    AuthRefused {
+        /// HTTP status for the refusal.
+        status: u16,
+        /// Stable server error code, never a bearer secret.
+        code: String,
+    },
+
     /// A pulled event's Ed25519 signature did not verify against its (known)
     /// signing device's public key (ADR-030) — a forged or tampered event. Fatal:
     /// retrying cannot make a bad signature good, and the event must not apply.

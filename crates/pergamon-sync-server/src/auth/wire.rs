@@ -83,12 +83,15 @@ pub struct LoginFinishRequest {
     /// The ADR-024 `device_id` requesting a token (must equal
     /// `blake3(ed25519_pub)[..16]`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Device handle cryptographically tied to the Ed25519 public key.
     pub device_id: Option<String>,
     /// Base64 of the device's 32-byte Ed25519 public key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Standard-base64 device verification key.
     pub ed25519_pub_b64: Option<String>,
     /// Base64 of the device's 64-byte Ed25519 signature over the mint-PoP message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Standard-base64 Ed25519 proof over the binding challenge.
     pub pop_signature_b64: Option<String>,
 }
 
@@ -125,6 +128,7 @@ pub struct LoginFinishResponse {
     pub account_id: String,
     /// The minted per-device token bundle, if a valid `PoP` was presented.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Device-scoped token pair issued only after valid proof of possession.
     pub token: Option<TokenBundle>,
 }
 
@@ -181,4 +185,53 @@ pub struct RevokeRequest {
 pub struct RevokeResponse {
     /// Number of tokens revoked by this call.
     pub revoked: u64,
+}
+
+/// V2 distinguishes relay authentication authority from content identity.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct V2TokenBundle {
+    /// Control-only or content authority, never inferred from an alias.
+    pub scope: super::token::TokenScope,
+    /// Secret access bearer; store securely and never log it.
+    pub access_token: String,
+    /// Access credential expiry in Unix epoch milliseconds.
+    pub access_expires_at: i64,
+    /// Secret single-use refresh bearer; replace it after rotation.
+    pub refresh_token: String,
+    /// Refresh credential expiry in Unix epoch milliseconds.
+    pub refresh_expires_at: i64,
+    /// Device handle cryptographically tied to the Ed25519 public key.
+    pub device_id: String,
+    /// Relay authentication tenant; never an encrypted content header.
+    pub auth_tenant_id: String,
+    /// Canonical content identity; absent for unbound control authority.
+    pub content_account_id: Option<String>,
+    /// Durable authority revision captured at credential issuance.
+    pub binding_version: i64,
+}
+
+#[derive(Serialize, Deserialize)]
+/// Login separates authentication identity from content routing.
+pub struct V2LoginFinishResponse {
+    /// True only after mutually authenticated OPAQUE login.
+    pub authenticated: bool,
+    /// Relay authentication tenant; never an encrypted content header.
+    pub auth_tenant_id: String,
+    /// Canonical content identity; absent for unbound control authority.
+    pub content_account_id: Option<String>,
+    /// Durable authority revision captured at credential issuance.
+    pub binding_version: i64,
+    /// Unbound or live binding state; login never changes it.
+    pub binding_state: String,
+    /// Device-scoped token pair issued only after valid proof of possession.
+    pub token: Option<V2TokenBundle>,
+}
+
+/// Uniform receipt, not evidence of identity creation or ownership.
+#[derive(Serialize, Deserialize)]
+pub struct V2RegisterFinishResponse {
+    /// The syntactically valid registration upload was received.
+    pub registration_received: bool,
+    /// Only successful OPAQUE login reveals tenant/binding authority.
+    pub requires_login: bool,
 }

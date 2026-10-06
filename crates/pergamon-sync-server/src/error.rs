@@ -150,6 +150,10 @@ impl ApiError {
 impl From<StoreError> for ApiError {
     fn from(err: StoreError) -> Self {
         match err {
+            StoreError::AccountPairMismatch => {
+                tracing::error!(error=%err,"relay database pairing failed");
+                Self::internal("auth/content database pairing mismatch")
+            }
             StoreError::BlobHashMismatch { .. } => Self::bad_request(err.to_string()),
             StoreError::MissingBlob { .. } => Self::conflict(err.to_string()),
             StoreError::QuotaExceeded { .. } => Self::insufficient_storage(err.to_string()),
@@ -207,6 +211,7 @@ impl From<crate::auth::store::AuthStoreError> for ApiError {
         use crate::auth::store::AuthStoreError;
         match err {
             AuthStoreError::HandleExists => Self::conflict(err.to_string()),
+            AuthStoreError::InvalidToken => Self::unauthorized("invalid or expired token"),
             AuthStoreError::Db(e) => {
                 tracing::error!(error = %e, "auth store database error");
                 Self::internal("internal storage error")

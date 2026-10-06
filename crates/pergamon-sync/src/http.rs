@@ -24,7 +24,7 @@ use crate::wire::{BlobProbeRequest, BlobProbeResponse, PullResponse, PushRequest
 /// be encoded into a valid header value surfaces as a [`SyncError::Transport`]
 /// whose message never includes the credential text.
 pub(crate) fn build_client(credential: Option<TransportCredential>) -> Result<Client> {
-    let mut builder = Client::builder();
+    let mut builder = Client::builder().redirect(reqwest::redirect::Policy::none());
     if let Some(credential) = credential {
         let mut value = HeaderValue::from_str(&credential.authorization_header_value())
             .map_err(|_| SyncError::Transport("invalid authorization credential".to_owned()))?;
@@ -42,6 +42,7 @@ pub(crate) fn build_client(credential: Option<TransportCredential>) -> Result<Cl
 pub struct HttpTransport {
     client: Client,
     base_url: String,
+    token_provider: Option<std::sync::Arc<dyn crate::credential::AccessTokenProvider>>,
 }
 
 impl HttpTransport {
@@ -69,19 +70,59 @@ impl HttpTransport {
         Ok(Self {
             client,
             base_url: base_url.into().trim_end_matches('/').to_owned(),
+            token_provider: None,
         })
     }
 
     fn url(&self, path: &str) -> String {
         format!("{}{path}", self.base_url)
     }
+
+    /// Share securely persisted rotating credentials with the onboarding relay.
+    #[must_use]
+    pub fn with_token_provider(
+        mut self,
+        provider: std::sync::Arc<dyn crate::credential::AccessTokenProvider>,
+    ) -> Self {
+        self.token_provider = Some(provider);
+        self
+    }
+
+    fn request(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+    ) -> Result<reqwest::blocking::RequestBuilder> {
+        authorized_request(
+            &self.client,
+            method,
+            self.url(path),
+            self.token_provider.as_deref(),
+        )
+    }
+}
+
+pub(crate) fn authorized_request(
+    client: &Client,
+    method: reqwest::Method,
+    url: String,
+    provider: Option<&dyn crate::credential::AccessTokenProvider>,
+) -> Result<reqwest::blocking::RequestBuilder> {
+    let mut request = client.request(method, url);
+    if let Some(provider) = provider {
+        let token = provider.access_token()?;
+        let mut value = HeaderValue::from_str(&format!("Bearer {token}"))
+            .map_err(|_| SyncError::Protocol("invalid session credential".to_owned()))?;
+        value.set_sensitive(true);
+        request = request.header(AUTHORIZATION, value);
+    }
+    Ok(request)
 }
 
 impl Transport for HttpTransport {
     fn push(&self, req: &PushRequest) -> Result<PushResponse> {
         let resp = self
-            .client
-            .post(self.url("/v1/events"))
+            .request(reqwest::Method::POST, "/v1/events")?
             .json(req)
             .send()
             .map_err(|e| SyncError::Transport(e.to_string()))?;
@@ -91,8 +132,7 @@ impl Transport for HttpTransport {
 
     fn pull(&self, account_id: &str, after: u64, limit: Option<u32>) -> Result<PullResponse> {
         let mut request = self
-            .client
-            .get(self.url("/v1/events"))
+            .request(reqwest::Method::GET, "/v1/events")?
             .query(&[("account_id", account_id)])
             .query(&[("after", after.to_string())]);
         if let Some(limit) = limit {
@@ -107,8 +147,7 @@ impl Transport for HttpTransport {
 
     fn blob_probe(&self, req: &BlobProbeRequest) -> Result<BlobProbeResponse> {
         let resp = self
-            .client
-            .post(self.url("/v1/blobs/probe"))
+            .request(reqwest::Method::POST, "/v1/blobs/probe")?
             .json(req)
             .send()
             .map_err(|e| SyncError::Transport(e.to_string()))?;
@@ -118,8 +157,10 @@ impl Transport for HttpTransport {
 
     fn blob_put(&self, account_id: &str, ct_hash: &str, ciphertext: &[u8]) -> Result<()> {
         let resp = self
-            .client
-            .put(self.url(&format!("/v1/blobs/{account_id}/{ct_hash}")))
+            .request(
+                reqwest::Method::PUT,
+                &format!("/v1/blobs/{account_id}/{ct_hash}"),
+            )?
             .body(ciphertext.to_vec())
             .send()
             .map_err(|e| SyncError::Transport(e.to_string()))?;
@@ -129,8 +170,10 @@ impl Transport for HttpTransport {
 
     fn blob_get(&self, account_id: &str, ct_hash: &str) -> Result<Vec<u8>> {
         let resp = self
-            .client
-            .get(self.url(&format!("/v1/blobs/{account_id}/{ct_hash}")))
+            .request(
+                reqwest::Method::GET,
+                &format!("/v1/blobs/{account_id}/{ct_hash}"),
+            )?
             .send()
             .map_err(|e| SyncError::Transport(e.to_string()))?;
         if resp.status() == StatusCode::NOT_FOUND {
@@ -148,6 +191,11 @@ impl Transport for HttpTransport {
 fn ensure_ok(status: StatusCode) -> Result<()> {
     if status.is_success() {
         Ok(())
+    } else if status.is_client_error() && status.as_u16() != 429 {
+        Err(SyncError::AuthRefused {
+            status: status.as_u16(),
+            code: "CONTENT_REQUEST_REFUSED".to_owned(),
+        })
     } else {
         Err(SyncError::Transport(format!("server returned {status}")))
     }

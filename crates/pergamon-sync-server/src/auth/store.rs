@@ -9,9 +9,9 @@
 //! - [`accounts`] — the OPAQUE registration record (a **verifier only**, never a
 //!   password or password-equivalent) keyed by `identity_handle`, plus the
 //!   `oprf_key_id` it was created under (for future rotation, design §1.8).
-//! - [`account_map`] — the internal `identity_handle → account_id` mapping. The
-//!   opaque `account_id` is what the blind content routes key on; it is never
-//!   exposed to unauthenticated callers.
+//! - [`account_map`] — the internal `identity_handle → auth_tenant_id` mapping.
+//!   Content routes resolve that tenant's separate canonical binding; only
+//!   legacy reserved bindings retain equal tenant/content IDs.
 //! - [`auth_failures`] — per-identity throttling counters (design §1.7).
 //! - [`tokens`] — per-device bearer/refresh tokens minted after a successful
 //!   login, bound to the device's ADR-024 Ed25519 key (WP-3b, #192). Only a
@@ -42,6 +42,10 @@ pub enum AuthStoreError {
     #[error("an account already exists for this identity")]
     HandleExists,
 
+    /// A single-use credential was already consumed or expired.
+    #[error("invalid or expired token")]
+    InvalidToken,
+
     /// An underlying database error.
     #[error("auth database error: {0}")]
     Db(#[from] rusqlite::Error),
@@ -71,11 +75,17 @@ pub struct ValidatedToken {
     /// The token's stable row id (revocation handle; also the refresh-PoP input).
     pub token_id: String,
     /// The single account this token authorizes.
-    pub account_id: String,
+    pub auth_tenant_id: String,
     /// The ADR-024 device the token is bound to.
     pub device_id: String,
     /// The device Ed25519 key the token is bound to (proof-of-possession target).
     pub ed25519_pub: [u8; token::ED25519_PUB_LEN],
+    /// Canonical content identity, absent for an unbound control-plane token.
+    pub content_account_id: Option<String>,
+    /// Immutable authority snapshot at issuance.
+    pub binding_version: i64,
+    /// Control-only or content authority, validated against the identity snapshot.
+    pub scope: token::TokenScope,
 }
 
 /// The result of a refresh-token rotation: a fresh access token and a fresh
@@ -176,8 +186,12 @@ impl AuthStore {
                 expires_at  INTEGER NOT NULL,
                 revoked_at  INTEGER
             );
-            CREATE INDEX IF NOT EXISTS idx_tokens_device
-                ON tokens (account_id, device_id);",
+            ",
+        )?;
+        crate::auth::binding::migrate(&self.conn)?;
+        self.conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_tokens_device ON tokens(auth_tenant_id,device_id);
+             PRAGMA foreign_keys = ON;",
         )?;
         Ok(())
     }
@@ -198,10 +212,10 @@ impl AuthStore {
     /// Finalize registration: persist the verifier and allocate a random opaque
     /// `account_id`, atomically. Returns the allocated `account_id`.
     ///
-    /// The `account_id` is a fresh random 128-bit handle (design §1.6, ADR-024:
-    /// an independent random handle, not derived from any password). Reconciling
-    /// this server-allocated id with a client-generated ADR-024 `account_id` at
-    /// device-attach time is a follow-up (WP-3b/#192); WP-3a allocates it here.
+    /// This legacy API reserves content ID equal to the newly allocated auth
+    /// tenant. Official relay routes check namespace history under the writer
+    /// barrier first. Existing local accounts instead use v2 unbound
+    /// registration and explicit binding; their content IDs are never replaced.
     ///
     /// # Errors
     /// Returns [`AuthStoreError::HandleExists`] if the handle is already
@@ -212,10 +226,24 @@ impl AuthStore {
         opaque_record: &[u8],
         oprf_key_id: &str,
     ) -> Result<String, AuthStoreError> {
+        self.finish_registration_at(
+            identity_handle,
+            opaque_record,
+            oprf_key_id,
+            &Uuid::new_v4().simple().to_string(),
+        )
+    }
+
+    pub(crate) fn finish_registration_at(
+        &mut self,
+        identity_handle: &str,
+        opaque_record: &[u8],
+        oprf_key_id: &str,
+        account_id: &str,
+    ) -> Result<String, AuthStoreError> {
         if self.account_exists(identity_handle)? {
             return Err(AuthStoreError::HandleExists);
         }
-        let account_id = Uuid::new_v4().simple().to_string();
         let tx = self.conn.transaction()?;
         tx.execute(
             "INSERT INTO accounts (identity_handle, opaque_record, oprf_key_id, created_at)
@@ -223,11 +251,16 @@ impl AuthStore {
             params![identity_handle, opaque_record, oprf_key_id, now_ms()],
         )?;
         tx.execute(
-            "INSERT INTO account_map (identity_handle, account_id) VALUES (?1, ?2)",
+            "INSERT INTO account_map (identity_handle, auth_tenant_id) VALUES (?1, ?2)",
             params![identity_handle, account_id],
         )?;
+        tx.execute(
+            "INSERT INTO content_bindings (content_account_id, auth_tenant_id, state, binding_version)
+             VALUES (?1, ?1, 'legacy_reserved', 0)",
+            params![account_id],
+        )?;
         tx.commit()?;
-        Ok(account_id)
+        Ok(account_id.to_owned())
     }
 
     /// Fetch the stored OPAQUE verifier for `identity_handle`, if registered.
@@ -250,7 +283,10 @@ impl AuthStore {
         Ok(record)
     }
 
-    /// Look up the opaque `account_id` for a (now authenticated) identity.
+    /// Look up the authentication tenant for a proved identity.
+    ///
+    /// This legacy Rust method name does not mean canonical content identity;
+    /// callers must resolve [`Self::binding`] separately.
     ///
     /// # Errors
     /// Returns [`AuthStoreError::Db`] on a database failure.
@@ -258,7 +294,7 @@ impl AuthStore {
         let account_id = self
             .conn
             .query_row(
-                "SELECT account_id FROM account_map WHERE identity_handle = ?1",
+                "SELECT auth_tenant_id FROM account_map WHERE identity_handle = ?1",
                 params![identity_handle],
                 |row| row.get::<_, String>(0),
             )
@@ -369,11 +405,12 @@ impl AuthStore {
         kind: TokenKind,
         expires_at_ms: i64,
     ) -> Result<(), AuthStoreError> {
+        let binding = crate::auth::binding::binding_for(conn, account_id)?;
         conn.execute(
             "INSERT INTO tokens
-                 (token_id, account_id, device_id, ed25519_pub, token_hash, kind,
-                  created_at, expires_at, revoked_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL)",
+                 (token_id, auth_tenant_id, device_id, ed25519_pub, token_hash, kind,
+                  created_at, expires_at, revoked_at, content_account_id, binding_version, scope)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, ?9, ?10, ?11)",
             params![
                 token_id,
                 account_id,
@@ -383,6 +420,13 @@ impl AuthStore {
                 kind.as_str(),
                 now_ms(),
                 expires_at_ms,
+                binding.as_ref().map(|b| &b.content_account_id),
+                binding.as_ref().map_or(0, |b| b.binding_version),
+                if binding.is_some() {
+                    "content"
+                } else {
+                    "control"
+                },
             ],
         )?;
         Ok(())
@@ -473,11 +517,25 @@ impl AuthStore {
 
         let tx = self.conn.transaction()?;
         // Single-use: revoke the presented refresh token so it cannot be reused.
-        tx.execute(
+        let binding = crate::auth::binding::binding_for(&tx, account_id)?;
+        let consumed = tx.execute(
             "UPDATE tokens SET revoked_at = ?2
-             WHERE token_id = ?1 AND revoked_at IS NULL",
-            params![presented_refresh_id, now],
+             WHERE token_id = ?1 AND revoked_at IS NULL AND kind = 'refresh'
+                 AND expires_at > ?2 AND auth_tenant_id=?3 AND device_id=?4
+                 AND ed25519_pub=?5 AND content_account_id IS ?6 AND binding_version=?7",
+            params![
+                presented_refresh_id,
+                now,
+                account_id,
+                device_id,
+                ed25519_pub,
+                binding.as_ref().map(|b| &b.content_account_id),
+                binding.as_ref().map_or(0, |b| b.binding_version)
+            ],
         )?;
+        if consumed != 1 {
+            return Err(AuthStoreError::InvalidToken);
+        }
         Self::insert_token_row(
             &tx,
             &access.token_id,
@@ -527,7 +585,8 @@ impl AuthStore {
         let row = self
             .conn
             .query_row(
-                "SELECT account_id, device_id, ed25519_pub, token_hash, kind, expires_at, revoked_at
+                "SELECT auth_tenant_id, device_id, ed25519_pub, token_hash, kind, expires_at, revoked_at,
+                        content_account_id, binding_version, scope
                  FROM tokens WHERE token_id = ?1",
                 params![token_id],
                 |r| {
@@ -539,12 +598,25 @@ impl AuthStore {
                         r.get::<_, String>(4)?,
                         r.get::<_, i64>(5)?,
                         r.get::<_, Option<i64>>(6)?,
+                        r.get::<_, Option<String>>(7)?,
+                        r.get::<_, i64>(8)?,
+                        r.get::<_, String>(9)?,
                     ))
                 },
             )
             .optional()?;
-        let Some((account_id, device_id, ed25519_pub, token_hash, kind_s, expires_at, revoked_at)) =
-            row
+        let Some((
+            account_id,
+            device_id,
+            ed25519_pub,
+            token_hash,
+            kind_s,
+            expires_at,
+            revoked_at,
+            content_account_id,
+            binding_version,
+            scope,
+        )) = row
         else {
             return Ok(None);
         };
@@ -561,15 +633,29 @@ impl AuthStore {
         if !token::constant_time_eq(&token::hash_secret(&secret), &token_hash) {
             return Ok(None);
         }
+        let binding = self.binding(&account_id)?;
+        if binding.as_ref().map(|b| &b.content_account_id) != content_account_id.as_ref()
+            || binding.as_ref().map_or(0, |b| b.binding_version) != binding_version
+        {
+            return Ok(None);
+        }
+        let scope = match (scope.as_str(), content_account_id.is_some()) {
+            ("control", false) => token::TokenScope::Control,
+            ("content", true) => token::TokenScope::Content,
+            _ => return Err(AuthStoreError::Db(rusqlite::Error::InvalidQuery)),
+        };
         // A stored key of the wrong length means a corrupt row: reject.
         let Ok(ed25519_pub) = <[u8; token::ED25519_PUB_LEN]>::try_from(ed25519_pub) else {
             return Ok(None);
         };
         Ok(Some(ValidatedToken {
             token_id,
-            account_id,
+            auth_tenant_id: account_id,
             device_id,
             ed25519_pub,
+            content_account_id,
+            binding_version,
+            scope,
         }))
     }
 
@@ -584,9 +670,14 @@ impl AuthStore {
     pub fn validate_token(&self, bearer: &str) -> Result<Option<AuthAccount>, AuthStoreError> {
         Ok(self
             .load_valid_token(bearer, TokenKind::Access)?
-            .map(|t| AuthAccount {
-                account_id: t.account_id,
-                device_id: t.device_id,
+            .and_then(|t| {
+                Some(AuthAccount {
+                    account_id: t.content_account_id?,
+                    auth_tenant_id: t.auth_tenant_id,
+                    device_id: t.device_id,
+                    binding_version: t.binding_version,
+                    token_id: t.token_id,
+                })
             }))
     }
 
@@ -603,7 +694,7 @@ impl AuthStore {
     ) -> Result<usize, AuthStoreError> {
         let n = self.conn.execute(
             "UPDATE tokens SET revoked_at = ?3
-             WHERE account_id = ?1 AND device_id = ?2 AND revoked_at IS NULL",
+             WHERE auth_tenant_id = ?1 AND device_id = ?2 AND revoked_at IS NULL",
             params![account_id, device_id, now_ms()],
         )?;
         Ok(n)
@@ -621,6 +712,136 @@ impl AuthStore {
         )?;
         Ok(n)
     }
+
+    /// Persistent nonsecret installation identity used in binding statements.
+    ///
+    /// # Errors
+    /// Returns a database error if installation metadata is missing or corrupt.
+    pub fn server_instance_id(&self) -> Result<String, AuthStoreError> {
+        Ok(self.conn.query_row(
+            "SELECT value FROM auth_metadata WHERE name='server_instance_id'",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
+    pub(crate) const fn connection(&self) -> &Connection {
+        &self.conn
+    }
+
+    pub(crate) const fn connection_mut(&mut self) -> &mut Connection {
+        &mut self.conn
+    }
+
+    /// Read the tenant's one live content binding.
+    ///
+    /// # Errors
+    /// Returns an error for invalid identity, malformed wire data, or failed persistence/transport.
+    pub fn binding(
+        &self,
+        tenant: &str,
+    ) -> Result<Option<crate::auth::binding::ContentBinding>, AuthStoreError> {
+        Ok(crate::auth::binding::binding_for(&self.conn, tenant)?)
+    }
+
+    /// Register a v2 identity without allocating any content namespace.
+    ///
+    /// # Errors
+    /// Returns an error for invalid identity, malformed wire data, or failed persistence/transport.
+    pub fn register_unbound(
+        &mut self,
+        identity: &str,
+        record: &[u8],
+        key_id: &str,
+    ) -> Result<String, AuthStoreError> {
+        if self.account_exists(identity)? {
+            return Err(AuthStoreError::HandleExists);
+        }
+        let tenant = Uuid::new_v4().simple().to_string();
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT INTO accounts (identity_handle, opaque_record, oprf_key_id, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![identity, record, key_id, now_ms()],
+        )?;
+        tx.execute(
+            "INSERT INTO account_map (identity_handle, auth_tenant_id) VALUES (?1, ?2)",
+            params![identity, tenant],
+        )?;
+        tx.commit()?;
+        Ok(tenant)
+    }
+
+    /// Issue the access/refresh pair in one transaction.
+    ///
+    /// # Errors
+    /// Returns an error for invalid identity, malformed wire data, or failed persistence/transport.
+    pub fn mint_pair(
+        &mut self,
+        tenant: &str,
+        device: &str,
+        public_key: &[u8; 32],
+        config: token::TokenConfig,
+    ) -> Result<RotatedTokens, AuthStoreError> {
+        let access = token::NewToken::generate();
+        let refresh = token::NewToken::generate();
+        let access_expires_at = now_ms().saturating_add(config.access_ttl_ms);
+        let refresh_expires_at = now_ms().saturating_add(config.refresh_ttl_ms);
+        let tx = self.conn.transaction()?;
+        Self::insert_token_row(
+            &tx,
+            &access.token_id,
+            tenant,
+            device,
+            public_key,
+            &access.token_hash,
+            TokenKind::Access,
+            access_expires_at,
+        )?;
+        Self::insert_token_row(
+            &tx,
+            &refresh.token_id,
+            tenant,
+            device,
+            public_key,
+            &refresh.token_hash,
+            TokenKind::Refresh,
+            refresh_expires_at,
+        )?;
+        tx.commit()?;
+        Ok(RotatedTokens {
+            access_token: access.bearer,
+            access_expires_at,
+            refresh_token: refresh.bearer,
+            refresh_expires_at,
+        })
+    }
+
+    /// Recheck an admitted content principal while its namespace lease is held.
+    ///
+    /// # Errors
+    /// Returns an error for invalid identity, malformed wire data, or failed persistence/transport.
+    pub fn principal_is_current(&self, principal: &AuthAccount) -> Result<bool, AuthStoreError> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM tokens t JOIN content_bindings b
+                ON b.auth_tenant_id = t.auth_tenant_id AND b.state != 'retired'
+                WHERE t.token_id = ?1 AND t.auth_tenant_id = ?2
+                AND t.content_account_id = ?3 AND t.binding_version = ?4
+                AND b.content_account_id = t.content_account_id
+                AND b.binding_version = t.binding_version
+                AND t.revoked_at IS NULL AND t.expires_at > ?5 AND t.kind = 'access'
+                AND t.scope='content')",
+            params![
+                principal.token_id,
+                principal.auth_tenant_id,
+                principal.account_id,
+                principal.binding_version,
+                now_ms()
+            ],
+            |row| row.get(0),
+        )?)
+    }
 }
 
 #[cfg(test)]
@@ -628,6 +849,53 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+
+    #[test]
+    fn old_schema_migration_preserves_issued_token_authority() {
+        let path =
+            std::env::temp_dir().join(format!("pergamon-auth-migration-{}.db", Uuid::new_v4()));
+        let access = token::NewToken::generate();
+        let public = [7_u8; 32];
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE accounts(identity_handle TEXT PRIMARY KEY,opaque_record BLOB,
+                     oprf_key_id TEXT,created_at INTEGER);
+                 CREATE TABLE account_map(identity_handle TEXT PRIMARY KEY,account_id TEXT UNIQUE);
+                 CREATE TABLE tokens(token_id TEXT PRIMARY KEY,account_id TEXT,device_id TEXT,
+                     ed25519_pub BLOB,token_hash BLOB,kind TEXT,created_at INTEGER,
+                     expires_at INTEGER,revoked_at INTEGER);
+                 INSERT INTO accounts VALUES('old-owner',x'00','old-oprf',0);
+                 INSERT INTO account_map VALUES('old-owner','legacy-id');",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO tokens VALUES(?1,'legacy-id','old-device',?2,?3,'access',0,?4,NULL)",
+                params![
+                    access.token_id,
+                    public.as_slice(),
+                    access.token_hash.as_slice(),
+                    now_ms() + 60_000
+                ],
+            )
+            .unwrap();
+        }
+        {
+            let migrated = AuthStore::open(&path).unwrap();
+            let who = migrated.validate_token(&access.bearer).unwrap().unwrap();
+            assert_eq!(who.account_id, "legacy-id");
+            assert_eq!(who.auth_tenant_id, "legacy-id");
+            assert_eq!(who.binding_version, 0);
+            assert_eq!(
+                migrated.account_id("old-owner").unwrap().as_deref(),
+                Some("legacy-id")
+            );
+        }
+        let reopened = AuthStore::open(&path).unwrap();
+        assert!(reopened.validate_token(&access.bearer).unwrap().is_some());
+        drop(reopened);
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn registration_stores_verifier_and_allocates_account_id() {
@@ -690,6 +958,25 @@ mod tests {
         kind: TokenKind,
         expires_at_ms: i64,
     ) -> (String, String) {
+        store.connection().execute(
+            "INSERT OR IGNORE INTO accounts(identity_handle,opaque_record,oprf_key_id,created_at)
+             VALUES (?1,x'00','fixture',0)",params![account_id]).unwrap();
+        store
+            .connection()
+            .execute(
+                "INSERT OR IGNORE INTO account_map(identity_handle,auth_tenant_id) VALUES (?1,?1)",
+                params![account_id],
+            )
+            .unwrap();
+        store
+            .connection()
+            .execute(
+                "INSERT OR IGNORE INTO content_bindings
+             (content_account_id, auth_tenant_id, state, binding_version)
+             VALUES (?1, ?1, 'legacy_reserved', 0)",
+                params![account_id],
+            )
+            .unwrap();
         let t = token::NewToken::generate();
         let ed25519_pub = [7u8; token::ED25519_PUB_LEN];
         store

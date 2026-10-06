@@ -185,10 +185,50 @@ pub const fn guard_create_new(
     if state.belongs_to_account() {
         return Err(CreateAccountBlock::AlreadyHasAccount);
     }
-    // Ambiguous: local data present but no account yet. The user may have meant
-    // to join an existing account, so require an explicit opt-in.
     if state.has_local_content && !explicit_confirm {
         return Err(CreateAccountBlock::NeedsExplicitConfirmation);
+    }
+    Ok(())
+}
+
+/// Refusal of a destructive or incomplete attach/join transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum AccountAdoptionBlock {
+    /// Attach never creates replacement root/device keys.
+    #[error("attach requires existing account root and device keys; create or recover explicitly")]
+    MissingKeys,
+    /// Joining cannot merge or overwrite an existing local account/library.
+    #[error(
+        "join requires an empty device with no existing account; local data will not be merged"
+    )]
+    ExistingLibrary,
+}
+
+/// Attach preserves account keys; initialization of an absent ID is separate.
+///
+/// # Errors
+/// Returns an error for invalid identity, malformed wire data, or failed persistence/transport.
+pub const fn guard_attach_existing(state: &LocalAccountState) -> Result<(), AccountAdoptionBlock> {
+    if !state.has_ark || !state.has_device_keys {
+        return Err(AccountAdoptionBlock::MissingKeys);
+    }
+    Ok(())
+}
+
+/// A matching pending enrollment may resume; an existing library cannot join.
+///
+/// # Errors
+/// Returns an error for invalid identity, malformed wire data, or failed persistence/transport.
+pub const fn guard_join_new_device(
+    state: &LocalAccountState,
+    matching_pending: bool,
+) -> Result<(), AccountAdoptionBlock> {
+    if state.has_local_content
+        || (state.has_ark && !matching_pending)
+        || state.is_sync_bound
+        || (state.has_account_id && !matching_pending)
+    {
+        return Err(AccountAdoptionBlock::ExistingLibrary);
     }
     Ok(())
 }
@@ -196,6 +236,25 @@ pub const fn guard_create_new(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attach_requires_existing_keys_and_join_never_merges_a_library() {
+        let mut state = LocalAccountState::empty();
+        assert_eq!(
+            guard_attach_existing(&state),
+            Err(AccountAdoptionBlock::MissingKeys)
+        );
+        state.has_device_keys = true;
+        state.has_ark = true;
+        assert!(guard_attach_existing(&state).is_ok());
+        assert!(guard_join_new_device(&state, false).is_err());
+        state.has_ark = false;
+        state.has_account_id = true;
+        assert!(guard_join_new_device(&state, false).is_err());
+        assert!(guard_join_new_device(&state, true).is_ok());
+        state.has_local_content = true;
+        assert!(guard_join_new_device(&state, true).is_err());
+    }
 
     #[test]
     fn clean_device_may_create_without_confirmation() {

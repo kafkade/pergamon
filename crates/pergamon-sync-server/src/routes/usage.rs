@@ -18,8 +18,9 @@
 //!
 //! [#198]: https://github.com/kafkade/pergamon/issues/198
 
-use axum::Json;
+use crate::auth::AuthAccount;
 use axum::extract::{Path, State};
+use axum::{Extension, Json};
 
 use crate::envelope::UsageResponse;
 use crate::error::ApiError;
@@ -39,13 +40,16 @@ use crate::state::AppState;
 pub async fn get(
     State(state): State<AppState>,
     Path(account_id): Path<String>,
+    maybe_auth: Option<Extension<AuthAccount>>,
 ) -> Result<Json<UsageResponse>, ApiError> {
     let (usage, quota) = {
         let account = account_id.clone();
         state
-            .with_tenant_store(&account_id, move |store| {
-                Ok((store.account_usage(&account)?, store.quota()))
-            })
+            .with_account_store(
+                &account_id,
+                maybe_auth.map(|Extension(a)| a),
+                move |store| Ok((store.account_usage(&account)?, store.quota())),
+            )
             .await?
     };
 

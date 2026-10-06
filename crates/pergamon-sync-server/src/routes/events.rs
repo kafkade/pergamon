@@ -46,8 +46,8 @@ pub async fn push(
     maybe_auth: Option<Extension<AuthAccount>>,
     Json(req): Json<PushRequest>,
 ) -> Result<Json<PushResponse>, ApiError> {
-    if let Some(Extension(auth)) = maybe_auth {
-        authorize_account(&auth, &req.account_id, "POST", "/v1/events")?;
+    if let Some(Extension(auth)) = &maybe_auth {
+        authorize_account(auth, &req.account_id, "POST", "/v1/events")?;
     }
     let mut records = Vec::with_capacity(req.events.len());
     for ev in &req.events {
@@ -93,9 +93,11 @@ pub async fn push(
     let outcome = {
         let account_id = req.account_id.clone();
         state
-            .with_tenant_store(&req.account_id, move |store| {
-                store.push_events(&account_id, &records)
-            })
+            .with_account_store(
+                &req.account_id,
+                maybe_auth.map(|Extension(a)| a),
+                move |store| store.push_events(&account_id, &records),
+            )
             .await?
     };
 
@@ -134,8 +136,8 @@ pub async fn pull(
     maybe_auth: Option<Extension<AuthAccount>>,
     Query(query): Query<PullQuery>,
 ) -> Result<Json<PullResponse>, ApiError> {
-    if let Some(Extension(auth)) = maybe_auth {
-        authorize_account(&auth, &query.account_id, "GET", "/v1/events")?;
+    if let Some(Extension(auth)) = &maybe_auth {
+        authorize_account(auth, &query.account_id, "GET", "/v1/events")?;
     }
     let limit = query.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
 
@@ -147,9 +149,11 @@ pub async fn pull(
         // high-water mark come from one consistent snapshot, as they did under
         // the pre-WP-3e global store mutex.
         state
-            .with_tenant_store(&query.account_id, move |store| {
-                store.pull_page(&account_id, after, limit)
-            })
+            .with_account_store(
+                &query.account_id,
+                maybe_auth.map(|Extension(a)| a),
+                move |store| store.pull_page(&account_id, after, limit),
+            )
             .await?
     };
 

@@ -94,6 +94,7 @@ The name captures what this project is about:
 - 📤 Export: OPML feeds, full backup (plaintext ZIP-of-JSON, excludes key material; optional passphrase-encrypted archive), highlight export (Markdown/JSON)
 - 🔑 Key package export/import (`device-key export-package`): passphrase-wraps the account root key so a full recovery is possible from a client alone
 - 🔄 Optional end-to-end-encrypted multi-device sync (opt-in, off by default): explicit **create / join / attach** account flows so a second device never silently duplicates your account, with a **recovery code surfaced at account creation** (`sync-device bootstrap`) that only you can keep — the server cannot recover it for you
+- Authenticated relay attach preserves the canonical local content ID and existing keys through explicit empty-namespace binding; occupied legacy namespaces are refused, never silently re-IDed. This auth plane is **not yet externally security-reviewed; do not deploy it to production**.
 - 📝 Stable export contracts: general-purpose Markdown (frontmatter, backlinks, slug templates) and versioned JSON
 - 🔌 Obsidian plugin for syncing highlights and notes to your vault
 - 🔗 URL canonicalization, duplicate detection, and link health checking

@@ -315,6 +315,34 @@ A server that reorders, replays, or re-targets a wrapped bundle to the wrong
 device or epoch causes the unwrap to fail, so it cannot trick a device into
 adopting a bundle meant for another device or epoch.
 
+### Amendment — Authenticated relay metadata boundary (#236)
+
+Authenticated attach preserves the existing content ID, ARK, device keys and
+all existing encrypted/signed artifact encodings. The server's auth plane now
+verifies a **separate, domain-separated binding proof** using the same Ed25519
+device key already used for token proof of possession. It sees tenant/content
+IDs, public device key, challenge, revision and operation metadata. It does not
+decode legacy device records or trust attestations to establish ownership, and
+does not receive passwords, recovery secrets, the ARK or decrypted content.
+
+This explicitly extends the auth-metadata boundary, not the content key
+hierarchy. A self-signed device record is not proof of ownership of a content
+namespace: its self-signature and the current trust-attestation encoding do not
+include an account ID or supply a server-trusted founding anchor.
+
+The implemented artifact encodings are preserved: enrollment AAD binds the
+recipient, with the account ID inside authenticated sealed plaintext; the
+client checks that opened ID against the requested/authenticated account.
+Recovery AAD binds the content ID without an epoch, so an existing recovery
+artifact survives rotation. Rotation rewraps bind ID, recipient and epoch.
+These implementation details qualify the broader design statement above; #236
+does not silently reinterpret or rewrite any artifact.
+
+An occupied, unbound blind namespace cannot be claimed automatically. See
+[ADR-029](029-server-auth-identity-and-join-flows.md#amendment--explicit-authenticated-content-binding-236)
+and the review-gated
+[binding contract](../design/hosted-auth-control-plane.md#part-5--authenticated-account-binding-236).
+
 ### Relationship to ADR-017
 
 ADR-017's single owner password authenticates a browser to the **self-hosted web
