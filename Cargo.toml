@@ -61,8 +61,8 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
 anyhow = "1"
-feed-rs = "2"
-quick-xml = "0.41"
+feed-rs = "3"
+quick-xml = "0.42"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 readabilityrs = "0.1"
 ammonia = "4"
@@ -93,17 +93,17 @@ x25519-dalek = { version = "3", features = ["static_secrets", "zeroize"] }
 ed25519-dalek = { version = "3", features = ["rand_core", "zeroize"] }
 hkdf = "0.13"
 hmac = "0.13"
-argon2 = "0.5"
+argon2 = "0.6"
 blake3 = "1"
 zeroize = { version = "1", features = ["derive"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "linux-native"] }
-lopdf = "0.44"
+lopdf = "0.45"
 ratatui = "0.30"
 crossterm = "0.29"
 open = "5"
 zip = { version = "8", default-features = false, features = ["deflate"] }
-dirs = "6"
+dirs = "7"
 toml = "1.1"
 
 # Mandatory lint set. Members opt in with `[lints] workspace = true`.
