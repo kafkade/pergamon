@@ -437,7 +437,7 @@ async fn real_web_create_capture_recovery_join_and_later_mutation_round_trip() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    tokio::time::timeout(Duration::from_secs(15), async {
+    let propagated = tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             if fresh
                 .db()
@@ -451,8 +451,19 @@ async fn real_web_create_capture_recovery_join_and_later_mutation_round_trip() {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })
-    .await
-    .unwrap();
+    .await;
+    assert!(
+        propagated.is_ok(),
+        "web mutation was not propagated: owner status={} message={} pending={} cursor={}; peer status={} message={} pending={} cursor={}",
+        owner.service.snapshot().unwrap().label,
+        owner.service.snapshot().unwrap().message,
+        owner.db().pending_outbox_count().unwrap(),
+        owner.db().sync_cursor().unwrap(),
+        fresh.service.snapshot().unwrap().label,
+        fresh.service.snapshot().unwrap().message,
+        fresh.db().pending_outbox_count().unwrap(),
+        fresh.db().sync_cursor().unwrap(),
+    );
 
     let ark = *owner
         .keys()

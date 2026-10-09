@@ -41,6 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Authenticated sync refuses conflicting relay/account settings or a missing secure session instead of falling back to blind/proxy credentials; legacy enable cannot silently complete a pending authenticated attach or switch its relay (#236)
 - Non-join login only renews an established matching authenticated identity, never adopts a remote account ID for an unrelated local library, and checks existing encrypted content against local keys before activating a pending attach (#236)
 - The web sync worker now uploads pre-existing library content and required durable blobs, refreshes expired access credentials and reports a connection only after verified push/pull completion. Interrupted or revoked credential rotation requires fresh login rather than repeatedly replaying an unusable refresh token (#194)
+- Local sync changes are no longer dropped by a read-to-write database-lock race when the background worker commits concurrently (#194)
 
 ### Security
 

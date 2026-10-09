@@ -270,17 +270,19 @@ impl Database {
         Ok(())
     }
 
-    /// Run a closure inside a database transaction.
+    /// Run a write closure inside a database transaction.
     ///
     /// If the closure returns `Ok`, the transaction is committed.
     /// If it returns `Err`, the transaction is rolled back.
+    /// Reserve the writer before reading so a concurrent WAL commit cannot
+    /// invalidate the snapshot during a later read-to-write upgrade.
     pub fn in_transaction<F, T, E>(&self, f: F) -> Result<T, E>
     where
         F: FnOnce(&Self) -> Result<T, E>,
         E: From<StorageError>,
     {
         self.conn
-            .execute_batch("BEGIN;")
+            .execute_batch("BEGIN IMMEDIATE;")
             .map_err(|e| E::from(StorageError::from(e)))?;
         match f(self) {
             Ok(val) => {
