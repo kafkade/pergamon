@@ -187,26 +187,44 @@ where
     S: Sleeper + ?Sized,
 {
     loop {
+        let mut minimum_retry = None;
         let outcome = match round() {
             Ok(stats) => {
                 scheduler.record_success();
                 RoundOutcome::Synced(stats)
             }
             Err(e) if e.is_retryable() => {
+                minimum_retry = e.retry_after_seconds().map(Duration::from_secs);
                 scheduler.record_failure();
                 RoundOutcome::Offline(e.to_string())
             }
             Err(e) => return Err(e),
         };
-        let next_delay = scheduler.next_delay(jitter.next01());
+        let next_delay = scheduler
+            .next_delay(jitter.next01())
+            .max(minimum_retry.unwrap_or_default());
         observe(&RoundReport {
             outcome,
             consecutive_failures: scheduler.consecutive_failures(),
             next_delay,
         });
-        match sleeper.wait(next_delay) {
-            Wake::Shutdown => return Ok(()),
-            Wake::Elapsed | Wake::Triggered => {}
+        let deadline = match minimum_retry {
+            Some(minimum) => Some(std::time::Instant::now().checked_add(minimum).ok_or_else(
+                || crate::SyncError::Protocol("relay retry delay is too large".into()),
+            )?),
+            None => None,
+        };
+        let mut wait = next_delay;
+        loop {
+            match sleeper.wait(wait) {
+                Wake::Shutdown => return Ok(()),
+                Wake::Triggered if deadline.is_some_and(|end| end > std::time::Instant::now()) => {
+                    wait = deadline.map_or(Duration::ZERO, |end| {
+                        end.saturating_duration_since(std::time::Instant::now())
+                    });
+                }
+                Wake::Elapsed | Wake::Triggered => break,
+            }
         }
     }
 }

@@ -9,6 +9,10 @@
 
 mod auth;
 mod error;
+mod onboarding;
+#[cfg(test)]
+mod onboarding_tests;
+mod operator_session;
 mod pagination;
 mod routes;
 mod state;
@@ -95,6 +99,18 @@ struct Args {
     /// Seconds between successful background sync rounds.
     #[arg(long, default_value_t = 300, env = "PERGAMON_SYNC_INTERVAL")]
     sync_interval: u64,
+
+    /// Canonical external web origin for protected sync forms.
+    #[arg(long, env = "PERGAMON_WEB_ORIGIN")]
+    web_origin: Option<String>,
+
+    /// Durable sync blob directory; defaults beside the database.
+    #[arg(long, env = "PERGAMON_SYNC_BLOB_DIR")]
+    sync_blob_dir: Option<PathBuf>,
+
+    /// Development-only HTTP allowance for loopback web and relay origins.
+    #[arg(long, env = "PERGAMON_SYNC_ALLOW_INSECURE_LOOPBACK")]
+    sync_allow_insecure_loopback: bool,
 }
 
 /// Subcommands for the pergamon web server binary.
@@ -126,6 +142,7 @@ fn build_router(state: AppState, static_dir: Option<&PathBuf>) -> Router {
 
     // Admin diagnostics, gated by Basic auth (scoped to the /admin subtree).
     app = app.merge(routes::admin_router(state.clone()));
+    app = app.merge(routes::sync_router(state.clone()));
 
     // Static assets: serve from a disk directory when configured (override),
     // otherwise serve the assets embedded in the binary.
@@ -228,6 +245,7 @@ fn default_db_path() -> PathBuf {
 // ======================================================================
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() -> Result<()> {
     // Initialise structured logging with RUST_LOG env filter.
     tracing_subscriber::fmt()
@@ -236,7 +254,7 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let args = Args::parse();
+    let mut args = Args::parse();
 
     // Subcommands short-circuit before opening the database or binding a port.
     if let Some(Command::HealthCheck(hc)) = &args.command {
@@ -281,41 +299,60 @@ async fn main() -> Result<()> {
         }
     };
 
-    // Optionally spawn the background remote-sync worker. It needs both an
-    // encrypted key file and its passphrase; anything less leaves sync off.
-    let sync_control = match (&args.sync_key_file, &args.sync_key_passphrase) {
-        (Some(key_file), Some(passphrase)) if !passphrase.is_empty() => {
-            match sync_worker::spawn(sync_worker::SyncWorkerConfig {
-                db_path: db_path.clone(),
-                account: args.sync_account.clone(),
-                key_file: key_file.clone(),
-                passphrase: passphrase.clone(),
-                interval_secs: args.sync_interval,
-            }) {
-                Ok(control) => Some(control),
-                Err(e) => {
-                    tracing::warn!("background remote sync disabled: {e:#}");
-                    None
-                }
-            }
-        }
-        (Some(_), _) => {
-            tracing::warn!(
-                "--sync-key-file is set but --sync-key-passphrase/\
-                 PERGAMON_SYNC_KEY_PASSPHRASE is missing; background remote sync is OFF"
+    let directory = db_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let sync = Arc::new(onboarding::SyncService::new(onboarding::SyncConfig {
+        db_path: db_path.clone(),
+        key_file: args
+            .sync_key_file
+            .clone()
+            .unwrap_or_else(|| directory.join("sync-keys.json")),
+        blob_dir: args
+            .sync_blob_dir
+            .unwrap_or_else(|| directory.join("blobs")),
+        account: args.sync_account.clone(),
+        interval_secs: args.sync_interval,
+        allow_insecure_loopback: args.sync_allow_insecure_loopback,
+    })?);
+    let operator = args
+        .web_origin
+        .as_deref()
+        .map(|origin| {
+            operator_session::OperatorSessions::new(origin, args.sync_allow_insecure_loopback)
+                .map(Arc::new)
+        })
+        .transpose()?;
+    if let Some(passphrase) = args.sync_key_passphrase.take() {
+        let service = sync.clone();
+        let authenticated = db.remote_account_binding()?.is_some();
+        let result = tokio::task::spawn_blocking(move || -> Result<()> {
+            let passphrase = zeroize::Zeroizing::new(passphrase);
+            let mut command = onboarding::SyncCommand::new(
+                "unlock",
+                service.snapshot()?.setup.map_or(0, |s| s.revision),
             );
-            None
+            command.unlock_passphrase = Some(passphrase.to_string());
+            service.execute(&command)?;
+            if !authenticated {
+                service.start_legacy(&passphrase)?;
+            }
+            Ok(())
+        })
+        .await
+        .context("sync initialization task failed")?;
+        if let Err(error) = result {
+            tracing::warn!(error=%error, "background sync initialization incomplete; local library remains available");
         }
-        _ => None,
-    };
+    }
 
     let state = AppState {
         db: Arc::new(std::sync::Mutex::new(db)),
         http,
         admin_auth,
-        sync_control: sync_control
-            .as_ref()
-            .map(|c| Arc::new(std::sync::Mutex::new(c.clone()))),
+        sync: Some(sync.clone()),
+        operator,
     };
 
     let app = build_router(state, args.static_dir.as_ref());
@@ -336,11 +373,9 @@ async fn main() -> Result<()> {
         .context("server error")?;
 
     // Stop the background sync worker so its thread exits cleanly.
-    if let Some(control) = sync_control
-        && control.shutdown()
-    {
-        tracing::info!("stopping background sync worker");
-    }
+    tokio::task::spawn_blocking(move || sync.shutdown())
+        .await
+        .context("sync shutdown task failed")??;
 
     tracing::info!("server stopped");
     Ok(())
@@ -370,7 +405,8 @@ mod tests {
             db: Arc::new(std::sync::Mutex::new(db)),
             http,
             admin_auth: None,
-            sync_control: None,
+            sync: None,
+            operator: None,
         }
     }
 

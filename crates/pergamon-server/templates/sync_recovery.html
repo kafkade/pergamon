@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Save content recovery - pergamon{% endblock %}
+{% block page %}sync{% endblock %}
+{% block body_attrs %} hx-history="false"{% endblock %}
+{% block content %}
+<main class="app-main sync-page">
+  <h1 tabindex="-1" data-sync-heading>Save your content recovery code</h1>
+  <p><strong>If you lose every trusted device and this recovery material, the encrypted relay content cannot be recovered for you.</strong>
+    The relay and support staff cannot decrypt it. Resetting your relay password does not recover the content key.</p>
+  <p>Anyone with this material can decrypt your account. Save it offline or in a trusted password manager.
+    This web host is itself a trusted plaintext client, not a zero-access browser service.</p>
+  <label for="capture-code">Recovery code</label>
+  <textarea id="capture-code" class="sync-recovery-code" readonly autocomplete="off" spellcheck="false">{{ code }}</textarea>
+  <p>Content account: <code class="sync-identifier">{{ content_id }}</code></p>
+  <form method="post" action="/admin/sync-remote/recovery/download">
+    <input type="hidden" name="_csrf" value="{{ csrf }}" />
+    <input type="hidden" name="revision" value="{{ revision }}" />
+    <button type="submit" class="secondary">Download recovery material</button>
+  </form>
+  <form method="post" action="/admin/sync-remote/action">
+    <input type="hidden" name="_csrf" value="{{ csrf }}" />
+    <input type="hidden" name="revision" value="{{ revision }}" />
+    <label><input type="checkbox" name="confirm_recovery" value="yes" required />
+      I saved this material offline and understand that losing it and every trusted device makes content unrecoverable.</label>
+    <button type="submit" name="action" value="acknowledge">Acknowledge capture, attach and start sync</button>
+  </form>
+  <p><a href="/admin/sync-remote">Back to sync settings</a> or <a href="/inbox">keep using the library locally</a>.
+    Navigating away does not delete account keys or start syncing.</p>
+</main>
+{% endblock %}

@@ -418,6 +418,7 @@ pub struct RefreshingSession<T, P> {
     keys: DeviceKeypairs,
     session: std::sync::Mutex<RemoteSession>,
     persist: P,
+    failed: std::sync::atomic::AtomicBool,
 }
 
 impl<T: AuthTransport, P: Fn(&RemoteSession) -> Result<()>> RefreshingSession<T, P> {
@@ -444,6 +445,7 @@ impl<T: AuthTransport, P: Fn(&RemoteSession) -> Result<()>> RefreshingSession<T,
             keys,
             session: std::sync::Mutex::new(session),
             persist,
+            failed: std::sync::atomic::AtomicBool::new(false),
         })
     }
 }
@@ -454,20 +456,52 @@ where
     P: Fn(&RemoteSession) -> Result<()> + Send + Sync,
 {
     fn access_token(&self) -> Result<String> {
+        use std::sync::atomic::Ordering;
         let mut session = self
             .session
             .lock()
             .map_err(|_| SyncError::Protocol("session lock poisoned".to_owned()))?;
+        if self.failed.load(Ordering::Acquire) {
+            return Err(SyncError::SessionNeedsLogin {
+                reason: "previous rotation requires reauthentication",
+            });
+        }
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|_| SyncError::Protocol("system clock predates epoch".to_owned()))?;
         let now = i64::try_from(now.as_millis())
             .map_err(|_| SyncError::Protocol("invalid system clock".to_owned()))?;
         if session.access_expires_at <= now + 30_000 {
-            let next = refresh_session(&self.transport, &self.keys, &session)?;
-            (self.persist)(&next)?;
+            let next = match refresh_session(&self.transport, &self.keys, &session) {
+                Ok(next) => next,
+                Err(e @ SyncError::RateLimited { .. }) => return Err(e),
+                Err(_) => {
+                    self.failed.store(true, Ordering::Release);
+                    return Err(SyncError::SessionNeedsLogin {
+                        reason: "refresh was refused or its outcome is uncertain",
+                    });
+                }
+            };
+            if (self.persist)(&next).is_err() {
+                self.failed.store(true, Ordering::Release);
+                return Err(SyncError::SessionNeedsLogin {
+                    reason: "rotated credentials could not be persisted",
+                });
+            }
             *session = next;
         }
         Ok(session.access_token.clone())
+    }
+
+    fn invalidate_access_token(&self, rejected: &str) -> Result<()> {
+        let mut session = self
+            .session
+            .lock()
+            .map_err(|_| SyncError::Protocol("session lock poisoned".into()))?;
+        if session.access_token == rejected {
+            session.access_expires_at = 0;
+        }
+        drop(session);
+        Ok(())
     }
 }

@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Experimental authenticated relay attach now preserves an existing local account's canonical content ID, root/device keys and encrypted recovery/enrollment artifacts instead of adopting a server-generated ID. Use `--relay-identity` and optional `--register-relay-account` with `sync-remote enable` or `sync-device bootstrap`. Occupied, unbound legacy namespaces are explicitly refused rather than automatically migrated or merged. **Authenticated mode remains not externally security-reviewed and must not be deployed to production** (#236)
 - `sync-remote login --join` authenticates an empty new device without generating a content root key; enrollment or recovery is still required. Authenticated sessions rotate and are saved in the unlocked secure store, while `PERGAMON_SYNC_AUTH_PASSWORD` is used only in memory. Interrupted create/attach operations retain their identity and resumable recovery publication, and `sync-remote status` reports pending adoption (#236)
+- Guided self-hosted web sync through the **Sync** navigation link: add a relay, create a login or sign in, and explicitly create, attach, or join a content account without replacing existing keys. New accounts require recovery-code download/save acknowledgement before the first sync; new devices obtain existing keys through recovery or verified trusted-device enrollment. Local library use stays available without sync. **Authenticated sync remains not externally security-reviewed and must not be deployed to production** (#194)
+- Web sync unlock and restart controls, with keys locked after restart by default and optional deployment-secret unlock for unattended startup; configurable web origin, durable blob directory and explicit loopback-only HTTP development mode (#194)
 
 ### Changed
 
@@ -30,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `export backup` now prints an explicit at-rest security notice on every run, stating whether the archive is encrypted and reminding you that a plaintext archive excludes all key material and cannot on its own recover an encrypted or sync-enabled account (#182)
 
 - Authenticated `sync-device revoke` now also revokes the device's relay credentials. If content rotation succeeds but credential revocation is interrupted, `sync-remote revoke-session` retries only the authentication half without rotating the content epoch again; token revocation does not erase a root key already held by a device (#236)
+- Web remote-sync settings, recovery downloads and the existing sync-trigger endpoint now require configured local-operator credentials, a canonical web origin and protected form submissions. Other library routes are unchanged and still require reverse-proxy authentication when exposed (#194)
 
 ### Fixed
 
@@ -37,6 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Authenticated sync refuses conflicting relay/account settings or a missing secure session instead of falling back to blind/proxy credentials; legacy enable cannot silently complete a pending authenticated attach or switch its relay (#236)
 - Non-join login only renews an established matching authenticated identity, never adopts a remote account ID for an unrelated local library, and checks existing encrypted content against local keys before activating a pending attach (#236)
+- The web sync worker now uploads pre-existing library content and required durable blobs, refreshes expired access credentials and reports a connection only after verified push/pull completion. Interrupted or revoked credential rotation requires fresh login rather than repeatedly replaying an unusable refresh token (#194)
 
 ### Security
 
@@ -49,6 +53,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Experimental v2 registration returns the same login-required acknowledgement for valid new and existing handles without revealing IDs or overwriting an existing verifier; tenant/content IDs are returned only after successful OPAQUE login. Existing v1 behavior is retained, and response uniformity is not a claim of complete side-channel resistance or external security certification (#236)
 - Authenticated relay namespace allocation rejects existing objects, onboarding artifacts and retired reservations; interrupted/retried binding preserves ownership, and stale credentials cannot acquire access to a newly bound namespace (#236)
+- Protected web sync forms use operator-bound CSRF sessions and same-origin checks; recovery responses are non-cacheable, relay passwords are not persisted, and encrypted key-file updates use serialized private-file writes (#194)
 
 ## [1.0.0] - 2026-07-09
 

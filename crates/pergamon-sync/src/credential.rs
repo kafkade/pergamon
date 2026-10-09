@@ -24,6 +24,16 @@ pub trait AccessTokenProvider: Send + Sync {
     /// # Errors
     /// Returns an error if refresh or durable session persistence fails.
     fn access_token(&self) -> crate::error::Result<String>;
+
+    /// Invalidate only the rejected access token, without competing rotations.
+    ///
+    /// # Errors
+    /// Returns an error when the provider cannot safely refresh authority.
+    fn invalidate_access_token(&self, _rejected: &str) -> crate::error::Result<()> {
+        Err(crate::SyncError::SessionNeedsLogin {
+            reason: "access authority was refused",
+        })
+    }
 }
 
 /// A credential the HTTP transports send as an `Authorization` header.

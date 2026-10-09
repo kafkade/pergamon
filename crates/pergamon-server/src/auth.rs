@@ -30,6 +30,11 @@ impl AdminCredentials {
         Self { user, password }
     }
 
+    /// Authenticate the local operator without exposing configured secrets.
+    pub fn authorizes(&self, headers: &HeaderMap) -> bool {
+        parse_basic_auth(headers).is_some_and(|(user, password)| self.matches(&user, &password))
+    }
+
     /// Check whether the supplied username and password match, comparing in
     /// (near) constant time to avoid leaking length/positional information.
     #[must_use]
@@ -42,7 +47,7 @@ impl AdminCredentials {
 /// Constant-time byte-slice equality. Returns `true` only when both slices have
 /// the same length and contents. The comparison always inspects every byte of
 /// the longer slice so timing does not reveal where a mismatch occurred.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     let mut diff = u8::from(a.len() != b.len());
     let max = a.len().max(b.len());
     for i in 0..max {
@@ -68,7 +73,7 @@ fn parse_basic_auth(headers: &HeaderMap) -> Option<(String, String)> {
 }
 
 /// Build the `401 Unauthorized` challenge response.
-fn unauthorized() -> Response {
+pub fn unauthorized() -> Response {
     (
         StatusCode::UNAUTHORIZED,
         [(

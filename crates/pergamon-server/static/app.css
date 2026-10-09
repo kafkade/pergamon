@@ -8,6 +8,97 @@
   --pergamon-spacing-tight: 0.4rem;
 }
 
+.sync-page {
+  max-width: 52rem;
+  margin-inline: auto;
+}
+
+.sync-page > p,
+.sync-page header > p,
+.sync-page section > p {
+  max-width: 70ch;
+}
+
+.sync-page h1:focus {
+  outline: none;
+}
+
+body[data-page="sync"] .kbd-hint {
+  display: none;
+}
+
+body[data-page="sync"] .app-nav a[href="/admin/sync-remote"] {
+  background: var(--pico-primary-background);
+  color: var(--pico-primary-inverse);
+  border-color: var(--pico-primary);
+}
+
+.sync-page section,
+.sync-page details {
+  margin-block: 1.5rem;
+}
+
+.sync-status {
+  border-block: 1px solid var(--pico-muted-border-color);
+  padding-block: 1rem;
+}
+
+.sync-warning,
+.sync-error {
+  padding: 0.8rem;
+  border: 1px solid var(--pico-muted-border-color);
+}
+
+.sync-error {
+  color: var(--pico-del-color);
+}
+
+.sync-summary {
+  display: grid;
+  grid-template-columns: minmax(9rem, 1fr) minmax(0, 2fr);
+  gap: 0.4rem 1rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.sync-summary dd {
+  margin: 0;
+}
+
+.sync-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.7rem;
+}
+
+.sync-actions form {
+  margin: 0;
+}
+
+.sync-identifier {
+  overflow-wrap: anywhere;
+}
+
+.sync-recovery-code {
+  min-height: 6rem;
+  font-family: var(--pico-font-family-monospace);
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 600px) {
+  .sync-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .sync-summary dd {
+    margin-bottom: 0.5rem;
+  }
+
+  .sync-actions,
+  .sync-actions form {
+    width: 100%;
+  }
+}
+
 /* ----------------------------------------------------------------- */
 /* Layout: sidebar + main                                            */
 /* ----------------------------------------------------------------- */

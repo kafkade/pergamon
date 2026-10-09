@@ -163,6 +163,50 @@ impl DeviceKeyStore {
         Ok(Some(AccountId::from_bytes(bytes)))
     }
 
+    /// Atomically save a fresh account in an encrypted file before remote effects.
+    ///
+    /// # Errors
+    /// Returns an error if any existing identity would be replaced, or the write fails.
+    pub fn save_account_material(
+        &mut self,
+        account: &str,
+        keys: &DeviceKeypairs,
+        ark: &AccountRootKey,
+        id: &AccountId,
+    ) -> Result<()> {
+        if self.load_device_keys(account)?.is_some_and(|old| {
+            old.x25519_secret() != keys.x25519_secret()
+                || old.ed25519_signing() != keys.ed25519_signing()
+        }) || self
+            .load_ark(account)?
+            .is_some_and(|old| old.expose_bytes() != ark.expose_bytes())
+            || self.load_account_id(account)?.is_some_and(|old| old != *id)
+        {
+            bail!("existing account material must not be replaced");
+        }
+        let mut device = zeroize::Zeroizing::new(Vec::with_capacity(KEY_LEN * 2));
+        device.extend_from_slice(keys.x25519_secret());
+        device.extend_from_slice(keys.ed25519_signing());
+        let entries = [
+            (entry_name(account, DEVICE_SUFFIX), Some(device.as_slice())),
+            (
+                entry_name(account, ARK_SUFFIX),
+                Some(ark.expose_bytes().as_slice()),
+            ),
+            (
+                entry_name(account, ACCOUNT_ID_SUFFIX),
+                Some(id.as_bytes().as_slice()),
+            ),
+        ];
+        match &mut self.backend {
+            #[cfg(feature = "keyring")]
+            Backend::Keyring => {
+                bail!("atomic account creation requires the encrypted-file backend")
+            }
+            Backend::EncryptedFile(file) => file.update(&entries),
+        }
+    }
+
     /// Persist a redacted-on-output session bundle separately from account keys.
     ///
     /// # Errors
@@ -202,6 +246,67 @@ impl DeviceKeyStore {
     /// Returns an error for invalid identity, malformed wire data, or failed persistence/transport.
     pub fn load_bootstrap_recovery(&self, account: &str, relay: &str) -> Result<Option<Vec<u8>>> {
         self.get(account, &format!("bootstrap-{}", session_suffix(relay)))
+    }
+
+    /// Delete acknowledged capture material without deleting account keys.
+    ///
+    /// # Errors
+    /// Returns an error if secure-store deletion fails.
+    pub fn remove_bootstrap_recovery(&mut self, account: &str, relay: &str) -> Result<()> {
+        let entry = entry_name(account, &format!("bootstrap-{}", session_suffix(relay)));
+        match &mut self.backend {
+            #[cfg(feature = "keyring")]
+            Backend::Keyring => {
+                let item = keyring::Entry::new(KEYRING_SERVICE, &entry)?;
+                match item.delete_credential() {
+                    Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+                    Err(e) => Err(e.into()),
+                }
+            }
+            Backend::EncryptedFile(file) => file.update(&[(entry, None)]),
+        }
+    }
+
+    /// Persist exact sealed onboarding publications for idempotent retries.
+    ///
+    /// # Errors
+    /// Returns an error if encrypted persistence fails.
+    pub fn save_onboarding_artifact(
+        &mut self,
+        account: &str,
+        relay: &str,
+        operation: &str,
+        bytes: &[u8],
+    ) -> Result<()> {
+        self.set(
+            account,
+            &format!(
+                "onboarding-{}-{}",
+                session_suffix(relay),
+                session_suffix(operation)
+            ),
+            bytes,
+        )
+    }
+
+    /// Load an exact publication without regenerating its ciphertext.
+    ///
+    /// # Errors
+    /// Returns an error on corrupt or unreadable storage.
+    pub fn load_onboarding_artifact(
+        &self,
+        account: &str,
+        relay: &str,
+        operation: &str,
+    ) -> Result<Option<Vec<u8>>> {
+        self.get(
+            account,
+            &format!(
+                "onboarding-{}-{}",
+                session_suffix(relay),
+                session_suffix(operation)
+            ),
+        )
     }
 
     /// Write a secret under the `{account}:{suffix}` entry.
@@ -327,6 +432,25 @@ impl EncryptedFile {
 
     /// Encrypt and store `bytes` under `entry`, then flush the file.
     fn set(&mut self, entry: &str, bytes: &[u8]) -> Result<()> {
+        self.update(&[(entry.to_owned(), Some(bytes))])
+    }
+
+    fn update(&mut self, entries: &[(String, Option<&[u8]>)]) -> Result<()> {
+        if let Some(parent) = self.path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent).context("creating key-file directory")?;
+        }
+        let lock_path = self.path.with_extension("write-lock");
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let lock = options
+            .open(lock_path)
+            .context("opening key-file writer lock")?;
+        lock.lock().context("locking secure-store writes")?;
         if self.path.exists() {
             let raw =
                 std::fs::read(&self.path).context("refreshing secure key file before write")?;
@@ -337,10 +461,15 @@ impl EncryptedFile {
             }
             self.entries = current.entries;
         }
-        let sealed = primitives::aead_seal(&self.kek, entry.as_bytes(), bytes)
-            .context("sealing key-file entry")?;
-        self.entries
-            .insert(entry.to_owned(), STANDARD.encode(&sealed));
+        for (entry, bytes) in entries {
+            if let Some(bytes) = bytes {
+                let sealed = primitives::aead_seal(&self.kek, entry.as_bytes(), bytes)
+                    .context("sealing key-file entry")?;
+                self.entries.insert(entry.clone(), STANDARD.encode(&sealed));
+            } else {
+                self.entries.remove(entry);
+            }
+        }
         self.flush()
     }
 
@@ -365,20 +494,53 @@ impl EncryptedFile {
 
     /// Serialize and atomically write the key file.
     fn flush(&self) -> Result<()> {
+        use std::io::Write as _;
         let format = FileFormat {
             salt_b64: STANDARD.encode(self.salt),
             entries: self.entries.clone(),
         };
         let bytes = serde_json::to_vec_pretty(&format).context("serializing key file")?;
-        if let Some(parent) = self.path.parent() {
+        if let Some(parent) = self.path.parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating key-file directory {}", parent.display()))?;
         }
-        let tmp = self.path.with_extension("tmp");
-        std::fs::write(&tmp, &bytes)
-            .with_context(|| format!("writing key file {}", tmp.display()))?;
-        std::fs::rename(&tmp, &self.path)
-            .with_context(|| format!("installing key file {}", self.path.display()))?;
+        let nonce = primitives::random_array::<16>().context("generating key-file write nonce")?;
+        let tmp = self.path.with_extension(format!(
+            "tmp-{}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(nonce)
+        ));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let result = (|| -> Result<()> {
+            let mut file = options
+                .open(&tmp)
+                .context("creating private key-file temporary")?;
+            file.write_all(&bytes)
+                .context("writing encrypted key file")?;
+            file.sync_all().context("flushing encrypted key file")?;
+            drop(file);
+            std::fs::rename(&tmp, &self.path).context("installing encrypted key file")?;
+            #[cfg(unix)]
+            if let Some(parent) = self.path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                std::fs::File::open(parent)?
+                    .sync_all()
+                    .context("flushing key-file directory")?;
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            match std::fs::remove_file(&tmp) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        result?;
         Ok(())
     }
 }
@@ -405,6 +567,20 @@ mod tests {
 
     fn temp_path() -> PathBuf {
         std::env::temp_dir().join(format!("pergamon-keystore-{}.json", uuid::Uuid::new_v4()))
+    }
+
+    fn cleanup(path: &Path) {
+        for file in [path.to_owned(), path.with_extension("write-lock")] {
+            std::fs::remove_file(file)
+                .or_else(|error| {
+                    if error.kind() == std::io::ErrorKind::NotFound {
+                        Ok(())
+                    } else {
+                        Err(error)
+                    }
+                })
+                .unwrap();
+        }
     }
 
     #[test]
@@ -456,7 +632,54 @@ mod tests {
                 .load_remote_session("owner", "https://relay.example")
                 .is_err()
         );
-        std::fs::remove_file(path).unwrap();
+        cleanup(&path);
+    }
+
+    #[test]
+    fn account_batch_and_capture_cleanup_preserve_existing_keys() {
+        let path = temp_path();
+        let keys = DeviceKeypairs::generate().unwrap();
+        let ark = AccountRootKey::from_bytes([7; 32]);
+        let id = AccountId::from_bytes([3; 16]);
+        let mut store = DeviceKeyStore::encrypted_file(&path, b"pw").unwrap();
+        store
+            .save_account_material("owner", &keys, &ark, &id)
+            .unwrap();
+        store
+            .save_bootstrap_recovery("owner", "https://relay.example", b"capture-secret")
+            .unwrap();
+        store
+            .remove_bootstrap_recovery("owner", "https://relay.example")
+            .unwrap();
+        let reopened = DeviceKeyStore::encrypted_file(&path, b"pw").unwrap();
+        assert_eq!(reopened.load_account_id("owner").unwrap(), Some(id.clone()));
+        assert_eq!(
+            reopened.load_ark("owner").unwrap().unwrap().expose_bytes(),
+            ark.expose_bytes()
+        );
+        assert!(
+            reopened
+                .load_bootstrap_recovery("owner", "https://relay.example")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .save_account_material("owner", &keys, &AccountRootKey::from_bytes([8; 32]), &id)
+                .is_err()
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        drop(store);
+        drop(reopened);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_file(path.with_extension("write-lock")).unwrap();
     }
 
     #[test]
@@ -481,7 +704,7 @@ mod tests {
         let loaded_ark = store.load_ark(account).unwrap().unwrap();
         assert_eq!(loaded_ark.expose_bytes(), ark.expose_bytes());
 
-        let _ = std::fs::remove_file(&path);
+        cleanup(&path);
     }
 
     #[test]
@@ -495,7 +718,7 @@ mod tests {
         // Opening with the wrong passphrase fails because the probe entry can't
         // be decrypted.
         assert!(DeviceKeyStore::encrypted_file(&path, b"wrong").is_err());
-        let _ = std::fs::remove_file(&path);
+        cleanup(&path);
     }
 
     #[test]
@@ -504,7 +727,7 @@ mod tests {
         let store = DeviceKeyStore::encrypted_file(&path, b"pw").unwrap();
         assert!(store.load_device_keys("nobody").unwrap().is_none());
         assert!(store.load_ark("nobody").unwrap().is_none());
-        let _ = std::fs::remove_file(&path);
+        cleanup(&path);
     }
 
     #[test]
@@ -520,6 +743,6 @@ mod tests {
             !raw.windows(32).any(|w| w == ark.expose_bytes()),
             "raw ARK bytes must not appear in the key file"
         );
-        let _ = std::fs::remove_file(&path);
+        cleanup(&path);
     }
 }

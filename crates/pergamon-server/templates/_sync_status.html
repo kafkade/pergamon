@@ -1,0 +1,26 @@
+<section id="sync-status" class="sync-status" aria-label="Sync status"
+         hx-get="/admin/sync-remote/status" hx-trigger="every 5s" hx-swap="outerHTML" hx-history="false">
+  <h2>{{ status.label }}</h2>
+  <p role="status" aria-live="polite">{{ status.message }}</p>
+  {% if !status.last_success.is_empty() %}
+  <dl class="sync-summary">
+    <dt>Last verified sync</dt><dd>{{ status.last_success }}</dd>
+    <dt>Last round</dt><dd>{{ status.pushed }} new changes uploaded, {{ status.applied }} applied</dd>
+    <dt>Pending changes</dt><dd>{{ pending }}</dd>
+  </dl>
+  {% endif %}
+  {% if status.can_trigger() %}
+  <div class="sync-actions">
+    <form method="post" action="/admin/sync-remote/action">
+      <input type="hidden" name="_csrf" value="{{ csrf }}" />
+      <input type="hidden" name="revision" value="{{ revision }}" />
+      <button type="submit" name="action" value="trigger" class="secondary">Sync now</button>
+    </form>
+    <form method="post" action="/admin/sync-remote/action">
+      <input type="hidden" name="_csrf" value="{{ csrf }}" />
+      <input type="hidden" name="revision" value="{{ revision }}" />
+      <button type="submit" name="action" value="pause" class="outline secondary">Pause sync</button>
+    </form>
+  </div>
+  {% endif %}
+</section>

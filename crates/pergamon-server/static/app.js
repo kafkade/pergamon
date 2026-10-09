@@ -9,6 +9,22 @@
 (function () {
   "use strict";
 
+  if (document.body.getAttribute("data-page") === "sync") {
+    var focusTarget = document.querySelector('.sync-page [role="alert"]') ||
+      document.querySelector("[data-sync-heading]");
+    if (focusTarget) {
+      focusTarget.focus({ preventScroll: true });
+    }
+    var registerToggle = document.querySelector("[data-relay-register]");
+    var relayPassword = document.querySelector("[data-relay-password]");
+    if (registerToggle && relayPassword) {
+      registerToggle.addEventListener("change", function () {
+        relayPassword.setAttribute("autocomplete",
+          registerToggle.checked ? "new-password" : "current-password");
+      });
+    }
+  }
+
   function rows() {
     return Array.prototype.slice.call(
       document.querySelectorAll("[data-item-row]")

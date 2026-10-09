@@ -1287,8 +1287,8 @@ fn schema_version_returns_latest() {
     let version = db
         .schema_version()
         .unwrap_or_else(|e| unreachable!("version: {e}"));
-    // We have 15 migrations (V1 through V15).
-    assert_eq!(version, 15);
+    // V16 adds only local web onboarding progress/runtime state.
+    assert_eq!(version, 16);
 }
 
 #[test]

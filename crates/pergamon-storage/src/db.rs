@@ -177,6 +177,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "remote_account_binding",
         include_str!("../migrations/V15__remote_account_binding.sql"),
     ),
+    (
+        16,
+        "web_sync_setup",
+        include_str!("../migrations/V16__web_sync_setup.sql"),
+    ),
 ];
 
 /// Run all pending migrations inside a transaction.

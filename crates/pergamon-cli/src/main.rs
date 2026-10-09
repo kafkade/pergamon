@@ -6649,14 +6649,11 @@ fn verify_existing_relay_account(
             Err(error) => return Err(error.into()),
         }
     }
-    let directory = pergamon_sync::DeviceKeyDirectory::from_roster(
-        &pergamon_sync::onboarding::roster(&relay, id)?,
-    );
     let crypto = pergamon_sync::CryptoContext::new(
         store
             .load_ark(account)?
             .context("account root key disappeared")?,
-        content.clone(),
+        content,
         keys.device_id().to_owned(),
         *keys.ed25519_signing(),
         epoch,
@@ -6673,18 +6670,8 @@ fn verify_existing_relay_account(
                 .context("authenticated content session is unavailable")?,
         ),
     };
-    let sample = pergamon_sync::Transport::pull(&transport, &content, 0, Some(1))?;
-    if let Some(event) = sample.events.first() {
-        let public = directory
-            .get(&event.device_id)
-            .context("historical signer is missing from roster")?;
-        if !crypto.verify_event_sig(event, public)? {
-            bail!("historical event signature is invalid");
-        }
-        crypto
-            .decrypt_change(event)
-            .context("local keys cannot decrypt existing relay content")?;
-    }
+    pergamon_sync::onboarding::verify_existing_content(&transport, &relay, id, &crypto)
+        .context("local keys cannot authenticate or decrypt existing relay content")?;
     Ok(())
 }
 
@@ -7535,12 +7522,7 @@ fn publish_bootstrap_recovery(
     server: &str,
     account: &str,
 ) -> Result<RecoveryOutcome> {
-    #[derive(serde::Serialize, serde::Deserialize)]
-    struct PendingRecovery {
-        code: String,
-        content_account_id: String,
-        blob: Vec<u8>,
-    }
+    use pergamon_sync::onboarding::PendingRecovery;
     if no_recovery_code {
         return Ok(RecoveryOutcome::Disabled);
     }
@@ -7554,27 +7536,10 @@ fn publish_bootstrap_recovery(
     let pending = if let Some(bytes) = store.load_bootstrap_recovery(account, server)? {
         let pending: PendingRecovery =
             serde_json::from_slice(&bytes).context("decoding pending recovery artifact")?;
-        if pending.content_account_id != account_id.to_hex() {
-            bail!("pending recovery artifact belongs to another content account");
-        }
-        let recovered = pergamon_crypto::recover(
-            &pergamon_crypto::RecoveryBlob::from_bytes(&pending.blob)?,
-            account_id,
-            pending.code.as_bytes(),
-        )?;
-        if recovered.expose_bytes() != ark.expose_bytes() {
-            bail!("pending recovery artifact has different account keys");
-        }
+        pending.validate(ark, account_id)?;
         pending
     } else {
-        let code = pergamon_crypto::recovery::generate_recovery_code()
-            .context("generating recovery code")?;
-        let blob = pergamon_crypto::enable_recovery(ark, account_id, code.as_bytes())?.to_bytes();
-        let pending = PendingRecovery {
-            code,
-            content_account_id: account_id.to_hex(),
-            blob,
-        };
+        let pending = PendingRecovery::new(ark, account_id)?;
         store.save_bootstrap_recovery(account, server, &serde_json::to_vec(&pending)?)?;
         pending
     };

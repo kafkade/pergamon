@@ -38,6 +38,90 @@ use pergamon_crypto::{
 use crate::error::{Result, SyncError};
 use crate::relay::RelayTransport;
 
+/// Stable encrypted-store capture material; never log its recovery code.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct PendingRecovery {
+    /// Printable secret shown only to the account owner.
+    pub code: String,
+    /// Canonical content identity bound into recovery encryption.
+    pub content_account_id: String,
+    /// Exact opaque recovery ciphertext to reuse on retry.
+    pub blob: Vec<u8>,
+}
+
+impl PendingRecovery {
+    /// Prepare real recoverable material before its first remote publication.
+    ///
+    /// # Errors
+    /// Returns an error if randomness or recovery encryption fails.
+    pub fn new(ark: &AccountRootKey, account: &AccountId) -> Result<Self> {
+        let code = pergamon_crypto::recovery::generate_recovery_code()?;
+        let blob = enable_recovery(ark, account, code.as_bytes())?.to_bytes();
+        Ok(Self {
+            code,
+            content_account_id: account.to_hex(),
+            blob,
+        })
+    }
+
+    /// Verify saved material still restores this exact account root.
+    ///
+    /// # Errors
+    /// Refuses another identity, root, or malformed capture material.
+    pub fn validate(&self, ark: &AccountRootKey, account: &AccountId) -> Result<()> {
+        if self.content_account_id != account.to_hex() {
+            return Err(SyncError::Protocol(
+                "pending recovery belongs to another account".into(),
+            ));
+        }
+        let recovered = recover(
+            &RecoveryBlob::from_bytes(&self.blob)?,
+            account,
+            self.code.as_bytes(),
+        )?;
+        if recovered.expose_bytes() != ark.expose_bytes() {
+            return Err(SyncError::Protocol(
+                "pending recovery has different account keys".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Check historical authorship and decryption before adopting local keys.
+///
+/// # Errors
+/// Refuses mismatched routing, signatures, unknown signers, or incompatible keys.
+pub fn verify_existing_content(
+    transport: &impl crate::Transport,
+    relay: &impl RelayTransport,
+    account: &AccountId,
+    crypto: &crate::CryptoContext,
+) -> Result<()> {
+    let directory = crate::DeviceKeyDirectory::from_roster(&roster(relay, account)?);
+    let page = transport.pull(&account.to_hex(), 0, Some(1))?;
+    if let Some(event) = page.events.first() {
+        if event.account_id != account.to_hex() {
+            return Err(SyncError::Protocol(
+                "historical content has another account identity".into(),
+            ));
+        }
+        let public = directory
+            .get(&event.device_id)
+            .ok_or_else(|| SyncError::UnknownSigner {
+                device_id: event.device_id.clone(),
+            })?;
+        if !crypto.verify_event_sig(event, public)? {
+            return Err(SyncError::BadEventSignature {
+                change_id: event.change_id.clone(),
+                device_id: event.device_id.clone(),
+            });
+        }
+        crypto.decrypt_change(event)?;
+    }
+    Ok(())
+}
+
 /// Map a crypto error into a sync error with context.
 fn crypto_err(what: &str, e: &pergamon_crypto::CryptoError) -> SyncError {
     SyncError::Protocol(format!("{what}: {e}"))
@@ -113,6 +197,11 @@ pub fn fetch_device_record<R: RelayTransport>(
     signed
         .verify()
         .map_err(|e| crypto_err("verifying device record", &e))?;
+    if signed.record.device_id != device_id {
+        return Err(SyncError::Protocol(
+            "device record does not match the requested device".into(),
+        ));
+    }
     Ok(signed)
 }
 
