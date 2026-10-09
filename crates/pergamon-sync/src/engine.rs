@@ -77,6 +77,11 @@ impl<T: Transport> SyncEngine<T> {
         &self.transport
     }
 
+    /// Replace a refreshed, verified roster before retrying a pull.
+    pub fn update_device_directory(&mut self, directory: DeviceKeyDirectory) {
+        self.directory = directory;
+    }
+
     /// Push all pending local changes, uploading referenced blobs first.
     ///
     /// # Errors
@@ -101,11 +106,28 @@ impl<T: Transport> SyncEngine<T> {
                 events,
             };
             let resp = self.transport.push(&req)?;
+            let expected: std::collections::HashSet<_> =
+                pending.iter().map(|row| row.change_id.as_str()).collect();
+            let mut seen = std::collections::HashSet::new();
+            if resp.results.iter().any(|result| {
+                !expected.contains(result.change_id.as_str())
+                    || !seen.insert(result.change_id.as_str())
+            }) {
+                return Err(SyncError::Protocol(
+                    "push acknowledgement has unknown or repeated change IDs".into(),
+                ));
+            }
             for result in &resp.results {
                 db.mark_outbox_acked(&result.change_id, result.server_seq)?;
                 if !result.deduplicated {
                     pushed += 1;
                 }
+            }
+            if resp.results.len() != pending.len() {
+                return Err(SyncError::IncompleteUpload {
+                    pending_events: db.pending_outbox_count()?,
+                    missing_blobs: Vec::new(),
+                });
             }
         }
         Ok(pushed)

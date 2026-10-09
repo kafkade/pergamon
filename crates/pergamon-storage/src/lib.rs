@@ -12,6 +12,7 @@ pub mod backup;
 pub mod db;
 pub mod error;
 pub mod sync;
+pub mod web_sync;
 
 pub use backup::{BackupManifest, BackupStats, is_encrypted_backup};
 pub use db::ContentItemFilter;

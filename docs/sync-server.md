@@ -13,7 +13,7 @@ design rationale, and [ADR-022](adr/022-sync-protocol-and-envelope-model.md) /
 [ADR-024](adr/024-device-onboarding-and-key-lifecycle.md) for the protocol and
 key model.
 
-> **Read this first — the server is a blind relay with no built-in auth.**
+> **Read this first — the default mode is a blind relay with no built-in auth.**
 > The sync server never sees your plaintext: it stores only ciphertext and
 > opaque onboarding artifacts, and it cannot read your titles, notes, tags,
 > URLs, or content even if it wanted to. **But it has no authentication of its
@@ -23,6 +23,28 @@ key model.
 > reverse proxy that enforces TLS *and* authentication, or keep it on a trusted
 > private network — see [Reverse proxy (TLS + auth)](#reverse-proxy-tls--auth)
 > and [Security considerations](#security-considerations).
+
+## Authenticated relay and guided web setup
+
+The optional multitenant mode implements the v2 OPAQUE/device-PoP authentication
+and explicit content-binding foundation. **NOT EXTERNALLY SECURITY-REVIEWED:
+do not deploy authenticated sync to production until independent review is
+complete.** See [the hosted-auth security design](design/hosted-auth-control-plane.md)
+and [ADR-029](adr/029-server-auth-identity-and-join-flows.md) for its exact
+empty-only allocation, immutable T/C binding, legacy refusal and metadata limits.
+
+The separate trusted `pergamon-server` web host now offers guided
+add-server/create-or-login/attach/sync through its **Sync** navigation link.
+See [guided web onboarding](docker.md#guided-encrypted-relay-onboarding) for
+operator credentials, canonical origin/CSRF, key-file unlock, recovery capture,
+SAS enrollment and durable worker configuration. The relay remains unable to
+decrypt content; the trusted web host can read its own library and unlocked keys.
+Do not conflate these services or claim browser-local zero-access key custody.
+
+The guided flow requires `/v2/auth` support and never silently downgrades to
+the default blind/proxy-auth workflow documented below. PAKE login alone does
+not supply an ARK, and the relay auth tenant ID is not a routing alias for the
+canonical content ID. Recovery loss cannot be repaired by password reset.
 
 ## Prerequisites
 

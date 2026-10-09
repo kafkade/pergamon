@@ -2819,6 +2819,7 @@ dependencies = [
  "serde",
  "serde_json",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -2830,15 +2831,21 @@ dependencies = [
  "axum",
  "base64 0.23.0",
  "clap",
+ "opaque-ke",
  "pergamon-core",
+ "pergamon-crypto",
  "pergamon-extract",
  "pergamon-feed",
  "pergamon-keystore",
  "pergamon-storage",
  "pergamon-sync",
+ "pergamon-sync-server",
+ "rand 0.8.7",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
+ "tempfile",
  "time",
  "tokio",
  "tower",
@@ -2847,6 +2854,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

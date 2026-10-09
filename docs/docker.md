@@ -113,6 +113,13 @@ defaults: it binds `0.0.0.0:3000` and stores data in `/data`.
 | `RUST_LOG` | — | `info` | `info` | Log filter. Accepts `error`, `warn`, `info`, `debug`, `trace`, or per-target filters (e.g. `pergamon_server=debug,info`). |
 | `PERGAMON_ADMIN_USER` | `--admin-user` | — | — | Username for HTTP Basic auth on the `/admin` diagnostics routes. See [Admin diagnostics auth](#admin-diagnostics-auth). |
 | `PERGAMON_ADMIN_PASSWORD` | `--admin-password` | — | — | Password for HTTP Basic auth on `/admin`. **Both** user and password must be set to enable protection. |
+| `PERGAMON_WEB_ORIGIN` | `--web-origin` | — | — | Canonical external origin for protected sync settings, e.g. `https://pergamon.example.com`. Required for web onboarding; forwarded headers do not establish this trust. |
+| `PERGAMON_SYNC_ACCOUNT` | `--sync-account` | `default` | `default` | Local keystore label. Must match any existing authenticated binding; it is not the relay login or content ID. |
+| `PERGAMON_SYNC_KEY_FILE` | `--sync-key-file` | beside DB: `sync-keys.json` | `/data/sync-keys.json` | Existing or newly created Argon2id-encrypted key file. Keep it in the persistent volume. |
+| `PERGAMON_SYNC_KEY_PASSPHRASE` | `--sync-key-passphrase` | — | — | Optional deployment-secret unlock for unattended startup. Without it, unlock through protected sync settings after each restart. Never place it in ordinary configuration or a committed Compose file. |
+| `PERGAMON_SYNC_BLOB_DIR` | `--sync-blob-dir` | beside DB: `blobs` | `/data/blobs` | Durable sync plaintext blob store; set explicitly when attaching a CLI library whose blobs live elsewhere. |
+| `PERGAMON_SYNC_INTERVAL` | `--sync-interval` | `300` | `300` | Healthy background sync cadence in seconds. Transport failures back off; authentication/integrity failures stop instead of retrying indefinitely. |
+| `PERGAMON_SYNC_ALLOW_INSECURE_LOOPBACK` | `--sync-allow-insecure-loopback` | `false` | `false` | Development-only opt-in to HTTP loopback origins. Private LAN relays still require HTTPS. |
 
 Notes on defaults:
 
@@ -140,6 +147,83 @@ services:
 
 Reference secrets from a `.env` file (kept out of version control) rather than
 hard-coding them — see [Security considerations](#security-considerations).
+
+## Guided encrypted relay onboarding
+
+> **Experimental authentication: NOT EXTERNALLY SECURITY-REVIEWED — DO NOT
+> DEPLOY authenticated sync to production until independent review is complete.**
+> The web application is a **trusted plaintext client**: its operator can access
+> the local library, unlocked keys and submitted password/recovery inputs. Only
+> the separate encrypted relay is zero-access to content. Browser-held key
+> custody and managed zero-access web hosting are separate work.
+
+The **Sync** navigation link opens `/admin/sync-remote`. This subtree requires
+both admin Basic credentials and `PERGAMON_WEB_ORIGIN`, even when diagnostics
+are otherwise open. Its forms use short-lived, server-side operator sessions,
+CSRF tokens, same-origin checks and no-store responses. Preserve the external
+Host header through your TLS proxy; arbitrary forwarded headers are not trusted.
+These protections **do not authenticate the rest of the library**: keep
+reverse-proxy TLS and authentication in place for the main application.
+
+1. Unlock the local encrypted key file, or choose its password when starting
+   a new file. This password is separate from the relay password.
+2. Add an HTTPS relay that supports the `/v2/auth` contract. `/health` alone
+   is not sufficient; a blind-only relay is explicitly refused.
+3. Choose **create**, **attach existing local keys**, or **join an existing
+   remote account**. Create a relay login or log in using the OPAQUE flow.
+   Registration acknowledgement is not authentication or a completed attach.
+4. For a new content account, view/download the real recovery code and
+   acknowledge that it is saved offline **before the first content sync**.
+   Attach preserves existing keys and recovery material. A fresh join must
+   recover existing keys using the saved code/key package, or compare a real
+   SAS on both devices and complete trusted-device approval.
+5. Attach/start sync. **Connected** is reported only after an actual worker
+   round has pushed, pulled and verified upload completeness. Queued, locked,
+   pending approval, offline, incomplete and sign-in-required are distinct states.
+
+OPAQUE proves control of the relay auth tenant `T`, not possession of the random
+content root key. The canonical content account `C` stays unchanged in encrypted
+events, signatures, enrollment and recovery. An occupied blind namespace cannot
+be automatically claimed or migrated, and changing an already selected/bound
+relay is not a settings-only operation. No failure silently falls back to blind
+or environment credentials, adopts another library, or generates replacement keys.
+
+**Recovery is not password reset.** If every trusted device and the recovery
+material are lost, encrypted relay content cannot be recovered for you.
+Resetting a relay password does not decrypt content. The UI does not offer an
+unimplemented password-reset service. Anyone with the recovery material can
+decrypt content; keep it offline or in a trusted password manager.
+
+Relay passwords are consumed during register/login and never saved. Root/device
+keys and rotating access/refresh tokens live in the encrypted key file. Every
+successful refresh replaces the stored refresh token before exposing new access
+authority. An expired/revoked credential, uncertain refresh response or failed
+credential write requires fresh login; restart/“Sync now” does not replay a
+known-consumed refresh token.
+
+By default, a restart returns to **Locked**, while local library use continues.
+An optional deployment-provided `PERGAMON_SYNC_KEY_PASSPHRASE` unlocks the same
+persisted state for unattended startup; it does not bypass a required fresh
+relay login. Keep the database, encrypted key file, blob directory and offline
+recovery material backed up. A plaintext library export is not a key backup.
+Do not run independent background daemons that mutate the same account/keystore
+while reconfiguring its web worker.
+
+For an isolated development instance only:
+
+```sh
+PERGAMON_ADMIN_USER=owner \
+PERGAMON_ADMIN_PASSWORD='<local-operator-password>' \
+PERGAMON_WEB_ORIGIN=http://127.0.0.1:3000 \
+PERGAMON_SYNC_ALLOW_INSECURE_LOOPBACK=true \
+pergamon-server --db-path /path/to/test-library.db
+```
+
+Use HTTPS for all non-loopback web/relay origins, including private LAN servers.
+Never embed credentials in relay URLs, permit credential-bearing redirects,
+disable certificate checks, or add analytics/third-party scripts to recovery pages.
+The local operator explicitly authorizes the destination; this is not a public
+arbitrary-URL proxy.
 
 ## Reverse proxy (TLS)
 

@@ -16,6 +16,32 @@ pub struct HttpAuth {
 }
 
 impl HttpAuth {
+    /// Verify v2 OPAQUE message support without registering an identity or namespace.
+    ///
+    /// # Errors
+    /// Refuses unsupported/unreachable endpoints and malformed protocol responses.
+    pub fn probe(&self) -> Result<()> {
+        use base64::Engine as _;
+        let password = pergamon_crypto::primitives::random_array::<32>()?;
+        let (flow, request) = crate::auth::ClientRegistrationFlow::start(&password)
+            .map_err(|_| SyncError::Protocol("could not prepare auth capability probe".into()))?;
+        let response = self.request("/v2/auth/register/start", Some(&serde_json::json!({
+            "identity_handle": format!("pergamon-probe-{}", uuid::Uuid::new_v4()),
+            "registration_request_b64": base64::engine::general_purpose::STANDARD.encode(request),
+        })), None)?;
+        let encoded = response
+            .get("registration_response_b64")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                SyncError::Protocol("server does not provide the v2 OPAQUE contract".into())
+            })?;
+        let bytes = base64::engine::general_purpose::STANDARD.decode(encoded)?;
+        flow.finish(&password, &bytes).map_err(|_| {
+            SyncError::Protocol("server returned an unsupported OPAQUE response".into())
+        })?;
+        Ok(())
+    }
+
     /// Construct the adapter or session from explicit inputs.
     ///
     /// # Errors
@@ -70,26 +96,45 @@ impl AuthTransport for HttpAuth {
             .send()
             .map_err(|e| SyncError::Transport(e.to_string()))?;
         let status = response.status();
-        if status.is_server_error() || status.as_u16() == 429 {
+        if status.as_u16() == 429 {
+            return Err(crate::http::rate_limit_error(&response));
+        }
+        if status.is_server_error() {
             return Err(SyncError::Transport(format!(
                 "auth server returned {status}"
             )));
         }
         if !status.is_success() {
-            let body: Value = response.json().map_err(|_| {
+            if status.as_u16() == 404 {
+                return Err(SyncError::AuthRefused {
+                    status: 404,
+                    code: "AUTH_PROTOCOL_UNSUPPORTED".into(),
+                });
+            }
+            let body: Value = crate::http::response_json(response, 65_536).map_err(|_| {
                 SyncError::Protocol(format!("invalid auth error response ({status})"))
             })?;
             let code = body
                 .get("code")
                 .and_then(Value::as_str)
                 .ok_or_else(|| SyncError::Protocol("auth refusal has no error code".to_owned()))?;
+            let safe_code = match code {
+                "CONTENT_NAMESPACE_UNAVAILABLE"
+                | "BINDING_IMMUTABLE"
+                | "OPERATION_CONFLICT"
+                | "AUTH_PROTOCOL_UPGRADE_REQUIRED"
+                | "UNAUTHORIZED"
+                | "FORBIDDEN"
+                | "BAD_REQUEST"
+                | "AUTHENTICATION_FAILED"
+                | "NOT_FOUND" => code,
+                _ => "AUTH_REQUEST_REFUSED",
+            };
             return Err(SyncError::AuthRefused {
                 status: status.as_u16(),
-                code: code.to_owned(),
+                code: safe_code.to_owned(),
             });
         }
-        response
-            .json()
-            .map_err(|e| SyncError::Protocol(format!("invalid auth response: {e}")))
+        crate::http::response_json(response, 65_536)
     }
 }

@@ -24,6 +24,76 @@ fn synced_db() -> Database {
     db
 }
 
+struct WalFixture {
+    path: std::path::PathBuf,
+}
+
+impl WalFixture {
+    fn new() -> Self {
+        Self {
+            path: std::env::temp_dir()
+                .join(format!("pergamon-sync-write-{}.db", uuid::Uuid::new_v4())),
+        }
+    }
+}
+
+impl Drop for WalFixture {
+    fn drop(&mut self) {
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let path = format!("{}{suffix}", self.path.display());
+            match std::fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => panic!("WAL fixture cleanup failed: {error}"),
+            }
+        }
+    }
+}
+
+#[test]
+fn local_mutations_remain_queued_during_concurrent_worker_writes() {
+    let fixture = WalFixture::new();
+    let local = Database::open(&fixture.path).unwrap();
+    local
+        .set_sync_identity("account", "device", 0, Some("https://relay.example"))
+        .unwrap();
+    let worker = Database::open(&fixture.path).unwrap();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let worker_barrier = barrier.clone();
+    let writer = std::thread::spawn(move || {
+        worker_barrier.wait();
+        for cursor in 1..=2_000 {
+            worker.set_sync_cursor(cursor).unwrap();
+        }
+    });
+    barrier.wait();
+    let mut failures = Vec::new();
+    for sequence in 1..=300 {
+        if let Err(error) = local.emit_change(
+            EntityType::Document,
+            "document",
+            Op::Upsert,
+            fields(&[
+                ("title", json!("Concurrent edit")),
+                ("status", json!("archived")),
+            ]),
+            Vec::new(),
+            sequence,
+        ) {
+            failures.push(error.to_string());
+        }
+    }
+    writer.join().unwrap();
+    assert!(
+        failures.is_empty(),
+        "{} local changes failed during worker writes; first error: {:?}",
+        failures.len(),
+        failures.first(),
+    );
+    assert_eq!(local.pending_outbox_count().unwrap(), 300);
+    drop(local);
+}
+
 fn fields(pairs: &[(&str, serde_json::Value)]) -> FieldMap {
     let mut m = FieldMap::new();
     for (k, v) in pairs {

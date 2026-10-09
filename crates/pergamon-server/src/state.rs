@@ -22,11 +22,8 @@ pub struct AppState {
     pub http: reqwest::Client,
     /// Optional admin credentials. When `None`, the admin routes are open.
     pub admin_auth: Option<AdminCredentials>,
-    /// Handle to the background remote-sync worker, when enabled.
-    ///
-    /// Present only when the operator configured a sync account and key file.
-    /// Request handlers use it to trigger an out-of-band sync round; `main`
-    /// uses it to stop the worker on shutdown. Wrapped in a mutex so the
-    /// non-`Sync` mpsc sender it holds can live in the shared, `Sync` state.
-    pub sync_control: Option<Arc<std::sync::Mutex<pergamon_sync::SyncControl>>>,
+    /// One owner for protected onboarding, credentials and actual worker lifecycle.
+    pub sync: Option<Arc<crate::onboarding::SyncService>>,
+    /// Scoped operator sessions; absent until the external origin is configured.
+    pub operator: Option<Arc<crate::operator_session::OperatorSessions>>,
 }

@@ -1,0 +1,191 @@
+{% extends "base.html" %}
+{% block title %}Encrypted relay sync - pergamon{% endblock %}
+{% block page %}sync{% endblock %}
+{% block body_attrs %} hx-history="false"{% endblock %}
+{% block content %}
+<main class="app-main sync-page">
+  <header>
+    <h1 tabindex="-1" data-sync-heading>Encrypted relay sync</h1>
+    <p>Optional sync for this library. <a href="/inbox">Continue using your library locally</a>.</p>
+  </header>
+  <p class="sync-warning"><strong>Experimental authentication: NOT EXTERNALLY SECURITY-REVIEWED.</strong>
+    Do not deploy authenticated sync to production until independent review is complete.</p>
+  <p>This trusted web host can read your library and unlocked keys. The separate encrypted relay cannot read content.
+    Password and recovery inputs are processed by this host, not solely in your browser.
+    Logging in to the relay proves account control; it does not recover content keys.</p>
+  <p>Operator authentication protects these sync settings only. Protect the main library with TLS and authentication at your reverse proxy.</p>
+  {% if !error.is_empty() %}
+  <p class="sync-error" role="alert" tabindex="-1">{{ error }}</p>
+  {% endif %}
+  {% include "_sync_status.html" %}
+  {% if !status.unlocked %}
+  <section>
+    <h2>Unlock the local key file</h2>
+    <p>Use its existing password, or choose a strong password when creating a new key file.
+      It is separate from the relay password and is not saved by the web application.</p>
+    <form method="post" action="/admin/sync-remote/action">
+      <input type="hidden" name="_csrf" value="{{ csrf }}" />
+      <input type="hidden" name="revision" value="{{ revision }}" />
+      <label for="unlock">Local key-file password</label>
+      <input id="unlock" name="unlock_passphrase" type="password"
+             autocomplete="{% if status.key_file_exists %}current-password{% else %}new-password{% endif %}" required maxlength="4096" />
+      <button type="submit" name="action" value="unlock">Unlock keys</button>
+    </form>
+    <p>After a restart, sync stays locked until you unlock it. A deployment-provided unlock secret can enable unattended startup.</p>
+  </section>
+  {% else %}
+  {% if phase.is_empty() %}
+  <section>
+    <h2>Add a server</h2>
+    <form method="post" action="/admin/sync-remote/action">
+      <input type="hidden" name="_csrf" value="{{ csrf }}" />
+      <input type="hidden" name="revision" value="{{ revision }}" />
+      <label for="server">Encrypted relay URL</label>
+      <input id="server" name="server" type="url" placeholder="https://sync.example.com" autocomplete="url" required maxlength="4096" />
+      <small>HTTPS is required, including for private LAN servers. No credentials in the URL. A health check alone does not prove v2 authentication support.</small>
+      <fieldset>
+        <legend>What should happen to this library?</legend>
+        <label><input type="radio" name="flow" value="create" required /> Create a new content account from this library</label>
+        <label><input type="radio" name="flow" value="attach" /> Attach existing local account keys without replacing them</label>
+        <label><input type="radio" name="flow" value="join" /> Join an existing remote account on this empty device</label>
+      </fieldset>
+      <button type="submit" name="action" value="select">Use this server</button>
+    </form>
+  </section>
+  {% elif phase == "recovery" %}
+  <section>
+    <h2>Save your recovery material</h2>
+    <p>Recovery has been published, but syncing has not started. Save the real code offline and acknowledge it before attaching.</p>
+    <a href="/admin/sync-remote/recovery" role="button">View and save recovery code</a>
+  </section>
+  {% elif phase == "keys" || phase == "enrollment" %}
+  <section>
+    <h2>Obtain existing content keys</h2>
+    {% match status.binding %}
+    {% when Some with (binding) %}
+    <p>Your new device ID: <code class="sync-identifier">{{ binding.device_id }}</code></p>
+    <p>Content account: <code class="sync-identifier">{{ binding.content_account_id }}</code></p>
+    {% when None %}{% endmatch %}
+    <h3>Recover with existing material</h3>
+    <form method="post" action="/admin/sync-remote/action">
+      <input type="hidden" name="_csrf" value="{{ csrf }}" />
+      <input type="hidden" name="revision" value="{{ revision }}" />
+      <label for="recovery-code">Existing recovery code or package passphrase</label>
+      <input id="recovery-code" name="recovery_code" type="password" autocomplete="off" required maxlength="4096" />
+      <details>
+        <summary>Use an exported key package instead of the relay recovery blob</summary>
+        <label for="key-package">Encrypted key package (standard base64)</label>
+        <textarea id="key-package" name="recovery_package" autocomplete="off" maxlength="32768"></textarea>
+      </details>
+      <button type="submit" name="action" value="recover">Recover existing keys and sync</button>
+    </form>
+    <h3>Enroll through a trusted device</h3>
+    <form method="post" action="/admin/sync-remote/action">
+      <input type="hidden" name="_csrf" value="{{ csrf }}" />
+      <input type="hidden" name="revision" value="{{ revision }}" />
+      <label for="approver">Trusted approver device ID</label>
+      <input id="approver" name="device" required autocomplete="off" maxlength="128" />
+      <button type="submit" name="action" value="enroll" class="secondary">Request enrollment and show SAS</button>
+    </form>
+    {% if !status.sas.is_empty() %}
+    <p>Compare this SAS on both real devices: <strong class="sync-identifier">{{ status.sas }}</strong></p>
+    <p>Selected peer: <code class="sync-identifier">{{ status.sas_device }}</code></p>
+    <form method="post" action="/admin/sync-remote/action">
+      <input type="hidden" name="_csrf" value="{{ csrf }}" />
+      <input type="hidden" name="revision" value="{{ revision }}" />
+      <label for="join-sas">SAS verified on the trusted device</label>
+      <input id="join-sas" name="expect_sas" required autocomplete="off" maxlength="128" />
+      <button type="submit" name="action" value="accept">Check approval, accept keys and sync</button>
+    </form>
+    {% endif %}
+  </section>
+  {% elif phase == "ready" || phase == "active" %}
+  <section>
+    <h2>Attach and sync</h2>
+    <form method="post" action="/admin/sync-remote/action">
+      <input type="hidden" name="_csrf" value="{{ csrf }}" />
+      <input type="hidden" name="revision" value="{{ revision }}" />
+      <button type="submit" name="action" value="start">Start or restart verified sync</button>
+    </form>
+  </section>
+  <details>
+    <summary>Sign in again without replacing keys or adopting another library</summary>
+    <form method="post" action="/admin/sync-remote/action">
+      <input type="hidden" name="_csrf" value="{{ csrf }}" />
+      <input type="hidden" name="revision" value="{{ revision }}" />
+      <label for="renew-identity">Relay identity</label>
+      <input id="renew-identity" name="identity" autocomplete="username" required
+             {% match status.setup %}{% when Some with (setup) %}value="{{ setup.identity_handle }}"{% when None %}{% endmatch %} />
+      <label for="renew-password">Relay password</label>
+      <input id="renew-password" name="password" type="password" autocomplete="current-password" required maxlength="4096" />
+      <button type="submit" name="action" value="renew">Sign in and resume this account</button>
+    </form>
+  </details>
+  <details>
+    <summary>Approve another device with out-of-band SAS verification</summary>
+    <form method="post" action="/admin/sync-remote/action">
+      <input type="hidden" name="_csrf" value="{{ csrf }}" />
+      <input type="hidden" name="revision" value="{{ revision }}" />
+      <label for="new-device">New device ID</label>
+      <input id="new-device" name="device" required autocomplete="off" maxlength="128" />
+      <button type="submit" name="action" value="sas" class="secondary">Show SAS for this device</button>
+    </form>
+    {% if !status.sas.is_empty() %}
+    <p>Peer <code class="sync-identifier">{{ status.sas_device }}</code>: <strong>{{ status.sas }}</strong></p>
+    <form method="post" action="/admin/sync-remote/action">
+      <input type="hidden" name="_csrf" value="{{ csrf }}" />
+      <input type="hidden" name="revision" value="{{ revision }}" />
+      <input type="hidden" name="device" value="{{ status.sas_device }}" />
+      <label for="approve-sas">SAS verified on the new device</label>
+      <input id="approve-sas" name="expect_sas" required autocomplete="off" maxlength="128" />
+      <button type="submit" name="action" value="approve">Approve this verified device</button>
+    </form>
+    {% endif %}
+  </details>
+  {% else %}
+  <section>
+    <h2>Create a relay login or log in</h2>
+    {% match status.setup %}
+    {% when Some with (setup) %}
+    <p>Server: <code class="sync-identifier">{{ setup.relay_url }}</code>. Content flow: <strong>{{ setup.flow }}</strong>.</p>
+    <form method="post" action="/admin/sync-remote/action">
+      <input type="hidden" name="_csrf" value="{{ csrf }}" />
+      <input type="hidden" name="revision" value="{{ revision }}" />
+      <label for="identity">Relay identity (email is not required)</label>
+      <input id="identity" name="identity" value="{{ setup.identity_handle }}" autocomplete="username" required maxlength="4096" />
+      <label><input type="checkbox" name="register" value="yes" data-relay-register {% if setup.flow == "create" %}checked{% endif %} /> Create this relay login before authenticating</label>
+      <label for="relay-password">Relay password</label>
+      <input id="relay-password" name="password" type="password" data-relay-password
+             autocomplete="{% if setup.flow == "create" %}new-password{% else %}current-password{% endif %}" required maxlength="4096" />
+      <small>Choose a long unique password. This does not derive or recover your random content key.</small>
+      {% if setup.flow == "create" %}
+      <label><input type="checkbox" name="confirm_create" value="yes" required /> This local library will become a new account, not merge with one on another device.</label>
+      {% endif %}
+      <button type="submit" name="action" value="authenticate">Authenticate and prepare this content account</button>
+    </form>
+    {% when None %}{% endmatch %}
+  </section>
+  {% endif %}
+  <form method="post" action="/admin/sync-remote/action" class="sync-cancel">
+    <input type="hidden" name="_csrf" value="{{ csrf }}" />
+    <input type="hidden" name="revision" value="{{ revision }}" />
+    <button type="submit" name="action" value="cancel" class="outline secondary">Pause setup and keep local data</button>
+  </form>
+  {% endif %}
+  {% match status.binding %}
+  {% when Some with (binding) %}
+  <details>
+    <summary>Account and relay identity details</summary>
+    <dl class="sync-summary">
+      <dt>Canonical content account</dt><dd class="sync-identifier">{{ binding.content_account_id }}</dd>
+      <dt>This device</dt><dd class="sync-identifier">{{ binding.device_id }}</dd>
+      <dt>Local binding</dt><dd>{{ binding.state }}</dd>
+      {% match binding.auth_tenant_id %}{% when Some with (tenant) %}
+      <dt>Relay authentication tenant</dt><dd class="sync-identifier">{{ tenant }}</dd>
+      {% when None %}{% endmatch %}
+    </dl>
+    <p>The authentication tenant is not a routing alias for the canonical content account.</p>
+  </details>
+  {% when None %}{% endmatch %}
+</main>
+{% endblock %}

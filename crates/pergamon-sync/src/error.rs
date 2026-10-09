@@ -53,6 +53,20 @@ pub enum SyncError {
         code: String,
     },
 
+    /// A server-directed retry delay, without an untrusted response body.
+    #[error("relay rate limited the request")]
+    RateLimited {
+        /// Retry delay in seconds when supplied by the relay.
+        retry_after_seconds: Option<u64>,
+    },
+
+    /// Rotation was refused or ambiguous; consumed credentials must not be replayed.
+    #[error("relay session requires login: {reason}")]
+    SessionNeedsLogin {
+        /// Nonsecret, stable explanation of why the provider stopped.
+        reason: &'static str,
+    },
+
     /// A pulled event's Ed25519 signature did not verify against its (known)
     /// signing device's public key (ADR-030) — a forged or tampered event. Fatal:
     /// retrying cannot make a bad signature good, and the event must not apply.
@@ -109,8 +123,22 @@ impl SyncError {
     pub const fn is_retryable(&self) -> bool {
         matches!(
             self,
-            Self::Transport(_) | Self::NotFound(_) | Self::UnknownSigner { .. }
+            Self::Transport(_)
+                | Self::NotFound(_)
+                | Self::UnknownSigner { .. }
+                | Self::RateLimited { .. }
         )
+    }
+
+    /// An explicit minimum delay before retrying.
+    #[must_use]
+    pub const fn retry_after_seconds(&self) -> Option<u64> {
+        match self {
+            Self::RateLimited {
+                retry_after_seconds,
+            } => *retry_after_seconds,
+            _ => None,
+        }
     }
 }
 

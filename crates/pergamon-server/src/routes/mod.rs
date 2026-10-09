@@ -18,6 +18,7 @@ pub mod web;
 pub mod web_bookmarks;
 pub mod web_collections;
 pub mod web_search;
+pub mod web_sync;
 pub mod web_tags;
 
 use axum::Router;
@@ -36,13 +37,27 @@ pub fn admin_router(state: AppState) -> Router<AppState> {
         .route("/admin", get(admin::dashboard))
         .route("/admin/sync", post(admin::sync_all))
         .route("/admin/sync/{id}", post(admin::sync_one))
-        .route(
-            "/admin/sync-remote/trigger",
-            post(admin::trigger_remote_sync),
-        )
         .route_layer(axum::middleware::from_fn_with_state(
             state,
             crate::auth::require_admin_auth,
+        ))
+}
+
+/// Sensitive sync settings never inherit diagnostics' optional-auth policy.
+pub fn sync_router(state: AppState) -> Router<AppState> {
+    Router::new()
+        .route("/admin/sync-remote", get(web_sync::settings))
+        .route("/admin/sync-remote/action", post(web_sync::action))
+        .route("/admin/sync-remote/status", get(web_sync::status))
+        .route("/admin/sync-remote/recovery", get(web_sync::recovery))
+        .route(
+            "/admin/sync-remote/recovery/download",
+            post(web_sync::download),
+        )
+        .route("/admin/sync-remote/trigger", post(web_sync::trigger))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state,
+            crate::operator_session::require_operator,
         ))
 }
 

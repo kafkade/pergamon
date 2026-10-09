@@ -140,6 +140,14 @@ impl HttpRelay {
             self.token_provider.as_deref(),
         )
     }
+
+    fn send(
+        &self,
+        request: reqwest::blocking::RequestBuilder,
+        retry: bool,
+    ) -> Result<reqwest::blocking::Response> {
+        crate::http::send_authorized(&self.client, request, self.token_provider.as_deref(), retry)
+    }
 }
 
 /// Decode an opaque base64 relay payload received from the server.
@@ -150,56 +158,44 @@ fn decode(field: &str, value: &str) -> Result<Vec<u8>> {
 }
 
 /// Map a non-success status to a transport error.
-fn ensure_ok(status: StatusCode) -> Result<()> {
-    if status.is_success() {
-        Ok(())
-    } else {
-        Err(SyncError::Transport(format!("server returned {status}")))
-    }
-}
-
 impl RelayTransport for HttpRelay {
     fn device_put(&self, account_id: &str, device_id: &str, record: &[u8]) -> Result<()> {
-        let resp = self
-            .request(
+        let resp = self.send(
+            self.request(
                 reqwest::Method::PUT,
                 &format!("/v1/devices/{account_id}/{device_id}"),
             )?
             .json(&RecordInput {
                 record_b64: STANDARD.encode(record),
-            })
-            .send()
-            .map_err(|e| SyncError::Transport(e.to_string()))?;
-        ensure_ok(resp.status())
+            }),
+            true,
+        )?;
+        crate::http::ensure_response(&resp)
     }
 
     fn device_get(&self, account_id: &str, device_id: &str) -> Result<Option<Vec<u8>>> {
-        let resp = self
-            .request(
+        let resp = self.send(
+            self.request(
                 reqwest::Method::GET,
                 &format!("/v1/devices/{account_id}/{device_id}"),
-            )?
-            .send()
-            .map_err(|e| SyncError::Transport(e.to_string()))?;
+            )?,
+            true,
+        )?;
         if resp.status() == StatusCode::NOT_FOUND {
             return Ok(None);
         }
-        ensure_ok(resp.status())?;
-        let entry: DeviceEntry = resp
-            .json()
-            .map_err(|e| SyncError::Transport(e.to_string()))?;
+        crate::http::ensure_response(&resp)?;
+        let entry: DeviceEntry = crate::http::response_json(resp, 1_048_576)?;
         Ok(Some(decode("record_b64", &entry.record_b64)?))
     }
 
     fn devices_list(&self, account_id: &str) -> Result<Vec<RelayDevice>> {
-        let resp = self
-            .request(reqwest::Method::GET, &format!("/v1/devices/{account_id}"))?
-            .send()
-            .map_err(|e| SyncError::Transport(e.to_string()))?;
-        ensure_ok(resp.status())?;
-        let body: DevicesResponse = resp
-            .json()
-            .map_err(|e| SyncError::Transport(e.to_string()))?;
+        let resp = self.send(
+            self.request(reqwest::Method::GET, &format!("/v1/devices/{account_id}"))?,
+            true,
+        )?;
+        crate::http::ensure_response(&resp)?;
+        let body: DevicesResponse = crate::http::response_json(resp, 1_048_576)?;
         body.devices
             .into_iter()
             .map(|d| {
@@ -212,36 +208,32 @@ impl RelayTransport for HttpRelay {
     }
 
     fn wrap_put(&self, account_id: &str, device_id: &str, bundle: &[u8]) -> Result<u64> {
-        let resp = self
-            .request(
+        let resp = self.send(
+            self.request(
                 reqwest::Method::POST,
                 &format!("/v1/wraps/{account_id}/{device_id}"),
             )?
             .json(&BundleInput {
                 bundle_b64: STANDARD.encode(bundle),
-            })
-            .send()
-            .map_err(|e| SyncError::Transport(e.to_string()))?;
-        ensure_ok(resp.status())?;
-        let ack: BundleAck = resp
-            .json()
-            .map_err(|e| SyncError::Transport(e.to_string()))?;
+            }),
+            false,
+        )?;
+        crate::http::ensure_response(&resp)?;
+        let ack: BundleAck = crate::http::response_json(resp, 1_048_576)?;
         Ok(ack.seq)
     }
 
     fn wraps_list(&self, account_id: &str, device_id: &str, after: u64) -> Result<Vec<RelayWrap>> {
-        let resp = self
-            .request(
+        let resp = self.send(
+            self.request(
                 reqwest::Method::GET,
                 &format!("/v1/wraps/{account_id}/{device_id}"),
             )?
-            .query(&[("after", after.to_string())])
-            .send()
-            .map_err(|e| SyncError::Transport(e.to_string()))?;
-        ensure_ok(resp.status())?;
-        let body: BundlesResponse = resp
-            .json()
-            .map_err(|e| SyncError::Transport(e.to_string()))?;
+            .query(&[("after", after.to_string())]),
+            true,
+        )?;
+        crate::http::ensure_response(&resp)?;
+        let body: BundlesResponse = crate::http::response_json(resp, 1_048_576)?;
         body.bundles
             .into_iter()
             .map(|b| {
@@ -254,36 +246,32 @@ impl RelayTransport for HttpRelay {
     }
 
     fn attestation_append(&self, account_id: &str, attestation: &[u8]) -> Result<u64> {
-        let resp = self
-            .request(
+        let resp = self.send(
+            self.request(
                 reqwest::Method::POST,
                 &format!("/v1/attestations/{account_id}"),
             )?
             .json(&AttestationInput {
                 attestation_b64: STANDARD.encode(attestation),
-            })
-            .send()
-            .map_err(|e| SyncError::Transport(e.to_string()))?;
-        ensure_ok(resp.status())?;
-        let ack: AttestationAck = resp
-            .json()
-            .map_err(|e| SyncError::Transport(e.to_string()))?;
+            }),
+            false,
+        )?;
+        crate::http::ensure_response(&resp)?;
+        let ack: AttestationAck = crate::http::response_json(resp, 1_048_576)?;
         Ok(ack.seq)
     }
 
     fn attestations_list(&self, account_id: &str, after: u64) -> Result<Vec<RelayAttestation>> {
-        let resp = self
-            .request(
+        let resp = self.send(
+            self.request(
                 reqwest::Method::GET,
                 &format!("/v1/attestations/{account_id}"),
             )?
-            .query(&[("after", after.to_string())])
-            .send()
-            .map_err(|e| SyncError::Transport(e.to_string()))?;
-        ensure_ok(resp.status())?;
-        let body: AttestationsResponse = resp
-            .json()
-            .map_err(|e| SyncError::Transport(e.to_string()))?;
+            .query(&[("after", after.to_string())]),
+            true,
+        )?;
+        crate::http::ensure_response(&resp)?;
+        let body: AttestationsResponse = crate::http::response_json(resp, 1_048_576)?;
         body.attestations
             .into_iter()
             .map(|a| {
@@ -296,28 +284,26 @@ impl RelayTransport for HttpRelay {
     }
 
     fn recovery_put(&self, account_id: &str, blob: &[u8]) -> Result<()> {
-        let resp = self
-            .request(reqwest::Method::PUT, &format!("/v1/recovery/{account_id}"))?
-            .json(&RecoveryInput {
-                blob_b64: STANDARD.encode(blob),
-            })
-            .send()
-            .map_err(|e| SyncError::Transport(e.to_string()))?;
-        ensure_ok(resp.status())
+        let resp = self.send(
+            self.request(reqwest::Method::PUT, &format!("/v1/recovery/{account_id}"))?
+                .json(&RecoveryInput {
+                    blob_b64: STANDARD.encode(blob),
+                }),
+            true,
+        )?;
+        crate::http::ensure_response(&resp)
     }
 
     fn recovery_get(&self, account_id: &str) -> Result<Option<Vec<u8>>> {
-        let resp = self
-            .request(reqwest::Method::GET, &format!("/v1/recovery/{account_id}"))?
-            .send()
-            .map_err(|e| SyncError::Transport(e.to_string()))?;
+        let resp = self.send(
+            self.request(reqwest::Method::GET, &format!("/v1/recovery/{account_id}"))?,
+            true,
+        )?;
         if resp.status() == StatusCode::NOT_FOUND {
             return Ok(None);
         }
-        ensure_ok(resp.status())?;
-        let body: RecoveryResponse = resp
-            .json()
-            .map_err(|e| SyncError::Transport(e.to_string()))?;
+        crate::http::ensure_response(&resp)?;
+        let body: RecoveryResponse = crate::http::response_json(resp, 1_048_576)?;
         Ok(Some(decode("blob_b64", &body.blob_b64)?))
     }
 }
